@@ -27,3 +27,24 @@ user-facing instructions described in these references.
 3. Start the stack with `docker compose up`.
 4. Visit `http://localhost:9000` to view the orchestrator dashboard, trigger a
    manual scan, or monitor job progress and metrics.
+
+### GPU access inside Docker Compose
+
+- Install the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/index.html)
+  on the Docker host so the `gpu-ffmpeg` service can reach NVENC devices.
+- The `gpu-ffmpeg` service now adds the `NVIDIA_VISIBLE_DEVICES=all` and
+  `NVIDIA_DRIVER_CAPABILITIES=compute,video,utility` environment variables to
+  make the GPU encoder visible inside the container.
+- Compose also applies cgroup rules (`c 195:* rmw`, `c 508:* rmw`) so the
+  container can open `/dev/nvidia*` without hitting permission errors when the
+  stack is launched from WSL2 or other constrained environments.
+
+### Dependency refresh
+
+- The folder watcher image now tracks Alpine 3.20 so its inotify tooling stays on
+  a supported security baseline.
+- The orchestrator service pins FastAPI 0.115, Pydantic 2.9, and Uvicorn 0.30
+  along with refreshed Jinja2 and HTTPX releases to pick up the newest ASGI
+  features and fixes.
+- GPU workers also track HTTPX 0.27.2 so request handling matches the
+  orchestrator's HTTP stack.

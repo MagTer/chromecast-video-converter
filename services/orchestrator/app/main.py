@@ -52,7 +52,7 @@ class JobStatusPayload(BaseModel):
 
 
 def sanitize_config(config: config_module.QualityConfig) -> Dict[str, Any]:
-    data = config.dict()
+    data = config.model_dump()
     jellyfin_cfg = data.get("jellyfin")
     if jellyfin_cfg:
         jellyfin_cfg["api_key"] = "REDACTED"
@@ -140,10 +140,10 @@ async def next_job() -> JSONResponse:
 @app.post("/api/jobs/{job_id}/status")
 async def update_job_status(job_id: str, payload: JobStatusPayload) -> JSONResponse:
     try:
-        job = await job_manager.update_job(job_id, jobs.JobStatusUpdate(**payload.dict()))
+        job = await job_manager.update_job(job_id, jobs.JobStatusUpdate(**payload.model_dump()))
     except KeyError:
         raise HTTPException(status_code=404, detail="Job not found")
-    return JSONResponse(jsonable_encoder(job.dict()))
+    return JSONResponse(jsonable_encoder(job.model_dump()))
 
 
 @app.post("/api/scan")
@@ -170,4 +170,4 @@ async def handle_event(payload: EventPayload) -> JSONResponse:
         raise HTTPException(status_code=400, detail="Library could not be determined")
     profile = config_source.config.libraries[library_name].profile
     job = await job_manager.add_job(payload.path, library_name, profile)
-    return JSONResponse(jsonable_encoder(job.dict()))
+    return JSONResponse(jsonable_encoder(job.model_dump()))
