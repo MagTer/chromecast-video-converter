@@ -1,0 +1,40 @@
+libraries:
+  movies:
+    root: /watch/movies
+    depth: max
+    profile: longform
+  series:
+    root: /watch/series
+    depth: max
+    profile: episodic
+
+profiles:
+  longform:
+    codec: h264
+    profile: high
+    level: "4.1"
+    resolution: 1280x720
+    max_bitrate: 8M
+    bufsize: 16M
+    audio:
+      codec: aac
+      bitrate: 192k
+  episodic:
+    codec: h264
+    profile: high
+    level: "4.1"
+    resolution: 1280x720
+    max_bitrate: 8M
+    bufsize: 16M
+    audio:
+      codec: aac
+      bitrate: 192k
+
+operational:
+  max_concurrent_jobs: 1
+  gpu_temperature_cutoff: 85
+  max_disk_usage_percent: 90
+
+notifiers:
+  webhook:
+    url: https://hooks.example.com/notify

@@ -1,0 +1,32 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+
+# Docker artifacts
+*.log
+
+# Environment
+.env
+.venv/
+
+# Runtime directories
+logs/
+
+# Media
+media/
+# Runtime directories
+logs/
+
+# IDEs
+.vscode/
+.idea/
+
+# misc
+*.swp
+*.DS_Store

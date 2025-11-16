@@ -1,0 +1,59 @@
+services:
+  orchestrator:
+    build:
+      context: ./services/orchestrator
+      dockerfile: Dockerfile
+    image: chromecast-video-converter/orchestrator:dev
+    ports:
+      - "9000:9000"
+    volumes:
+      - ./config:/app/config:ro
+      - ./media:/watch:ro
+      - ./logs:/app/logs
+    depends_on:
+      - redis
+    environment:
+      - PORT=9000
+      - JOB_QUEUE=redis://redis:6379/0
+      - CONFIG_PATH=/app/config/quality.sample.yaml
+
+  folder-watcher:
+    build:
+      context: ./services/folder-watcher
+      dockerfile: Dockerfile
+    image: chromecast-video-converter/folder-watcher:dev
+    depends_on:
+      - orchestrator
+    volumes:
+      - ./media/movies:/watch/movies:ro
+      - ./media/series:/watch/series:ro
+    environment:
+      - WATCH_ROOTS=movies:/watch/movies,series:/watch/series
+      - ORCHESTRATOR_URL=http://orchestrator:9000
+      - SCAN_INTERVAL=60
+
+  gpu-ffmpeg:
+    build:
+      context: ./services/gpu-ffmpeg
+      dockerfile: Dockerfile
+    image: chromecast-video-converter/gpu-ffmpeg:dev
+    runtime: nvidia
+    device_requests:
+      - driver: nvidia
+        count: 1
+        capabilities: ["gpu"]
+    volumes:
+      - ./media:/media
+      - ./media:/watch
+      - ./config:/app/config:ro
+    environment:
+      - FFMPEG_LOG_LEVEL=info
+      - ORCHESTRATOR_URL=http://orchestrator:9000
+
+  redis:
+    image: redis:7
+    volumes:
+      - redis_data:/data
+
+volumes:
+  redis_data:
