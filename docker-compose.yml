@@ -42,6 +42,9 @@ services:
       - driver: nvidia
         count: 1
         capabilities: ["gpu"]
+    device_cgroup_rules:
+      - "c 195:* rmw"
+      - "c 508:* rmw"
     volumes:
       - ./media:/media
       - ./media:/watch
@@ -49,6 +52,8 @@ services:
     environment:
       - FFMPEG_LOG_LEVEL=info
       - ORCHESTRATOR_URL=http://orchestrator:9000
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,video,utility
 
   redis:
     image: redis:7
