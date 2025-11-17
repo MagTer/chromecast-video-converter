@@ -196,6 +196,11 @@
     .log-message { margin-top: 0.15rem; }
 
     .queue-actions { display: flex; align-items: center; gap: 0.5rem; }
+    .queue-buttons {
+      display: flex;
+      gap: 0.5rem;
+      flex-wrap: wrap;
+    }
     .hint { color: var(--muted); font-size: 0.9rem; }
     .stacked { display: grid; gap: 0.5rem; }
   </style>
@@ -220,13 +225,15 @@
           <p class="subtitle">Control scans, job intake, and worker state.</p>
         </div>
         <div class="queue-actions">
+          <div class="queue-buttons">
+            <button id="scan-movies" type="button">Scan Movies</button>
+            <button id="scan-series" type="button">Scan Series</button>
+            <button id="pause-toggle" type="button">Pause</button>
+          </div>
           <span id="queue-status" class="status-pill status-idle">Loading…</span>
-          <button id="scan" type="button">Manual scan</button>
-          <button id="pause-toggle" type="button">Pause</button>
         </div>
       </header>
       <p id="scan-result" class="hint"></p>
-      <p class="hint" id="queue-hint"></p>
       <div class="panel">
         <header>
           <div>
@@ -340,7 +347,6 @@
     const scanResult = document.querySelector("#scan-result");
     const queueStatus = document.querySelector("#queue-status");
     const pauseToggle = document.querySelector("#pause-toggle");
-    const queueHint = document.querySelector("#queue-hint");
     const logList = document.querySelector("#log-list");
     const logCategory = document.querySelector("#log-category");
     const logLevel = document.querySelector("#log-level");
@@ -420,18 +426,31 @@
       });
     }
 
+    async function enqueueLibraryScan(library) {
+      scanResult.textContent = `Enqueuing ${library} scan...`;
+      const response = await fetch("/api/scan", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ library }),
+      });
+      const result = await response.json();
+      if (response.ok) {
+        scanResult.textContent = `Scan scheduled for: ${result.scheduled.join(", ")}`;
+      } else {
+        scanResult.textContent = `Scan failed: ${result.detail || "Unknown error"}`;
+      }
+    }
+
     async function refreshQueueState() {
       const response = await fetch("/api/queue/state");
       const state = await response.json();
       if (state.paused) {
         queueStatus.textContent = "Paused";
         queueStatus.className = "status-pill status-paused";
-        queueHint.textContent = state.reason || "Queue paused";
         pauseToggle.textContent = "Resume";
       } else {
         queueStatus.textContent = "Running";
         queueStatus.className = "status-pill status-running";
-        queueHint.textContent = "Worker active";
         pauseToggle.textContent = "Pause";
       }
     }
@@ -475,45 +494,19 @@
       }
     }
 
-    function chooseLibrary() {
-      const libraries = Object.keys(configCache?.libraries || {});
-      if (!libraries.length) return null;
-      if (libraries.length === 1) return libraries[0];
-      const choice = prompt(
-        `Which library should be scanned? Available: ${libraries.join(", ")}`,
-        libraries[0],
-      );
-      if (!choice) return null;
-      return libraries.includes(choice) ? choice : null;
-    }
-
-    document.querySelector("#scan").addEventListener("click", async () => {
-      const library = chooseLibrary();
-      if (!library) {
-        scanResult.textContent = "Scan cancelled or library unavailable.";
-        return;
-      }
-      scanResult.textContent = "Enqueuing scan...";
-      const response = await fetch("/api/scan", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ library }),
-      });
-      const result = await response.json();
-      if (response.ok) {
-        scanResult.textContent = `Scan scheduled for: ${result.scheduled.join(", ")}`;
-      } else {
-        scanResult.textContent = `Scan failed: ${result.detail || "Unknown error"}`;
-      }
-    });
+    document
+      .querySelector("#scan-movies")
+      .addEventListener("click", () => enqueueLibraryScan("movies"));
+    document
+      .querySelector("#scan-series")
+      .addEventListener("click", () => enqueueLibraryScan("series"));
 
     pauseToggle.addEventListener("click", async () => {
       const paused = pauseToggle.textContent === "Resume";
       if (paused) {
         await fetch("/api/queue/resume", { method: "POST" });
       } else {
-        const reason =
-          prompt("Reason for pausing? (optional)", queueHint.textContent || "") || "";
+        const reason = prompt("Reason for pausing? (optional)", "") || "";
         await fetch("/api/queue/pause", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
