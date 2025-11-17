@@ -185,9 +185,18 @@ async def update_encoding(payload: EncodingUpdatePayload) -> JSONResponse:
 
 
 @app.get("/api/logs")
-async def list_logs(level: Optional[str] = None, query: Optional[str] = None) -> JSONResponse:
-    entries = LOG_HANDLER.list_entries(level=level, query=query, limit=200)
+async def list_logs(
+    level: Optional[str] = None,
+    query: Optional[str] = None,
+    logger: Optional[str] = None,
+) -> JSONResponse:
+    entries = LOG_HANDLER.list_entries(level=level, query=query, logger_name=logger, limit=200)
     return JSONResponse(entries)
+
+
+@app.get("/api/logs/categories")
+async def list_log_categories() -> JSONResponse:
+    return JSONResponse(LOG_HANDLER.list_categories())
 
 
 @app.get("/api/jobs")
