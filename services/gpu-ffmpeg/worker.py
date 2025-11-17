@@ -266,10 +266,7 @@ def _build_ffmpeg_command(
     level = profile.get("level", "4.1")
     max_fps = int(profile.get("max_fps", 30) or 30)
     preset = str(profile.get("preset", "p5"))
-    rc_mode = str(profile.get("rc", "vbr_hq")).lower()
-    multipass = profile.get("multipass")
-    if multipass is None and rc_mode in {"vbr_hq", "cbr_hq"}:
-        multipass = "fullres"
+    rc_mode = str(profile.get("rc", "vbr_hq"))
     cq = str(profile.get("cq", 18))
     audio_cfg = profile.get("audio", {})
     audio_codec = audio_cfg.get("codec", "aac")
@@ -298,36 +295,30 @@ def _build_ffmpeg_command(
         "h264_nvenc",
         "-rc",
         rc_mode,
+        "-preset",
+        preset,
+        "-profile:v",
+        "high",
+        "-level",
+        level,
+        "-cq",
+        cq,
+        "-maxrate",
+        maxrate,
+        "-bufsize",
+        bufsize,
+        "-movflags",
+        "+faststart",
+        "-c:a",
+        audio_codec,
+        "-b:a",
+        audio_bitrate,
+        "-ac",
+        str(audio_channels),
+        "-progress",
+        "pipe:1",
+        str(target),
     ]
-    if multipass:
-        command.extend(["-multipass", str(multipass)])
-    command.extend(
-        [
-            "-preset",
-            preset,
-            "-profile:v",
-            "high",
-            "-level",
-            level,
-            "-cq",
-            cq,
-            "-maxrate",
-            maxrate,
-            "-bufsize",
-            bufsize,
-            "-movflags",
-            "+faststart",
-            "-c:a",
-            audio_codec,
-            "-b:a",
-            audio_bitrate,
-            "-ac",
-            str(audio_channels),
-            "-progress",
-            "pipe:1",
-            str(target),
-        ]
-    )
     return command
 
 

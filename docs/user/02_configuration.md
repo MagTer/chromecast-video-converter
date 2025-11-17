@@ -13,7 +13,6 @@ The Compose stack now mounts `./config` into both the orchestrator and GPU worke
 
 - The orchestrator dashboard & API accept JSON/YAML that controls library names, profiles, bitrates, and Jellyfin integration. Those fields are surfaced through the GUI so operators can tune quality and automation; they do not change the host path mappings.
 - Encoding controls are provided as dropdowns tuned for Chromecast Gen 2/3: NVENC presets (p1–p7), rate control modes (VBR HQ, VBR, CBR), CQ targets, max bitrates/buffers, and the 24–30 fps cap. Audio is always transcoded to AAC stereo (2 channels) with selectable bitrates, and all source tracks are preserved.
-- When VBR HQ or CBR HQ is selected with the p1–p7 presets, the GPU worker automatically adds NVENC full-resolution multipass so FFmpeg accepts the rate control mode without error. No manual override is needed in the config.
 - When a GUI change adds a new library, ensure its `root` matches one of the existing mount points (e.g., `root: /media/movies`), otherwise the files will not be reachable.
 - Jellyfin integration is optional; omit the `jellyfin` section from `config/settings.yaml` (as shown in `config/settings.yaml.template`) whenever no server is reachable, and the orchestrator will quietly skip those refresh tasks.
 - Log retention is also editable in the GUI. The `logging.retention_days` key in `config/settings.yaml` (default: `7`) controls how long centralized logs from every container stay on disk. The Configuration page displays current disk usage for the log database mounted at `./logs`.
