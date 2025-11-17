@@ -6,8 +6,21 @@ WATCH_ROOTS="${WATCH_ROOTS:-}"
 ORCHESTRATOR_URL="${ORCHESTRATOR_URL:-http://localhost:9000}"
 SCAN_INTERVAL="${SCAN_INTERVAL:-60}"
 
+log() {
+  local level="$1" message="$2"
+  echo "$(date -Iseconds) [${level}] ${message}"
+}
+
+log_info() {
+  log "INFO" "$1"
+}
+
+log_warn() {
+  log "WARN" "$1"
+}
+
 if [[ -z "${WATCH_ROOTS}" ]]; then
-  echo "WATCH_ROOTS is required."
+  log_warn "WATCH_ROOTS is required."
   exit 1
 fi
 
@@ -18,8 +31,8 @@ for entry in "${RAW_ENTRIES[@]}"; do
   ENTRIES+=("${entry}")
 done
 
-echo "Folder watcher starting. Monitoring roots: ${WATCH_ROOTS}"
-echo "Reporting to orchestrator at ${ORCHESTRATOR_URL}"
+log_info "Folder watcher starting. Monitoring roots: ${WATCH_ROOTS}"
+log_info "Reporting to orchestrator at ${ORCHESTRATOR_URL}"
 
 while true; do
   for entry in "${ENTRIES[@]}"; do
@@ -29,11 +42,11 @@ while true; do
       continue
     fi
     if [[ ! -d "${path}" ]]; then
-      echo "Root ${path} not available yet."
+      log_warn "Root ${path} not available yet."
       continue
     fi
 
-    echo "Requesting scan for ${label} (${path})"
+    log_info "Requesting scan for ${label} (${path})"
     curl -sSf -X POST "${ORCHESTRATOR_URL}/api/scan" \
       -H "Content-Type: application/json" \
       -d "{\"library\":\"${label}\",\"root\":\"${path}\"}" || true

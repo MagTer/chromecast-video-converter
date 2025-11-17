@@ -269,6 +269,9 @@
           <p class="subtitle">Inspect worker and orchestrator output.</p>
         </div>
         <div style="display:flex; gap:0.5rem; align-items:center;">
+          <select id="log-category">
+            <option value="">All categories</option>
+          </select>
           <select id="log-level">
             <option value="">All levels</option>
             <option>INFO</option>
@@ -354,6 +357,7 @@
     const pauseToggle = document.querySelector("#pause-toggle");
     const queueHint = document.querySelector("#queue-hint");
     const logList = document.querySelector("#log-list");
+    const logCategory = document.querySelector("#log-category");
     const logLevel = document.querySelector("#log-level");
     const logQuery = document.querySelector("#log-query");
     const configResult = document.querySelector("#config-result");
@@ -456,6 +460,7 @@
 
     async function fetchLogs() {
       const params = new URLSearchParams();
+      if (logCategory.value) params.set("logger", logCategory.value);
       if (logLevel.value) params.set("level", logLevel.value);
       if (logQuery.value) params.set("query", logQuery.value);
       const response = await fetch(`/api/logs?${params.toString()}`);
@@ -470,6 +475,26 @@
         `;
         logList.appendChild(container);
       });
+    }
+
+    async function fetchLogCategories() {
+      const response = await fetch("/api/logs/categories");
+      const categories = await response.json();
+      const existingSelection = logCategory.value;
+      logCategory.innerHTML = "";
+      const all = document.createElement("option");
+      all.value = "";
+      all.textContent = "All categories";
+      logCategory.appendChild(all);
+      categories.forEach((name) => {
+        const option = document.createElement("option");
+        option.value = name;
+        option.textContent = name;
+        logCategory.appendChild(option);
+      });
+      if (existingSelection && categories.includes(existingSelection)) {
+        logCategory.value = existingSelection;
+      }
     }
 
     document.querySelector("#scan").addEventListener("click", async () => {
@@ -499,6 +524,7 @@
     });
 
     document.querySelector("#refresh-logs").addEventListener("click", fetchLogs);
+    logCategory.addEventListener("change", fetchLogs);
 
     document.querySelector("#profile-select").addEventListener("change", (event) => {
       loadProfile(event.target.value);
@@ -534,12 +560,14 @@
 
     fetchConfig();
     fetchJobs();
+    fetchLogCategories();
     fetchLogs();
     refreshQueueState();
     const initialPage = window.location.hash.replace("#", "") || "queue";
     switchPage(initialPage);
     setInterval(fetchJobs, 5000);
     setInterval(fetchLogs, 6000);
+    setInterval(fetchLogCategories, 15000);
     setInterval(refreshQueueState, 7000);
   </script>
 </body>

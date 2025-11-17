@@ -9,10 +9,12 @@ from pathlib import Path
 import httpx
 import yaml
 
+LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
+
 
 def configure_logging() -> logging.Logger:
     logging.basicConfig(
-        level=logging.INFO,
+        level=logging.getLevelName(LOG_LEVEL),
         format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
     )
     return logging.getLogger("gpu-ffmpeg.worker")
@@ -33,6 +35,14 @@ try:
 except FileNotFoundError:
     _CONFIG = {}
 PROFILES = _CONFIG.get("profiles", {})
+if _CONFIG:
+    LOGGER.info(
+        "Loaded quality config from %s (%s profiles available)",
+        CONFIG_PATH,
+        len(PROFILES),
+    )
+else:
+    LOGGER.warning("No quality config present at %s; using defaults", CONFIG_PATH)
 FFPROBE_CMD = [
     "ffprobe",
     "-v",
@@ -94,10 +104,12 @@ async def _probe_duration(source: Path) -> float:
     )
     stdout, _ = await proc.communicate()
     if proc.returncode != 0:
+        LOGGER.warning("ffprobe failed for %s with exit code %s", source, proc.returncode)
         return 0.0
     try:
         return float(stdout.decode().strip())
     except ValueError:
+        LOGGER.debug("Unable to parse duration from ffprobe output for %s", source)
         return 0.0
 
 
@@ -305,6 +317,8 @@ async def process_job(client: httpx.AsyncClient, job: dict) -> None:
         await update_job_status(client, job_id, "failed", 0, message)
         return
     duration = await _probe_duration(playback_target)
+    if duration == 0:
+        LOGGER.warning("Duration probe for %s returned 0 seconds", playback_target)
     output_path = _build_output_path(playback_target)
     encoding = job.get("encoding") or PROFILES.get(job["profile"], {})
     if not encoding:
@@ -345,10 +359,17 @@ async def process_job(client: httpx.AsyncClient, job: dict) -> None:
 
 
 async def main() -> None:
+    LOGGER.info(
+        "GPU worker starting; polling %s every %ss (log level %s)",
+        ORCHESTRATOR_URL,
+        POLL_INTERVAL,
+        LOG_LEVEL,
+    )
     async with httpx.AsyncClient(base_url=ORCHESTRATOR_URL, timeout=30.0) as client:
         while True:
             job = await claim_job(client)
             if not job:
+                LOGGER.debug("No job available; sleeping for %ss", POLL_INTERVAL)
                 await asyncio.sleep(POLL_INTERVAL)
                 continue
             try:

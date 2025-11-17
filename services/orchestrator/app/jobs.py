@@ -87,9 +87,17 @@ class JobManager:
         async with self._lock:
             for job in self._jobs.values():
                 if job.path == path and job.status != JobStatus.FAILED:
+                    self._logger.debug("Job already tracked for %s", path)
                     return job
             job = Job(path=path, library=library, profile=profile, encoding=encoding)
             self._jobs[job.id] = job
+            self._logger.info(
+                "Queued job %s for %s (library=%s, profile=%s)",
+                job.id[:8],
+                path,
+                library,
+                profile,
+            )
             return job
 
     async def list_jobs(self) -> List[Job]:
@@ -104,6 +112,12 @@ class JobManager:
                 if job.status == JobStatus.PENDING:
                     job.status = JobStatus.RUNNING
                     job.updated_at = datetime.utcnow()
+                    self._logger.info(
+                        "Handing off job %s to worker (path=%s, library=%s)",
+                        job.id[:8],
+                        job.path,
+                        job.library,
+                    )
                     return job
             return None
 
@@ -115,11 +129,13 @@ class JobManager:
         async with self._lock:
             self._paused = True
             self._pause_reason = reason or "Paused via API"
+            self._logger.warning("Job queue paused: %s", self._pause_reason)
 
     async def resume(self) -> None:
         async with self._lock:
             self._paused = False
             self._pause_reason = None
+            self._logger.info("Job queue resumed")
 
     async def update_job(self, job_id: str, update: JobStatusUpdate) -> Job:
         async with self._lock:
@@ -132,6 +148,13 @@ class JobManager:
             if update.message:
                 job.message = update.message
             job.updated_at = datetime.utcnow()
+            self._logger.debug(
+                "Job %s updated: status=%s progress=%s message=%s",
+                job_id[:8],
+                job.status,
+                job.progress,
+                job.message,
+            )
             return job
 
     async def scan_directory(
@@ -155,4 +178,10 @@ class JobManager:
                 continue
             job = await self.add_job(str(entry), library, profile, encoding=encoding)
             jobs_added.append(job)
+        self._logger.info(
+            "Scan complete for %s: %s jobs queued (root=%s)",
+            library,
+            len(jobs_added),
+            root_path,
+        )
         return jobs_added
