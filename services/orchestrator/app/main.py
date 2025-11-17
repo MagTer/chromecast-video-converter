@@ -83,8 +83,12 @@ class EncodingUpdatePayload(BaseModel):
     profile: str
     level: str
     resolution: str
+    max_fps: int = Field(default=30, gt=0, le=30)
     max_bitrate: str
     bufsize: str
+    preset: str
+    cq: int = Field(ge=0, le=30)
+    rc: str
     audio: config_module.AudioProfile
 
 
@@ -193,8 +197,12 @@ async def update_encoding(payload: EncodingUpdatePayload) -> JSONResponse:
                 "profile": payload.profile,
                 "level": payload.level,
                 "resolution": payload.resolution,
+                "max_fps": payload.max_fps,
                 "max_bitrate": payload.max_bitrate,
                 "bufsize": payload.bufsize,
+                "preset": payload.preset,
+                "cq": payload.cq,
+                "rc": payload.rc,
                 "audio": payload.audio.model_dump(),
             },
         )

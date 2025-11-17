@@ -321,16 +321,77 @@
               </select>
             </label>
             <label>
+              Max FPS
+              <select id="profile-maxfps">
+                <option value="24">24</option>
+                <option value="25">25</option>
+                <option value="30">30</option>
+              </select>
+            </label>
+            <label>
+              NVENC preset
+              <select id="profile-preset">
+                <option value="p1">p1 (slowest)</option>
+                <option value="p2">p2</option>
+                <option value="p3">p3</option>
+                <option value="p4">p4</option>
+                <option value="p5">p5</option>
+                <option value="p6">p6</option>
+                <option value="p7">p7 (fastest)</option>
+              </select>
+            </label>
+            <label>
+              Rate control
+              <select id="profile-rc">
+                <option value="vbr_hq">VBR HQ (recommended)</option>
+                <option value="vbr">VBR</option>
+                <option value="cbr">CBR</option>
+              </select>
+            </label>
+            <label>
+              Constant quality (CQ)
+              <select id="profile-cq">
+                <option value="18">18</option>
+                <option value="20">20</option>
+                <option value="22">22</option>
+                <option value="24">24</option>
+                <option value="26">26</option>
+                <option value="28">28</option>
+              </select>
+            </label>
+            <label>
               Max bitrate (<=12M)
-              <input id="profile-maxrate" placeholder="8M" />
+              <select id="profile-maxrate">
+                <option value="6M">6M</option>
+                <option value="8M">8M</option>
+                <option value="10M">10M</option>
+                <option value="12M">12M</option>
+              </select>
             </label>
             <label>
               Buffer size (<=24M)
-              <input id="profile-bufsize" placeholder="16M" />
+              <select id="profile-bufsize">
+                <option value="12M">12M</option>
+                <option value="16M">16M</option>
+                <option value="20M">20M</option>
+                <option value="24M">24M</option>
+              </select>
             </label>
             <label>
               Audio bitrate (<=512k)
-              <input id="profile-audio-bitrate" placeholder="192k" />
+              <select id="profile-audio-bitrate">
+                <option value="128k">128k</option>
+                <option value="160k">160k</option>
+                <option value="192k">192k</option>
+                <option value="256k">256k</option>
+                <option value="320k">320k</option>
+              </select>
+            </label>
+            <label>
+              Audio channels
+              <select id="profile-audio-channels">
+                <option value="2">Stereo (2)</option>
+              </select>
             </label>
           </div>
           <div style="margin-top:1rem; display:flex; gap:0.5rem; align-items:center;">
@@ -383,6 +444,19 @@
 
     let configCache = null;
 
+    function ensureOption(select, value, label) {
+      if (value === undefined || value === null) return;
+      const stringValue = String(value);
+      const exists = Array.from(select.options).some((option) => option.value === stringValue);
+      if (!exists) {
+        const option = document.createElement("option");
+        option.value = stringValue;
+        option.textContent = label || stringValue;
+        select.appendChild(option);
+      }
+      select.value = stringValue;
+    }
+
     function switchPage(pageName) {
       pages.forEach((page) => {
         page.classList.toggle("active", page.dataset.page === pageName);
@@ -429,12 +503,17 @@
       if (!configCache) return;
       const profile = configCache.profiles[name];
       document.querySelector("#profile-select").value = name;
-      document.querySelector("#profile-tier").value = profile.profile;
-      document.querySelector("#profile-level").value = profile.level;
-      document.querySelector("#profile-resolution").value = profile.resolution;
-      document.querySelector("#profile-maxrate").value = profile.max_bitrate;
-      document.querySelector("#profile-bufsize").value = profile.bufsize;
-      document.querySelector("#profile-audio-bitrate").value = profile.audio.bitrate;
+      ensureOption(document.querySelector("#profile-tier"), profile.profile);
+      ensureOption(document.querySelector("#profile-level"), profile.level);
+      ensureOption(document.querySelector("#profile-resolution"), profile.resolution);
+      ensureOption(document.querySelector("#profile-maxfps"), profile.max_fps ?? 30);
+      ensureOption(document.querySelector("#profile-preset"), profile.preset ?? "p5");
+      ensureOption(document.querySelector("#profile-rc"), profile.rc ?? "vbr_hq");
+      ensureOption(document.querySelector("#profile-cq"), profile.cq ?? 18);
+      ensureOption(document.querySelector("#profile-maxrate"), profile.max_bitrate);
+      ensureOption(document.querySelector("#profile-bufsize"), profile.bufsize);
+      ensureOption(document.querySelector("#profile-audio-bitrate"), profile.audio.bitrate);
+      ensureOption(document.querySelector("#profile-audio-channels"), profile.audio.channels ?? 2, "Stereo (2)");
     }
 
     async function fetchJobs() {
@@ -599,9 +678,17 @@
         profile: document.querySelector("#profile-tier").value,
         level: document.querySelector("#profile-level").value,
         resolution: document.querySelector("#profile-resolution").value,
+        max_fps: Number(document.querySelector("#profile-maxfps").value || "30"),
         max_bitrate: document.querySelector("#profile-maxrate").value,
         bufsize: document.querySelector("#profile-bufsize").value,
-        audio: { codec: "aac", bitrate: document.querySelector("#profile-audio-bitrate").value },
+        preset: document.querySelector("#profile-preset").value,
+        rc: document.querySelector("#profile-rc").value,
+        cq: Number(document.querySelector("#profile-cq").value || "18"),
+        audio: {
+          codec: "aac",
+          bitrate: document.querySelector("#profile-audio-bitrate").value,
+          channels: Number(document.querySelector("#profile-audio-channels").value || "2"),
+        },
       };
       configResult.textContent = "Saving...";
       const response = await fetch("/api/config/encoding", {

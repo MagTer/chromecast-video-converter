@@ -264,10 +264,18 @@ def _build_ffmpeg_command(
     maxrate = profile.get("max_bitrate", "8M")
     bufsize = profile.get("bufsize", "16M")
     level = profile.get("level", "4.1")
+    max_fps = int(profile.get("max_fps", 30) or 30)
+    preset = str(profile.get("preset", "p5"))
+    rc_mode = str(profile.get("rc", "vbr_hq"))
+    cq = str(profile.get("cq", 18))
     audio_cfg = profile.get("audio", {})
     audio_codec = audio_cfg.get("codec", "aac")
     audio_bitrate = audio_cfg.get("bitrate", "192k")
-    audio_channels = audio_cfg.get("channels", 2)
+    audio_channels = int(audio_cfg.get("channels", 2) or 2)
+    filters = [SCALING_EXPRESSION]
+    if max_fps > 0:
+        filters.append(f"fps={min(max_fps, 30)}")
+    video_filter = ",".join(filters)
     command = [
         "ffmpeg",
         "-y",
@@ -277,18 +285,24 @@ def _build_ffmpeg_command(
         "cuda",
         "-i",
         str(source),
+        "-map",
+        "0:v:0",
+        "-map",
+        "0:a?",
         "-vf",
-        SCALING_EXPRESSION,
+        video_filter,
         "-c:v",
         "h264_nvenc",
+        "-rc",
+        rc_mode,
         "-preset",
-        "p5",
+        preset,
         "-profile:v",
         "high",
         "-level",
         level,
         "-cq",
-        "18",
+        cq,
         "-maxrate",
         maxrate,
         "-bufsize",

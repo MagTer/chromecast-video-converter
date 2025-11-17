@@ -8,7 +8,7 @@ services:
       - "9000:9000"
     volumes:
       - ./services/orchestrator/app:/app/app:ro
-      - ./config:/app/config:ro
+      - ./config:/app/config
       - ./media:/watch:ro
       - ./logs:/app/logs
     depends_on:
@@ -42,7 +42,7 @@ services:
     volumes:
     - ./media:/media
     - ./media:/watch
-    - ./config:/app/config:ro
+    - ./config:/app/config
     environment:
     - FFMPEG_LOG_LEVEL=info
     - ORCHESTRATOR_URL=http://orchestrator:9000

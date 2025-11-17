@@ -14,8 +14,12 @@ profiles:
     profile: high
     level: "4.1"
     resolution: 1280x720
+    max_fps: 30
     max_bitrate: 8M
     bufsize: 16M
+    preset: p5
+    rc: vbr_hq
+    cq: 18
     audio:
       codec: aac
       bitrate: 192k
@@ -25,8 +29,12 @@ profiles:
     profile: high
     level: "4.1"
     resolution: 1280x720
+    max_fps: 30
     max_bitrate: 8M
     bufsize: 16M
+    preset: p5
+    rc: vbr_hq
+    cq: 18
     audio:
       codec: aac
       bitrate: 192k

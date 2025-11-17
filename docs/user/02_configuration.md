@@ -7,9 +7,12 @@
 
 `config/settings.yaml.template` is solely a starter copy that you duplicate when onboarding the stack. The orchestrator and GPU worker read and persist `config/settings.yaml` (the file you edit or the GUI modifies), so leave the template untouched once the stack is configured.
 
+The Compose stack now mounts `./config` into both the orchestrator and GPU worker with write access so GUI changes to encoding presets are flushed back to disk. Keep the directory under version control to track edits.
+
 ## GUI-powered tuning
 
 - The orchestrator dashboard & API accept JSON/YAML that controls library names, profiles, bitrates, and Jellyfin integration. Those fields are surfaced through the GUI so operators can tune quality and automation; they do not change the host path mappings.
+- Encoding controls are provided as dropdowns tuned for Chromecast Gen 2/3: NVENC presets (p1–p7), rate control modes (VBR HQ, VBR, CBR), CQ targets, max bitrates/buffers, and the 24–30 fps cap. Audio is always transcoded to AAC stereo (2 channels) with selectable bitrates, and all source tracks are preserved.
 - When a GUI change adds a new library, ensure its `root` matches one of the existing mount points (e.g., `root: /media/movies`), otherwise the files will not be reachable.
 - Jellyfin integration is optional; omit the `jellyfin` section from `config/settings.yaml` (as shown in `config/settings.yaml.template`) whenever no server is reachable, and the orchestrator will quietly skip those refresh tasks.
 - Log retention is also editable in the GUI. The `logging.retention_days` key in `config/settings.yaml` (default: `7`) controls how long centralized logs from every container stay on disk. The Configuration page displays current disk usage for the log database mounted at `./logs`.

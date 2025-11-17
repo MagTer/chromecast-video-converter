@@ -55,7 +55,9 @@ Alpine watcher feeds file-system events into the system.
   files are queued immediately.
 - **Encoding profiles** – Centralized in `config/settings.yaml` and editable via
   `/api/config/encoding`. Profiles target Chromecast Gen 2/3 constraints (H.264
-  High, level 4.1, 720p, capped bitrate) with AAC stereo audio.
+  High, level 4.1, 720p, capped bitrate) with AAC stereo audio and dropdowns for
+  NVENC presets, CQ targets, and a 30 fps ceiling that keeps every audio track
+  mapped as stereo AAC.
 - **Verification hooks** – After startup, the orchestrator scans configured
   libraries and preloads jobs for anything not already compliant. On success,
   progress is reflected in the dashboard and metrics endpoint.
