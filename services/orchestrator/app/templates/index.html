@@ -53,29 +53,16 @@
       text-decoration: none;
       font-weight: 600;
       border: 1px solid transparent;
-      cursor: pointer;
     }
 
     nav a:hover {
       border-color: var(--accent);
     }
 
-    nav a.active {
-      border-color: var(--accent);
-      background: rgba(37, 99, 235, 0.1);
-    }
-
     main {
       padding: 2rem;
-    }
-
-    .page {
-      display: none;
-      gap: 1.5rem;
-    }
-
-    .page.active {
       display: grid;
+      gap: 1.5rem;
     }
 
     .panel {
@@ -179,14 +166,13 @@
   <nav>
     <h1>Chromecast Converter</h1>
     <ul>
-      <li><a data-page="queue" class="active">Queue management</a></li>
-      <li><a data-page="logs">Logs</a></li>
-      <li><a data-page="config">Configuration</a></li>
+      <li><a href="#queue">Queue management</a></li>
+      <li><a href="#logs">Logs</a></li>
+      <li><a href="#config">Configuration</a></li>
     </ul>
   </nav>
   <main>
-    <section class="page active" data-page="queue">
-      <div class="panel">
+    <section class="panel" id="queue">
       <header>
         <h2>Queue management</h2>
         <span id="queue-status" class="status-pill status-idle">Loading…</span>
@@ -224,11 +210,9 @@
           <tbody id="job-rows"></tbody>
         </table>
       </div>
-      </div>
     </section>
 
-    <section class="page" data-page="logs">
-      <div class="panel">
+    <section class="panel" id="logs">
       <header>
         <h2>Logs</h2>
         <div style="display:flex; gap:0.5rem;">
@@ -243,11 +227,9 @@
         </div>
       </header>
       <div class="log-list" id="log-list"></div>
-      </div>
     </section>
 
-    <section class="page" data-page="config">
-      <div class="panel">
+    <section class="panel" id="config">
       <header>
         <h2>Encoding configuration</h2>
         <p class="hint">Values are constrained to Chromecast Gen 2 capabilities.</p>
@@ -283,13 +265,7 @@
           </label>
           <label>
             Max bitrate (<=12M)
-            <select id="profile-maxrate">
-              <option value="4M">4 Mbps</option>
-              <option value="6M">6 Mbps</option>
-              <option value="8M">8 Mbps</option>
-              <option value="10M">10 Mbps</option>
-              <option value="12M">12 Mbps</option>
-            </select>
+            <input id="profile-maxrate" placeholder="8M" />
           </label>
           <label>
             Buffer size (<=24M)
@@ -305,7 +281,6 @@
           <span id="config-result" class="hint"></span>
         </div>
       </form>
-      </div>
     </section>
   </main>
 
@@ -325,32 +300,6 @@
     const configResult = document.querySelector("#config-result");
 
     let configCache = null;
-
-    function activatePage(name) {
-      pages.forEach((page) => {
-        page.classList.toggle("active", page.dataset.page === name);
-      });
-      navLinks.forEach((link) => {
-        link.classList.toggle("active", link.dataset.page === name);
-      });
-    }
-
-    function initNavigation() {
-      const initial = window.location.hash.replace("#", "") || "queue";
-      activatePage(initial);
-      navLinks.forEach((link) => {
-        link.addEventListener("click", (event) => {
-          event.preventDefault();
-          const page = link.dataset.page;
-          window.location.hash = `#${page}`;
-          activatePage(page);
-        });
-      });
-      window.addEventListener("hashchange", () => {
-        const page = window.location.hash.replace("#", "") || "queue";
-        activatePage(page);
-      });
-    }
 
     async function fetchConfig() {
       const response = await fetch("/api/config");
@@ -383,14 +332,7 @@
       document.querySelector("#profile-tier").value = profile.profile;
       document.querySelector("#profile-level").value = profile.level;
       document.querySelector("#profile-resolution").value = profile.resolution;
-      const maxrateSelect = document.querySelector("#profile-maxrate");
-      if (![...maxrateSelect.options].some((opt) => opt.value === profile.max_bitrate)) {
-        const custom = document.createElement("option");
-        custom.value = profile.max_bitrate;
-        custom.textContent = `${profile.max_bitrate} (custom)`;
-        maxrateSelect.appendChild(custom);
-      }
-      maxrateSelect.value = profile.max_bitrate;
+      document.querySelector("#profile-maxrate").value = profile.max_bitrate;
       document.querySelector("#profile-bufsize").value = profile.bufsize;
       document.querySelector("#profile-audio-bitrate").value = profile.audio.bitrate;
     }
@@ -511,7 +453,6 @@
     fetchJobs();
     fetchLogs();
     refreshQueueState();
-    initNavigation();
     setInterval(fetchJobs, 5000);
     setInterval(fetchLogs, 6000);
     setInterval(refreshQueueState, 7000);
