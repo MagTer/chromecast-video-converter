@@ -9,8 +9,16 @@ from pathlib import Path
 import httpx
 import yaml
 
-logging.basicConfig(level=logging.DEBUG)
-LOGGER = logging.getLogger("gpu-ffmpeg.worker")
+
+def configure_logging() -> logging.Logger:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
+    )
+    return logging.getLogger("gpu-ffmpeg.worker")
+
+
+LOGGER = configure_logging()
 
 ORCHESTRATOR_URL = os.environ.get("ORCHESTRATOR_URL", "http://localhost:9000")
 POLL_INTERVAL = int(os.environ.get("GPU_POLL_INTERVAL", "5"))
@@ -43,6 +51,10 @@ async def claim_job(client: httpx.AsyncClient) -> dict | None:
     except httpx.RequestError as exc:
         LOGGER.error("HTTP error while claiming job: %s", exc)
         return None
+    if response.status_code == 409:
+        detail = response.json()
+        LOGGER.warning("Job queue paused: %s", detail.get("reason") or detail.get("detail"))
+        return None
     if response.status_code == 204:
         return None
     response.raise_for_status()
@@ -59,8 +71,11 @@ async def update_job_status(
     payload = {"status": status, "progress": progress}
     if message:
         payload["message"] = message
-    response = await client.post(f"/api/jobs/{job_id}/status", json=payload)
-    response.raise_for_status()
+    try:
+        response = await client.post(f"/api/jobs/{job_id}/status", json=payload)
+        response.raise_for_status()
+    except httpx.HTTPError as exc:
+        LOGGER.error("Failed to update job %s status: %s", job_id[:8], exc)
 
 
 async def _parse_timecode(code: str) -> float:
@@ -138,8 +153,10 @@ def _build_output_path(source: Path) -> Path:
     return source.parent / f"{source.stem}-chromecast.mp4"
 
 
-def _build_ffmpeg_command(profile_name: str, source: Path, target: Path) -> list[str]:
-    profile = PROFILES.get(profile_name, {})
+def _build_ffmpeg_command(
+    profile_name: str, source: Path, target: Path, encoding: dict | None = None
+) -> list[str]:
+    profile = encoding or PROFILES.get(profile_name, {})
     maxrate = profile.get("max_bitrate", "8M")
     bufsize = profile.get("bufsize", "16M")
     level = profile.get("level", "4.1")
@@ -196,10 +213,6 @@ async def _run_ffmpeg(
     progress_task = asyncio.create_task(
         _monitor_progress(proc.stdout, duration, client, job_id, last_progress)
     )
-
-    progress_task = asyncio.create_task(
-        _monitor_progress(proc.stdout, duration, client, job_id, last_progress)
-    )
     while True:
         line = await proc.stderr.readline()
         if not line:
@@ -231,12 +244,16 @@ async def process_job(client: httpx.AsyncClient, job: dict) -> None:
         return
     duration = await _probe_duration(playback_target)
     output_path = _build_output_path(playback_target)
-    command = _build_ffmpeg_command(job["profile"], playback_target, output_path)
+    encoding = job.get("encoding") or PROFILES.get(job["profile"], {})
+    if not encoding:
+        LOGGER.warning(
+            "No encoding settings supplied for profile %s; using defaults.",
+            job["profile"],
+        )
+    command = _build_ffmpeg_command(job["profile"], playback_target, output_path, encoding)
     return_code = await _run_ffmpeg(command, duration, client, job_id)
     if return_code == 0:
-        await update_job_status(
-            client, job_id, 100, 100, f"Encoding finished to {output_path}"
-        )
+        await update_job_status(client, job_id, 100, 100, f"Encoding finished to {output_path}")
         LOGGER.info("Job %s completed, output: %s", job_id[:8], output_path)
     else:
         message = f"FFmpeg exited with code {return_code}"

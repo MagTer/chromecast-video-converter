@@ -24,9 +24,22 @@ user-facing instructions described in these references.
    host-to-container paths defined in `docker-compose.yml` untouched unless you
    also update the volume mounts there.
 2. Run `docker compose build` (locks in Python dependencies and GPU image).
-3. Start the stack with `docker compose up`.
+3. Start the stack with `docker compose up`. The orchestrator container bind-
+   mounts `./services/orchestrator/app`, so refreshing the dashboard after a
+   `git pull` picks up new HTML without having to rebuild the image.
 4. Visit `http://localhost:9000` to view the orchestrator dashboard, trigger a
    manual scan, or monitor job progress and metrics.
+
+### Dashboard features
+
+- A left-hand navigation groups queue controls, configuration, and live logs.
+- Logs can be filtered by level or search text to quickly isolate GPU errors or
+  scan activity.
+- Queue management now allows pausing/resuming workers when storage or thermal
+  limits are hit.
+- Encoding profiles can be edited in-browser and are validated against
+  Chromecast Gen 2 constraints (H.264 Baseline/Main/High, level <= 4.1,
+  resolution up to 1080p, and capped bitrates).
 
 ### GPU access inside Docker Compose
 

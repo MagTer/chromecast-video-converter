@@ -4,101 +4,358 @@
   <meta charset="UTF-8" />
   <title>Chromecast Video Converter</title>
   <style>
-    body {
-      font-family: system-ui, sans-serif;
-      margin: 2rem;
-      color: #f5f5f5;
-      background-color: #0f172a;
+    :root {
+      --bg: #0f172a;
+      --panel: rgba(15, 23, 42, 0.85);
+      --accent: #2563eb;
+      --text: #e5e7eb;
+      --muted: #94a3b8;
     }
 
-    h1 {
-      margin-bottom: 0.5rem;
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      display: grid;
+      grid-template-columns: 240px 1fr;
+      min-height: 100vh;
+      background-color: var(--bg);
+      color: var(--text);
+      font-family: system-ui, sans-serif;
+    }
+
+    nav {
+      background: #0b1220;
+      border-right: 1px solid #1e293b;
+      padding: 1.5rem 1rem;
+    }
+
+    nav h1 {
+      font-size: 1.25rem;
+      margin: 0 0 1rem 0;
+    }
+
+    nav ul {
+      list-style: none;
+      padding: 0;
+      margin: 0;
+      display: grid;
+      gap: 0.5rem;
+    }
+
+    nav a {
+      display: block;
+      padding: 0.6rem 0.75rem;
+      border-radius: 0.5rem;
+      color: var(--text);
+      text-decoration: none;
+      font-weight: 600;
+      border: 1px solid transparent;
+      cursor: pointer;
+    }
+
+    nav a:hover {
+      border-color: var(--accent);
+    }
+
+    nav a.active {
+      border-color: var(--accent);
+      background: rgba(37, 99, 235, 0.1);
+    }
+
+    main {
+      padding: 2rem;
+    }
+
+    .page {
+      display: none;
+      gap: 1.5rem;
+    }
+
+    .page.active {
+      display: grid;
     }
 
     .panel {
-      background: rgba(15, 23, 42, 0.85);
+      background: var(--panel);
       border: 1px solid #1d4ed8;
       border-radius: 0.75rem;
-      padding: 1rem;
-      margin-bottom: 1rem;
+      padding: 1rem 1.25rem;
+    }
+
+    .panel header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 0.75rem;
+    }
+
+    .panel h2 {
+      margin: 0;
+      font-size: 1.1rem;
     }
 
     button {
-      background: #2563eb;
+      background: var(--accent);
       color: white;
       border: none;
       padding: 0.5rem 1rem;
       border-radius: 0.5rem;
       cursor: pointer;
-      font-weight: 600;
+      font-weight: 700;
+    }
+
+    button.secondary {
+      background: transparent;
+      color: var(--text);
+      border: 1px solid #334155;
     }
 
     table {
       width: 100%;
       border-collapse: collapse;
+      color: var(--text);
     }
 
-    th,
-    td {
+    th, td {
       padding: 0.5rem;
       text-align: left;
-      border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+      border-bottom: 1px solid rgba(255, 255, 255, 0.08);
     }
 
-    .status-pending {
-      color: #fcd34d;
+    th {
+      color: var(--muted);
+      font-weight: 600;
     }
 
-    .status-running {
-      color: #34d399;
+    input, select, textarea {
+      background: #0b1220;
+      border: 1px solid #1e293b;
+      border-radius: 0.5rem;
+      color: var(--text);
+      padding: 0.45rem 0.5rem;
+      width: 100%;
     }
 
-    .status-completed {
-      color: #86efac;
+    .grid-two {
+      display: grid;
+      gap: 0.75rem;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
     }
 
-    .status-failed {
-      color: #f87171;
+    .status-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.4rem;
+      padding: 0.25rem 0.65rem;
+      border-radius: 999px;
+      font-weight: 700;
     }
+
+    .status-running { background: rgba(52, 211, 153, 0.2); color: #34d399; }
+    .status-paused { background: rgba(252, 211, 77, 0.2); color: #fcd34d; }
+    .status-idle { background: rgba(148, 163, 184, 0.2); color: #cbd5e1; }
+
+    .log-list {
+      max-height: 260px;
+      overflow-y: auto;
+      font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+      border: 1px solid #1e293b;
+      border-radius: 0.5rem;
+      padding: 0.5rem;
+      background: #0b1220;
+    }
+
+    .log-entry { margin: 0; padding: 0.35rem 0; border-bottom: 1px solid rgba(255,255,255,0.05); }
+    .log-meta { color: var(--muted); font-size: 0.85rem; }
+    .log-message { margin-top: 0.15rem; }
+
+    .hint { color: var(--muted); font-size: 0.9rem; }
   </style>
 </head>
 <body>
-  <h1>Chromecast Video Converter</h1>
-  <p>GPU-only transcoding for Chromecast Gen 2/3.</p>
+  <nav>
+    <h1>Chromecast Converter</h1>
+    <ul>
+      <li><a data-page="queue" class="active">Queue management</a></li>
+      <li><a data-page="logs">Logs</a></li>
+      <li><a data-page="config">Configuration</a></li>
+    </ul>
+  </nav>
+  <main>
+    <section class="page active" data-page="queue">
+      <div class="panel">
+      <header>
+        <h2>Queue management</h2>
+        <span id="queue-status" class="status-pill status-idle">Loading…</span>
+      </header>
+      <div class="grid-two">
+        <div>
+          <label>Manual scan</label>
+          <div style="display:flex; gap:0.5rem; align-items:center; margin-top:0.35rem;">
+            <select id="library-select"></select>
+            <button id="scan" type="button">Trigger scan</button>
+          </div>
+          <p id="scan-result" class="hint"></p>
+        </div>
+        <div>
+          <label>Pause queue</label>
+          <div style="display:flex; gap:0.5rem; margin-top:0.35rem;">
+            <input id="pause-reason" placeholder="Reason (optional)" />
+            <button id="pause-toggle" type="button">Pause</button>
+          </div>
+          <p class="hint" id="queue-hint">Worker can be paused when storage or GPU is constrained.</p>
+        </div>
+      </div>
+      <div style="margin-top:1rem;">
+        <strong>Job queue</strong>
+        <table>
+          <thead>
+            <tr>
+              <th>ID</th>
+              <th>Status</th>
+              <th>Path</th>
+              <th>Profile</th>
+              <th>Progress</th>
+            </tr>
+          </thead>
+          <tbody id="job-rows"></tbody>
+        </table>
+      </div>
+      </div>
+    </section>
 
-  <div class="panel">
-    <div>
-      <strong>Manual scan</strong>
-      <select id="library-select"></select>
-      <button id="scan" type="button">Trigger scan</button>
-    </div>
-    <p id="scan-result"></p>
-  </div>
+    <section class="page" data-page="logs">
+      <div class="panel">
+      <header>
+        <h2>Logs</h2>
+        <div style="display:flex; gap:0.5rem;">
+          <select id="log-level">
+            <option value="">All levels</option>
+            <option>INFO</option>
+            <option>WARNING</option>
+            <option>ERROR</option>
+          </select>
+          <input id="log-query" placeholder="Filter by text" />
+          <button id="refresh-logs" type="button">Filter</button>
+        </div>
+      </header>
+      <div class="log-list" id="log-list"></div>
+      </div>
+    </section>
 
-  <div class="panel">
-    <strong>Job queue</strong>
-    <table>
-      <thead>
-        <tr>
-          <th>ID</th>
-          <th>Status</th>
-          <th>Path</th>
-          <th>Profile</th>
-          <th>Progress</th>
-        </tr>
-      </thead>
-      <tbody id="job-rows"></tbody>
-    </table>
-  </div>
+    <section class="page" data-page="config">
+      <div class="panel">
+      <header>
+        <h2>Encoding configuration</h2>
+        <p class="hint">Values are constrained to Chromecast Gen 2 capabilities.</p>
+      </header>
+      <form id="config-form">
+        <div class="grid-two">
+          <label>
+            Profile
+            <select id="profile-select"></select>
+          </label>
+          <label>
+            H.264 profile
+            <select id="profile-tier">
+              <option value="baseline">Baseline</option>
+              <option value="main">Main</option>
+              <option value="high">High</option>
+            </select>
+          </label>
+          <label>
+            Level
+            <select id="profile-level">
+              <option value="3.1">3.1</option>
+              <option value="4.0">4.0</option>
+              <option value="4.1">4.1</option>
+            </select>
+          </label>
+          <label>
+            Resolution
+            <select id="profile-resolution">
+              <option value="1280x720">1280x720</option>
+              <option value="1920x1080">1920x1080</option>
+            </select>
+          </label>
+          <label>
+            Max bitrate (<=12M)
+            <select id="profile-maxrate">
+              <option value="4M">4 Mbps</option>
+              <option value="6M">6 Mbps</option>
+              <option value="8M">8 Mbps</option>
+              <option value="10M">10 Mbps</option>
+              <option value="12M">12 Mbps</option>
+            </select>
+          </label>
+          <label>
+            Buffer size (<=24M)
+            <input id="profile-bufsize" placeholder="16M" />
+          </label>
+          <label>
+            Audio bitrate (<=512k)
+            <input id="profile-audio-bitrate" placeholder="192k" />
+          </label>
+        </div>
+        <div style="margin-top:1rem; display:flex; gap:0.5rem; align-items:center;">
+          <button type="submit">Save encoding profile</button>
+          <span id="config-result" class="hint"></span>
+        </div>
+      </form>
+      </div>
+    </section>
+  </main>
 
   <script>
+    const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
+    const pages = Array.from(document.querySelectorAll(".page"));
     const jobRows = document.querySelector("#job-rows");
     const librarySelect = document.querySelector("#library-select");
     const scanResult = document.querySelector("#scan-result");
+    const queueStatus = document.querySelector("#queue-status");
+    const pauseReasonInput = document.querySelector("#pause-reason");
+    const pauseToggle = document.querySelector("#pause-toggle");
+    const queueHint = document.querySelector("#queue-hint");
+    const logList = document.querySelector("#log-list");
+    const logLevel = document.querySelector("#log-level");
+    const logQuery = document.querySelector("#log-query");
+    const configResult = document.querySelector("#config-result");
+
+    let configCache = null;
+
+    function activatePage(name) {
+      pages.forEach((page) => {
+        page.classList.toggle("active", page.dataset.page === name);
+      });
+      navLinks.forEach((link) => {
+        link.classList.toggle("active", link.dataset.page === name);
+      });
+    }
+
+    function initNavigation() {
+      const initial = window.location.hash.replace("#", "") || "queue";
+      activatePage(initial);
+      navLinks.forEach((link) => {
+        link.addEventListener("click", (event) => {
+          event.preventDefault();
+          const page = link.dataset.page;
+          window.location.hash = `#${page}`;
+          activatePage(page);
+        });
+      });
+      window.addEventListener("hashchange", () => {
+        const page = window.location.hash.replace("#", "") || "queue";
+        activatePage(page);
+      });
+    }
 
     async function fetchConfig() {
       const response = await fetch("/api/config");
       const config = await response.json();
+      configCache = config;
       librarySelect.innerHTML = "";
       Object.keys(config.libraries).forEach((name) => {
         const option = document.createElement("option");
@@ -106,6 +363,36 @@
         option.textContent = `${name} (${config.libraries[name].root})`;
         librarySelect.appendChild(option);
       });
+      const profileSelect = document.querySelector("#profile-select");
+      profileSelect.innerHTML = "";
+      Object.keys(config.profiles).forEach((name) => {
+        const option = document.createElement("option");
+        option.value = name;
+        option.textContent = name;
+        profileSelect.appendChild(option);
+      });
+      if (profileSelect.value) {
+        loadProfile(profileSelect.value);
+      }
+    }
+
+    function loadProfile(name) {
+      if (!configCache) return;
+      const profile = configCache.profiles[name];
+      document.querySelector("#profile-select").value = name;
+      document.querySelector("#profile-tier").value = profile.profile;
+      document.querySelector("#profile-level").value = profile.level;
+      document.querySelector("#profile-resolution").value = profile.resolution;
+      const maxrateSelect = document.querySelector("#profile-maxrate");
+      if (![...maxrateSelect.options].some((opt) => opt.value === profile.max_bitrate)) {
+        const custom = document.createElement("option");
+        custom.value = profile.max_bitrate;
+        custom.textContent = `${profile.max_bitrate} (custom)`;
+        maxrateSelect.appendChild(custom);
+      }
+      maxrateSelect.value = profile.max_bitrate;
+      document.querySelector("#profile-bufsize").value = profile.bufsize;
+      document.querySelector("#profile-audio-bitrate").value = profile.audio.bitrate;
     }
 
     async function fetchJobs() {
@@ -126,23 +413,108 @@
       });
     }
 
+    async function refreshQueueState() {
+      const response = await fetch("/api/queue/state");
+      const state = await response.json();
+      if (state.paused) {
+        queueStatus.textContent = "Paused";
+        queueStatus.className = "status-pill status-paused";
+        queueHint.textContent = state.reason || "Queue paused";
+        pauseToggle.textContent = "Resume";
+      } else {
+        queueStatus.textContent = "Running";
+        queueStatus.className = "status-pill status-running";
+        queueHint.textContent = "Worker active";
+        pauseToggle.textContent = "Pause";
+      }
+    }
+
+    async function fetchLogs() {
+      const params = new URLSearchParams();
+      if (logLevel.value) params.set("level", logLevel.value);
+      if (logQuery.value) params.set("query", logQuery.value);
+      const response = await fetch(`/api/logs?${params.toString()}`);
+      const entries = await response.json();
+      logList.innerHTML = "";
+      entries.forEach((entry) => {
+        const container = document.createElement("div");
+        container.className = "log-entry";
+        container.innerHTML = `
+          <div class="log-meta">${entry.timestamp} • ${entry.level} • ${entry.logger}</div>
+          <div class="log-message">${entry.message}</div>
+        `;
+        logList.appendChild(container);
+      });
+    }
+
     document.querySelector("#scan").addEventListener("click", async () => {
       scanResult.textContent = "Enqueuing scan...";
       const library = librarySelect.value;
       const response = await fetch("/api/scan", {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ library }),
       });
       const result = await response.json();
       scanResult.textContent = `Scan scheduled for: ${result.scheduled.join(", ")}`;
     });
 
+    pauseToggle.addEventListener("click", async () => {
+      const paused = pauseToggle.textContent === "Resume";
+      if (paused) {
+        await fetch("/api/queue/resume", { method: "POST" });
+      } else {
+        await fetch("/api/queue/pause", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ reason: pauseReasonInput.value }),
+        });
+      }
+      await refreshQueueState();
+    });
+
+    document.querySelector("#refresh-logs").addEventListener("click", fetchLogs);
+
+    document.querySelector("#profile-select").addEventListener("change", (event) => {
+      loadProfile(event.target.value);
+    });
+
+    document.querySelector("#config-form").addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const profileName = document.querySelector("#profile-select").value;
+      const payload = {
+        name: profileName,
+        codec: "h264",
+        profile: document.querySelector("#profile-tier").value,
+        level: document.querySelector("#profile-level").value,
+        resolution: document.querySelector("#profile-resolution").value,
+        max_bitrate: document.querySelector("#profile-maxrate").value,
+        bufsize: document.querySelector("#profile-bufsize").value,
+        audio: { codec: "aac", bitrate: document.querySelector("#profile-audio-bitrate").value },
+      };
+      configResult.textContent = "Saving...";
+      const response = await fetch("/api/config/encoding", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const result = await response.json();
+      if (response.ok) {
+        configResult.textContent = `Updated profile ${result.name}`;
+        configCache.profiles[result.name] = result.profile;
+      } else {
+        configResult.textContent = `Save failed: ${result.detail}`;
+      }
+    });
+
     fetchConfig();
     fetchJobs();
+    fetchLogs();
+    refreshQueueState();
+    initNavigation();
     setInterval(fetchJobs, 5000);
+    setInterval(fetchLogs, 6000);
+    setInterval(refreshQueueState, 7000);
   </script>
 </body>
 </html>
