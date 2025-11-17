@@ -34,6 +34,7 @@ operational:
   max_concurrent_jobs: 1
   gpu_temperature_cutoff: 85
   max_disk_usage_percent: 90
+  remove_original_after_success: false
 
 notifiers:
   webhook:

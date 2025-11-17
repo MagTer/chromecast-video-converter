@@ -264,7 +264,10 @@ async def handle_event(payload: EventPayload) -> JSONResponse:
     if not library_name:
         raise HTTPException(status_code=400, detail="Library could not be determined")
     profile = config_source.config.libraries[library_name].profile
-    job = await job_manager.add_job(
-        payload.path, library_name, profile, encoding=encoding_payload(profile)
-    )
+    try:
+        job = await job_manager.add_job(
+            payload.path, library_name, profile, encoding=encoding_payload(profile)
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
     return JSONResponse(jsonable_encoder(job.model_dump()))

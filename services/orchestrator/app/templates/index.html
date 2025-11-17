@@ -30,11 +30,14 @@
       background: #0b1220;
       border-right: 1px solid #1e293b;
       padding: 1.5rem 1rem;
+      display: flex;
+      flex-direction: column;
+      gap: 1.5rem;
     }
 
     nav h1 {
       font-size: 1.25rem;
-      margin: 0 0 1rem 0;
+      margin: 0;
     }
 
     nav ul {
@@ -52,17 +55,55 @@
       color: var(--text);
       text-decoration: none;
       font-weight: 600;
-      border: 1px solid transparent;
+      border: 1px solid #1e293b;
+      background: #0b1220;
+      transition: border-color 0.15s ease, background 0.15s ease;
     }
 
-    nav a:hover {
+    nav a:hover,
+    nav a.active {
       border-color: var(--accent);
+      background: rgba(37, 99, 235, 0.1);
+    }
+
+    nav .nav-hint {
+      color: var(--muted);
+      font-size: 0.9rem;
+      margin: 0;
     }
 
     main {
-      padding: 2rem;
+      padding: 2.5rem 3rem;
+      display: flex;
+      justify-content: center;
+    }
+
+    .page {
+      display: none;
+      width: min(1200px, 100%);
+    }
+
+    .page.active {
       display: grid;
-      gap: 1.5rem;
+      gap: 1.25rem;
+    }
+
+    .page header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 1rem;
+      margin-bottom: 0.5rem;
+    }
+
+    .page h2 {
+      margin: 0;
+      font-size: 1.35rem;
+    }
+
+    .page .subtitle {
+      color: var(--muted);
+      margin: 0;
     }
 
     .panel {
@@ -70,18 +111,6 @@
       border: 1px solid #1d4ed8;
       border-radius: 0.75rem;
       padding: 1rem 1.25rem;
-    }
-
-    .panel header {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      margin-bottom: 0.75rem;
-    }
-
-    .panel h2 {
-      margin: 0;
-      font-size: 1.1rem;
     }
 
     button {
@@ -112,6 +141,12 @@
       border-bottom: 1px solid rgba(255, 255, 255, 0.08);
     }
 
+    .path-cell {
+      word-break: break-all;
+      white-space: normal;
+      max-width: 520px;
+    }
+
     th {
       color: var(--muted);
       font-weight: 600;
@@ -129,7 +164,7 @@
     .grid-two {
       display: grid;
       gap: 0.75rem;
-      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
     }
 
     .status-pill {
@@ -146,12 +181,13 @@
     .status-idle { background: rgba(148, 163, 184, 0.2); color: #cbd5e1; }
 
     .log-list {
-      max-height: 260px;
+      min-height: 320px;
+      max-height: 520px;
       overflow-y: auto;
       font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
       border: 1px solid #1e293b;
       border-radius: 0.5rem;
-      padding: 0.5rem;
+      padding: 0.75rem;
       background: #0b1220;
     }
 
@@ -160,43 +196,57 @@
     .log-message { margin-top: 0.15rem; }
 
     .hint { color: var(--muted); font-size: 0.9rem; }
+    .stacked { display: grid; gap: 0.5rem; }
   </style>
 </head>
 <body>
   <nav>
-    <h1>Chromecast Converter</h1>
+    <div>
+      <h1>Chromecast Converter</h1>
+      <p class="nav-hint">Queue management opens by default.</p>
+    </div>
     <ul>
-      <li><a href="#queue">Queue management</a></li>
-      <li><a href="#logs">Logs</a></li>
-      <li><a href="#config">Configuration</a></li>
+      <li><a href="#queue" data-page="queue" class="active">Queue management</a></li>
+      <li><a href="#logs" data-page="logs">Logs</a></li>
+      <li><a href="#config" data-page="config">Configuration</a></li>
     </ul>
   </nav>
   <main>
-    <section class="panel" id="queue">
+    <section class="page active" data-page="queue">
       <header>
-        <h2>Queue management</h2>
+        <div>
+          <h2>Queue management</h2>
+          <p class="subtitle">Control scans, job intake, and worker state.</p>
+        </div>
         <span id="queue-status" class="status-pill status-idle">Loading…</span>
       </header>
-      <div class="grid-two">
-        <div>
-          <label>Manual scan</label>
-          <div style="display:flex; gap:0.5rem; align-items:center; margin-top:0.35rem;">
-            <select id="library-select"></select>
-            <button id="scan" type="button">Trigger scan</button>
+      <div class="panel">
+        <div class="grid-two">
+          <div class="stacked">
+            <label>Manual scan</label>
+            <div style="display:flex; gap:0.5rem; align-items:center;">
+              <select id="library-select"></select>
+              <button id="scan" type="button">Trigger scan</button>
+            </div>
+            <p id="scan-result" class="hint"></p>
           </div>
-          <p id="scan-result" class="hint"></p>
-        </div>
-        <div>
-          <label>Pause queue</label>
-          <div style="display:flex; gap:0.5rem; margin-top:0.35rem;">
-            <input id="pause-reason" placeholder="Reason (optional)" />
-            <button id="pause-toggle" type="button">Pause</button>
+          <div class="stacked">
+            <label>Pause queue</label>
+            <div style="display:flex; gap:0.5rem; align-items:center;">
+              <input id="pause-reason" placeholder="Reason (optional)" />
+              <button id="pause-toggle" type="button">Pause</button>
+            </div>
+            <p class="hint" id="queue-hint">Worker can be paused when storage or GPU is constrained.</p>
           </div>
-          <p class="hint" id="queue-hint">Worker can be paused when storage or GPU is constrained.</p>
         </div>
       </div>
-      <div style="margin-top:1rem;">
-        <strong>Job queue</strong>
+      <div class="panel">
+        <header>
+          <div>
+            <h3 style="margin:0">Job queue</h3>
+            <p class="hint" style="margin:0">Newest jobs appear first.</p>
+          </div>
+        </header>
         <table>
           <thead>
             <tr>
@@ -212,10 +262,13 @@
       </div>
     </section>
 
-    <section class="panel" id="logs">
+    <section class="page" data-page="logs">
       <header>
-        <h2>Logs</h2>
-        <div style="display:flex; gap:0.5rem;">
+        <div>
+          <h2>Logs</h2>
+          <p class="subtitle">Inspect worker and orchestrator output.</p>
+        </div>
+        <div style="display:flex; gap:0.5rem; align-items:center;">
           <select id="log-level">
             <option value="">All levels</option>
             <option>INFO</option>
@@ -226,61 +279,67 @@
           <button id="refresh-logs" type="button">Filter</button>
         </div>
       </header>
-      <div class="log-list" id="log-list"></div>
+      <div class="panel">
+        <div class="log-list" id="log-list"></div>
+      </div>
     </section>
 
-    <section class="panel" id="config">
+    <section class="page" data-page="config">
       <header>
-        <h2>Encoding configuration</h2>
-        <p class="hint">Values are constrained to Chromecast Gen 2 capabilities.</p>
+        <div>
+          <h2>Encoding configuration</h2>
+          <p class="subtitle">Values are constrained to Chromecast Gen 2 capabilities.</p>
+        </div>
       </header>
-      <form id="config-form">
-        <div class="grid-two">
-          <label>
-            Profile
-            <select id="profile-select"></select>
-          </label>
-          <label>
-            H.264 profile
-            <select id="profile-tier">
-              <option value="baseline">Baseline</option>
-              <option value="main">Main</option>
-              <option value="high">High</option>
-            </select>
-          </label>
-          <label>
-            Level
-            <select id="profile-level">
-              <option value="3.1">3.1</option>
-              <option value="4.0">4.0</option>
-              <option value="4.1">4.1</option>
-            </select>
-          </label>
-          <label>
-            Resolution
-            <select id="profile-resolution">
-              <option value="1280x720">1280x720</option>
-              <option value="1920x1080">1920x1080</option>
-            </select>
-          </label>
-          <label>
-            Max bitrate (<=12M)
-            <input id="profile-maxrate" placeholder="8M" />
-          </label>
-          <label>
-            Buffer size (<=24M)
-            <input id="profile-bufsize" placeholder="16M" />
-          </label>
-          <label>
-            Audio bitrate (<=512k)
-            <input id="profile-audio-bitrate" placeholder="192k" />
-          </label>
-        </div>
-        <div style="margin-top:1rem; display:flex; gap:0.5rem; align-items:center;">
-          <button type="submit">Save encoding profile</button>
-          <span id="config-result" class="hint"></span>
-        </div>
-      </form>
+      <div class="panel">
+        <form id="config-form">
+          <div class="grid-two">
+            <label>
+              Profile
+              <select id="profile-select"></select>
+            </label>
+            <label>
+              H.264 profile
+              <select id="profile-tier">
+                <option value="baseline">Baseline</option>
+                <option value="main">Main</option>
+                <option value="high">High</option>
+              </select>
+            </label>
+            <label>
+              Level
+              <select id="profile-level">
+                <option value="3.1">3.1</option>
+                <option value="4.0">4.0</option>
+                <option value="4.1">4.1</option>
+              </select>
+            </label>
+            <label>
+              Resolution
+              <select id="profile-resolution">
+                <option value="1280x720">1280x720</option>
+                <option value="1920x1080">1920x1080</option>
+              </select>
+            </label>
+            <label>
+              Max bitrate (<=12M)
+              <input id="profile-maxrate" placeholder="8M" />
+            </label>
+            <label>
+              Buffer size (<=24M)
+              <input id="profile-bufsize" placeholder="16M" />
+            </label>
+            <label>
+              Audio bitrate (<=512k)
+              <input id="profile-audio-bitrate" placeholder="192k" />
+            </label>
+          </div>
+          <div style="margin-top:1rem; display:flex; gap:0.5rem; align-items:center;">
+            <button type="submit">Save encoding profile</button>
+            <span id="config-result" class="hint"></span>
+          </div>
+        </form>
+      </div>
     </section>
   </main>
 
@@ -300,6 +359,30 @@
     const configResult = document.querySelector("#config-result");
 
     let configCache = null;
+
+    function switchPage(pageName) {
+      pages.forEach((page) => {
+        page.classList.toggle("active", page.dataset.page === pageName);
+      });
+      navLinks.forEach((link) => {
+        link.classList.toggle("active", link.dataset.page === pageName);
+      });
+      if (window.location.hash !== `#${pageName}`) {
+        window.location.hash = `#${pageName}`;
+      }
+    }
+
+    navLinks.forEach((link) => {
+      link.addEventListener("click", (event) => {
+        event.preventDefault();
+        switchPage(event.currentTarget.dataset.page);
+      });
+    });
+
+    window.addEventListener("hashchange", () => {
+      const target = window.location.hash.replace("#", "") || "queue";
+      switchPage(target);
+    });
 
     async function fetchConfig() {
       const response = await fetch("/api/config");
@@ -347,7 +430,7 @@
         tr.innerHTML = `
           <td>${job.id.slice(0, 8)}</td>
           <td class="status-${job.status}">${job.status}</td>
-          <td title="${job.path}">${job.path.slice(0, 40)}</td>
+          <td class="path-cell" title="${job.path}">${job.path}</td>
           <td>${job.profile}</td>
           <td>${job.progress}%</td>
         `;
@@ -453,6 +536,8 @@
     fetchJobs();
     fetchLogs();
     refreshQueueState();
+    const initialPage = window.location.hash.replace("#", "") || "queue";
+    switchPage(initialPage);
     setInterval(fetchJobs, 5000);
     setInterval(fetchLogs, 6000);
     setInterval(refreshQueueState, 7000);

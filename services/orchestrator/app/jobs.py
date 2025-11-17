@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -40,12 +41,34 @@ class JobStatusUpdate(BaseModel):
 
 class JobManager:
     def __init__(self) -> None:
+        self._logger = logging.getLogger(__name__)
         self._jobs: Dict[str, Job] = {}
         self._lock = asyncio.Lock()
         self._video_extensions = {".mp4", ".m4v", ".mov", ".mkv", ".ts", ".flv"}
 
         self._paused: bool = False
         self._pause_reason: Optional[str] = None
+
+    def _output_path(self, source: Path) -> Path:
+        return source.parent / f"{source.stem}-chromecast.mp4"
+
+    def _already_converted(self, source: Path) -> bool:
+        output_path = self._output_path(source)
+        if not output_path.exists():
+            return False
+        try:
+            output_stat = output_path.stat()
+            source_mtime = source.stat().st_mtime
+        except OSError:
+            return True
+        if output_stat.st_size == 0:
+            return False
+        if output_stat.st_mtime >= source_mtime:
+            self._logger.info(
+                "Skipping already converted file %s (output: %s)", source, output_path
+            )
+            return True
+        return False
 
     async def add_job(
         self,
@@ -54,6 +77,13 @@ class JobManager:
         profile: str,
         encoding: Optional[Dict[str, Any]] = None,
     ) -> Job:
+        source = Path(path)
+        if source.suffix.lower() not in self._video_extensions:
+            raise ValueError("Unsupported media extension")
+        if "-chromecast" in source.stem.lower():
+            raise ValueError("Converted outputs are ignored")
+        if self._already_converted(source):
+            raise ValueError(f"Output already exists for {path}")
         async with self._lock:
             for job in self._jobs.values():
                 if job.path == path and job.status != JobStatus.FAILED:
@@ -120,6 +150,8 @@ class JobManager:
             if entry.suffix.lower() not in self._video_extensions:
                 continue
             if "-chromecast" in entry.stem.lower():
+                continue
+            if self._already_converted(entry):
                 continue
             job = await self.add_job(str(entry), library, profile, encoding=encoding)
             jobs_added.append(job)
