@@ -53,6 +53,7 @@ services:
       - ORCHESTRATOR_URL=http://orchestrator:9000
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=compute,video,utility
+      - GPU_STREAM_READER_LIMIT=${GPU_STREAM_READER_LIMIT:-1000000}
 
   redis:
     image: redis:7

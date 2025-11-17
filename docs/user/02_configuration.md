@@ -5,6 +5,7 @@
 - Copy `.env.template` to `.env` and set `PATH_MOVIES`/`PATH_SERIES` to the host directories that hold your libraries. Relative values are resolved from the repository root (for example, `./media/movies`); absolute paths work for network shares or mounted drives such as `/mnt/storage/Movies` or `D:\\Media\\Movies` on Windows.
 - Docker Compose consumes those variables in every service, binding each host directory twice: once to `/watch/<library>` and once to `/media/<library>`. The orchestrator understands both mount roots, so UI/API calls and watcher events can reference either prefix.
 - Because these host-root bindings determine what the containers actually see, the orchestrator’s library definitions inside `config/settings.yaml` must use one of the mounted Linux paths (`/watch/movies`, `/watch/series`, `/media/...`) while the Windows host path stays locked to the left-hand side of the Compose mounts.
+- Optional worker overrides can also live in `.env`. Set `GPU_STREAM_READER_LIMIT` if long FFmpeg stderr lines trigger `LimitOverrunError` during encoding; Compose forwards that value to the GPU worker (default: `1000000`).
 
 `config/settings.yaml.template` is solely a starter copy that you duplicate when onboarding the stack. The orchestrator and GPU worker read and persist `config/settings.yaml` (the file you edit or the GUI modifies), so leave the template untouched once the stack is configured.
 
