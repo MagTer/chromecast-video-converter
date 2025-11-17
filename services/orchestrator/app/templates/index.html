@@ -285,6 +285,8 @@
   </main>
 
   <script>
+    const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
+    const pages = Array.from(document.querySelectorAll(".page"));
     const jobRows = document.querySelector("#job-rows");
     const librarySelect = document.querySelector("#library-select");
     const scanResult = document.querySelector("#scan-result");
