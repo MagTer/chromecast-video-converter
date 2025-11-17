@@ -195,6 +195,7 @@
     .log-meta { color: var(--muted); font-size: 0.85rem; }
     .log-message { margin-top: 0.15rem; }
 
+    .queue-actions { display: flex; align-items: center; gap: 0.5rem; }
     .hint { color: var(--muted); font-size: 0.9rem; }
     .stacked { display: grid; gap: 0.5rem; }
   </style>
@@ -218,28 +219,14 @@
           <h2>Queue management</h2>
           <p class="subtitle">Control scans, job intake, and worker state.</p>
         </div>
-        <span id="queue-status" class="status-pill status-idle">Loading…</span>
-      </header>
-      <div class="panel">
-        <div class="grid-two">
-          <div class="stacked">
-            <label>Manual scan</label>
-            <div style="display:flex; gap:0.5rem; align-items:center;">
-              <select id="library-select"></select>
-              <button id="scan" type="button">Trigger scan</button>
-            </div>
-            <p id="scan-result" class="hint"></p>
-          </div>
-          <div class="stacked">
-            <label>Pause queue</label>
-            <div style="display:flex; gap:0.5rem; align-items:center;">
-              <input id="pause-reason" placeholder="Reason (optional)" />
-              <button id="pause-toggle" type="button">Pause</button>
-            </div>
-            <p class="hint" id="queue-hint">Worker can be paused when storage or GPU is constrained.</p>
-          </div>
+        <div class="queue-actions">
+          <span id="queue-status" class="status-pill status-idle">Loading…</span>
+          <button id="scan" type="button">Manual scan</button>
+          <button id="pause-toggle" type="button">Pause</button>
         </div>
-      </div>
+      </header>
+      <p id="scan-result" class="hint"></p>
+      <p class="hint" id="queue-hint"></p>
       <div class="panel">
         <header>
           <div>
@@ -350,10 +337,8 @@
     const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
     const pages = Array.from(document.querySelectorAll(".page"));
     const jobRows = document.querySelector("#job-rows");
-    const librarySelect = document.querySelector("#library-select");
     const scanResult = document.querySelector("#scan-result");
     const queueStatus = document.querySelector("#queue-status");
-    const pauseReasonInput = document.querySelector("#pause-reason");
     const pauseToggle = document.querySelector("#pause-toggle");
     const queueHint = document.querySelector("#queue-hint");
     const logList = document.querySelector("#log-list");
@@ -392,13 +377,6 @@
       const response = await fetch("/api/config");
       const config = await response.json();
       configCache = config;
-      librarySelect.innerHTML = "";
-      Object.keys(config.libraries).forEach((name) => {
-        const option = document.createElement("option");
-        option.value = name;
-        option.textContent = `${name} (${config.libraries[name].root})`;
-        librarySelect.appendChild(option);
-      });
       const profileSelect = document.querySelector("#profile-select");
       profileSelect.innerHTML = "";
       Object.keys(config.profiles).forEach((name) => {
@@ -497,16 +475,36 @@
       }
     }
 
+    function chooseLibrary() {
+      const libraries = Object.keys(configCache?.libraries || {});
+      if (!libraries.length) return null;
+      if (libraries.length === 1) return libraries[0];
+      const choice = prompt(
+        `Which library should be scanned? Available: ${libraries.join(", ")}`,
+        libraries[0],
+      );
+      if (!choice) return null;
+      return libraries.includes(choice) ? choice : null;
+    }
+
     document.querySelector("#scan").addEventListener("click", async () => {
+      const library = chooseLibrary();
+      if (!library) {
+        scanResult.textContent = "Scan cancelled or library unavailable.";
+        return;
+      }
       scanResult.textContent = "Enqueuing scan...";
-      const library = librarySelect.value;
       const response = await fetch("/api/scan", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ library }),
       });
       const result = await response.json();
-      scanResult.textContent = `Scan scheduled for: ${result.scheduled.join(", ")}`;
+      if (response.ok) {
+        scanResult.textContent = `Scan scheduled for: ${result.scheduled.join(", ")}`;
+      } else {
+        scanResult.textContent = `Scan failed: ${result.detail || "Unknown error"}`;
+      }
     });
 
     pauseToggle.addEventListener("click", async () => {
@@ -514,10 +512,12 @@
       if (paused) {
         await fetch("/api/queue/resume", { method: "POST" });
       } else {
+        const reason =
+          prompt("Reason for pausing? (optional)", queueHint.textContent || "") || "";
         await fetch("/api/queue/pause", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ reason: pauseReasonInput.value }),
+          body: JSON.stringify({ reason }),
         });
       }
       await refreshQueueState();
