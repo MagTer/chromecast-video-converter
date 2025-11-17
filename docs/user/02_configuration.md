@@ -1,9 +1,10 @@
 # 02 - Configuration Guidelines
 
-## Hard-coded directory mappings
+## Media paths via `.env`
 
-- The host directories that feed media files into the pipeline are bound directly in `docker-compose.yml` through explicit volume mounts (e.g., `D:/Media/Movies` → `/watch/movies`). These mount points are stable and should not be changed via the UI; if you need to point to a different host path you must edit the Compose service volume, not the orchestrator config.
-- Because these host-root bindings determine what the containers actually see, the orchestrator’s library definitions inside `config/settings.yaml` must use the corresponding Linux path (`/watch/movies`, `/watch/series`, `/media/...`) while the Windows host path stays locked to the left-hand side of the Compose mounts.
+- Copy `.env.template` to `.env` and set `PATH_MOVIES`/`PATH_SERIES` to the host directories that hold your libraries. Relative values are resolved from the repository root (for example, `./media/movies`); absolute paths work for network shares or mounted drives such as `/mnt/storage/Movies` or `D:\\Media\\Movies` on Windows.
+- Docker Compose consumes those variables in every service, binding each host directory twice: once to `/watch/<library>` and once to `/media/<library>`. The orchestrator understands both mount roots, so UI/API calls and watcher events can reference either prefix.
+- Because these host-root bindings determine what the containers actually see, the orchestrator’s library definitions inside `config/settings.yaml` must use one of the mounted Linux paths (`/watch/movies`, `/watch/series`, `/media/...`) while the Windows host path stays locked to the left-hand side of the Compose mounts.
 
 `config/settings.yaml.template` is solely a starter copy that you duplicate when onboarding the stack. The orchestrator and GPU worker read and persist `config/settings.yaml` (the file you edit or the GUI modifies), so leave the template untouched once the stack is configured.
 

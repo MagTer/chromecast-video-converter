@@ -22,17 +22,22 @@ Alpine watcher feeds file-system events into the system.
 ## Getting started
 
 1. Ensure Docker (with NVIDIA Container Toolkit for GPU hosts) is available.
-2. Copy `config/settings.yaml.template` to `config/settings.yaml` and adjust
+2. Copy `.env.template` to `.env` and set `PATH_MOVIES`/`PATH_SERIES` to the
+   host directories that hold your libraries. Relative values are resolved from
+   the repository root (for example, `./media/movies`), while absolute paths
+   work for mounted drives such as `/mnt/storage/Movies` or `D:\\Media\\Movies`
+   on Windows.
+3. Copy `config/settings.yaml.template` to `config/settings.yaml` and adjust
    library profiles or operational limits; the defaults target Chromecast-safe
    H.264/AAC at 720p with guardrails for GPU temperature and disk usage.
    (The running stack always reads `config/settings.yaml`; keep the template
    as a reference copy only.)
-3. Run `docker compose build` to create the orchestrator, watcher, and
+4. Run `docker compose build` to create the orchestrator, watcher, and
    `gpu-ffmpeg` images locally.
-4. Start the stack with `docker compose up`. The orchestrator mounts
+5. Start the stack with `docker compose up`. The orchestrator mounts
    `./services/orchestrator/app`, so HTML/API updates are picked up on refresh
    without rebuilding.
-5. Visit `http://localhost:9000` for the dashboard and JSON API. Health checks
+6. Visit `http://localhost:9000` for the dashboard and JSON API. Health checks
    live at `/api/healthz` and `/api/readyz`; logs from every container are
    centralized behind `/api/logs` with retention controls on the Configuration
    page (defaults to seven days).

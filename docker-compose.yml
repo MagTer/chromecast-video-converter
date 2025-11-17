@@ -9,7 +9,10 @@ services:
     volumes:
       - ./services/orchestrator/app:/app/app:ro
       - ./config:/app/config
-      - ./media:/watch:ro
+      - ${PATH_MOVIES}:/watch/movies:ro
+      - ${PATH_SERIES}:/watch/series:ro
+      - ${PATH_MOVIES}:/media/movies:ro
+      - ${PATH_SERIES}:/media/series:ro
       - ./logs:/app/logs
     depends_on:
       - redis
@@ -26,8 +29,8 @@ services:
     depends_on:
       - orchestrator
     volumes:
-      - ./media/movies:/watch/movies:ro
-      - ./media/series:/watch/series:ro
+      - ${PATH_MOVIES}:/watch/movies:ro
+      - ${PATH_SERIES}:/watch/series:ro
     environment:
       - WATCH_ROOTS=movies:/watch/movies,series:/watch/series
       - ORCHESTRATOR_URL=http://orchestrator:9000
@@ -40,14 +43,16 @@ services:
     image: chromecast-video-converter/gpu-ffmpeg:dev
     gpus: all
     volumes:
-    - ./media:/media
-    - ./media:/watch
-    - ./config:/app/config
+      - ${PATH_MOVIES}:/media/movies
+      - ${PATH_SERIES}:/media/series
+      - ${PATH_MOVIES}:/watch/movies
+      - ${PATH_SERIES}:/watch/series
+      - ./config:/app/config
     environment:
-    - FFMPEG_LOG_LEVEL=info
-    - ORCHESTRATOR_URL=http://orchestrator:9000
-    - NVIDIA_VISIBLE_DEVICES=all
-    - NVIDIA_DRIVER_CAPABILITIES=compute,video,utility
+      - FFMPEG_LOG_LEVEL=info
+      - ORCHESTRATOR_URL=http://orchestrator:9000
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,video,utility
 
   redis:
     image: redis:7
