@@ -10,7 +10,8 @@ This guide walks through prerequisites, configuration, and day-one operation of 
 
 ## Initial setup
 
-1. Copy `config/quality.sample.yaml` to `config/quality.yaml`.
+1. Copy `config/settings.yaml.template` to `config/settings.yaml`. The stack
+   always loads `config/settings.yaml`; keep the template as a copy seed only.
 2. Adjust library roots or profiles if your media lives outside the default `./media/movies` and `./media/series` mounts. Keep the left-hand side of the Compose volume mounts aligned with your host paths and use the corresponding `/watch/...` paths inside the YAML.
 3. Review operational guardrails in the config (GPU temperature cutoff, disk usage limits, and whether originals are deleted after successful verification).
 4. Build the stack locally:

@@ -23,7 +23,7 @@ All containers join a private Docker network. Bind mounts provide the Windows-ho
 ## Data flow
 
 1. **Change detection** - Each `folder-watcher` instance monitors a root directory and reports file creates/modifies/deletes plus metadata (path, size, hash) to the orchestrator.
-2. **Policy evaluation** - Orchestrator loads quality profiles (per movies/series) from `config/quality.yaml`. It validates config shape and warns about unsupported codecs/levels before persisting any change.
+2. **Policy evaluation** - Orchestrator loads quality profiles (per movies/series) from `config/settings.yaml`. It validates config shape and warns about unsupported codecs/levels before persisting any change.
 3. **Compliance check** - Orchestrator inspects new or updated files by invoking `gpu-ffmpeg` in probe mode to extract codecs, resolution, bitrate, and HDR flags. Files already compliant are flagged `ready`.
 4. **Transcode scheduling** - Non-compliant files become jobs in a durable queue. Orchestrator throttles concurrent ffmpeg invocations to respect GPU memory and disk IO.
 5. **Encoding** - `gpu-ffmpeg` receives a manifest (input path, target profile) and runs ffmpeg with pinned parameters: `-hwaccel cuda -i <src> -vf "scale=1280:-1" -c:v h264_nvenc -profile:v high -level 4.1 -preset p5 -cq 18 -maxrate 8M -bufsize 16M -pix_fmt yuv420p -movflags +faststart -c:a aac -b:a 192k`. Audio/video map decisions come from the manifest.
@@ -49,7 +49,7 @@ All containers join a private Docker network. Bind mounts provide the Windows-ho
 
 ## Configuration model
 
-`config/quality.yaml` (validated via JSON Schema) captures:
+`config/settings.yaml` (validated via JSON Schema) captures:
 
 - Libraries (`movies`, `series`, additional custom roots) with mount paths, recursion depth, naming hints.
 - Quality profile per library (resolution cap, bitrate budget, scaling rules, audio layout).

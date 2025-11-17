@@ -11,7 +11,7 @@ touch points, minimize moving parts, and keep operational work predictable.
 - **Orchestrator API and dashboard** – FastAPI service exposes health/ready
   endpoints, queue listings, log streaming, manual scans, job claims/updates,
   and an HTML dashboard that drives those APIs.
-- **Config-driven profiles** – Profiles are loaded from `config/quality.yaml`
+- **Config-driven profiles** – Profiles are loaded from `config/settings.yaml`
   (falling back to the sample) and validated for Chromecast-safe codec,
   profile, level, resolution, and bitrate limits before use.
 - **Job ingestion and scans** – The orchestrator loads configured libraries at
@@ -28,7 +28,7 @@ touch points, minimize moving parts, and keep operational work predictable.
 
 - **Configuration persistence and application** – The dashboard updates the
   in-memory encoding profiles only; changes are not written back to
-  `quality.yaml`, and several profile fields (resolution, H.264 profile tier)
+  `settings.yaml`, and several profile fields (resolution, H.264 profile tier)
   are ignored when constructing FFmpeg commands. Restarting the orchestrator or
   worker discards GUI edits.
 - **Queue durability and scaling** – Jobs are stored in an in-memory manager;
@@ -69,8 +69,8 @@ touch points, minimize moving parts, and keep operational work predictable.
 ### Hardening the core stack
 
 1. **Persist configuration and job state**
-   - Add config-write support so `/api/config/encoding` updates both the
-     in-memory model and `config/quality.yaml`, with validation and rollback on
+    - Add config-write support so `/api/config/encoding` updates both the
+      in-memory model and `config/settings.yaml`, with validation and rollback on
      failure to avoid manual repairs.
    - Back the job queue with Redis (already provisioned) and store job history
      in SQLite/PostgreSQL to survive orchestrator restarts and enable

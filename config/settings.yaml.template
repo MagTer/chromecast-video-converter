@@ -2,14 +2,14 @@ libraries:
   movies:
     root: /watch/movies
     depth: max
-    profile: longform
+    profile: movies
   series:
     root: /watch/series
     depth: max
-    profile: episodic
+    profile: series
 
 profiles:
-  longform:
+  movies:
     codec: h264
     profile: high
     level: "4.1"
@@ -19,7 +19,7 @@ profiles:
     audio:
       codec: aac
       bitrate: 192k
-  episodic:
+  series:
     codec: h264
     profile: high
     level: "4.1"

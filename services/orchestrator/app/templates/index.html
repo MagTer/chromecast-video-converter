@@ -73,9 +73,10 @@
     }
 
     main {
-      padding: 2.5rem 3rem;
+      padding: 2rem 3rem;
       display: flex;
       justify-content: center;
+      align-items: flex-start;
     }
 
     .page {
@@ -195,7 +196,8 @@
     .log-meta { color: var(--muted); font-size: 0.85rem; }
     .log-message { margin-top: 0.15rem; }
 
-    .queue-actions { display: flex; align-items: center; gap: 0.5rem; }
+    .queue-actions { display: flex; align-items: center; gap: 0.5rem; width: 100%; }
+    .queue-actions #queue-status { margin-left: auto; }
     .queue-buttons {
       display: flex;
       gap: 0.5rem;

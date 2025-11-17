@@ -139,6 +139,7 @@ def update_profile(config_source: ConfigSource, name: str, data: dict) -> Profil
     profile = Profile(**data)
     config_source.config.profiles[name] = profile
     LOGGER.info("Updated encoding profile '%s' for Chromecast-safe settings.", name)
+    persist_config(config_source)
     return profile
 
 
@@ -159,3 +160,14 @@ def load_config(path: Path) -> ConfigSource:
     )
     LOGGER.debug(json.dumps(raw, indent=2))
     return ConfigSource(path=path, config=config)
+
+
+def persist_config(source: ConfigSource) -> None:
+    payload = source.config.model_dump()
+    try:
+        serialized = yaml.safe_dump(payload, sort_keys=False)
+        source.path.write_text(serialized, encoding="utf-8")
+        LOGGER.info("Persisted settings to %s", source.path)
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.error("Failed to persist settings to %s: %s", source.path, exc)
+        raise

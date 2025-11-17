@@ -16,7 +16,7 @@ services:
     environment:
       - PORT=9000
       - JOB_QUEUE=redis://redis:6379/0
-      - CONFIG_PATH=/app/config/quality.sample.yaml
+      - CONFIG_PATH=/app/config/settings.yaml
 
   folder-watcher:
     build:

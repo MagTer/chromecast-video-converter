@@ -36,7 +36,7 @@ configure_logging()
 
 LOGGER = logging.getLogger("orchestrator")
 
-CONFIG_PATH = Path(os.environ.get("CONFIG_PATH", "/app/config/quality.sample.yaml")).resolve()
+CONFIG_PATH = Path(os.environ.get("CONFIG_PATH", "/app/config/settings.yaml")).resolve()
 config_source = config_module.load_config(CONFIG_PATH)
 job_manager = jobs.JobManager()
 

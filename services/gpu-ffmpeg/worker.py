@@ -26,9 +26,7 @@ ORCHESTRATOR_URL = os.environ.get("ORCHESTRATOR_URL", "http://localhost:9000")
 POLL_INTERVAL = int(os.environ.get("GPU_POLL_INTERVAL", "5"))
 SCALING_EXPRESSION = "scale=1280:-1"
 
-CONFIG_PATH = Path(os.environ.get("CONFIG_PATH", "/app/config/quality.yaml"))
-if not CONFIG_PATH.exists():
-    CONFIG_PATH = Path("/app/config/quality.sample.yaml")
+CONFIG_PATH = Path(os.environ.get("CONFIG_PATH", "/app/config/settings.yaml"))
 try:
     with CONFIG_PATH.open("r", encoding="utf-8") as fh:
         _CONFIG = yaml.safe_load(fh) or {}
@@ -37,12 +35,12 @@ except FileNotFoundError:
 PROFILES = _CONFIG.get("profiles", {})
 if _CONFIG:
     LOGGER.info(
-        "Loaded quality config from %s (%s profiles available)",
+        "Loaded settings config from %s (%s profiles available)",
         CONFIG_PATH,
         len(PROFILES),
     )
 else:
-    LOGGER.warning("No quality config present at %s; using defaults", CONFIG_PATH)
+    LOGGER.warning("No settings config present at %s; using defaults", CONFIG_PATH)
 FFPROBE_CMD = [
     "ffprobe",
     "-v",

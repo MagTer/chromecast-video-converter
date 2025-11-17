@@ -22,9 +22,11 @@ Alpine watcher feeds file-system events into the system.
 ## Getting started
 
 1. Ensure Docker (with NVIDIA Container Toolkit for GPU hosts) is available.
-2. Copy `config/quality.sample.yaml` to `config/quality.yaml` and adjust library
-   profiles or operational limits; the defaults target Chromecast-safe H.264/AAC
-   at 720p with guardrails for GPU temperature and disk usage.
+2. Copy `config/settings.yaml.template` to `config/settings.yaml` and adjust
+   library profiles or operational limits; the defaults target Chromecast-safe
+   H.264/AAC at 720p with guardrails for GPU temperature and disk usage.
+   (The running stack always reads `config/settings.yaml`; keep the template
+   as a reference copy only.)
 3. Run `docker compose build` to create the orchestrator, watcher, and
    `gpu-ffmpeg` images locally.
 4. Start the stack with `docker compose up`. The orchestrator mounts
@@ -32,6 +34,10 @@ Alpine watcher feeds file-system events into the system.
    without rebuilding.
 5. Visit `http://localhost:9000` for the dashboard and JSON API. Health checks
    live at `/api/healthz` and `/api/readyz`; logs are available at `/api/logs`.
+
+   The orchestrator persists any GUI-driven changes back to `config/settings.yaml`,
+   so dashboards edits survive restarts; treat `config/settings.yaml.template` only
+   as the initial seed.
 
 ### MVP feature set
 
@@ -44,7 +50,7 @@ Alpine watcher feeds file-system events into the system.
 - **Folder watcher** – Alpine container monitoring bind-mounted `movies` and
   `series` roots. Emits create/modify events to the orchestrator so newly added
   files are queued immediately.
-- **Encoding profiles** – Centralized in `config/quality.yaml` and editable via
+- **Encoding profiles** – Centralized in `config/settings.yaml` and editable via
   `/api/config/encoding`. Profiles target Chromecast Gen 2/3 constraints (H.264
   High, level 4.1, 720p, capped bitrate) with AAC stereo audio.
 - **Verification hooks** – After startup, the orchestrator scans configured
