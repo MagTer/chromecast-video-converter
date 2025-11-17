@@ -339,6 +339,29 @@
           </div>
         </form>
       </div>
+      <div class="panel">
+        <header>
+          <div>
+            <h3 style="margin:0">Logging retention</h3>
+            <p class="hint" style="margin:0">Centralized log storage across orchestrator and workers.</p>
+          </div>
+        </header>
+        <form id="log-config-form" class="stacked">
+          <div class="grid-two">
+            <label>
+              Retain logs (days)
+              <input id="log-retention" type="number" min="1" max="90" value="7" />
+            </label>
+            <div>
+              <p id="log-stats" class="hint" style="margin:0">Loading log stats…</p>
+            </div>
+          </div>
+          <div style="display:flex; gap:0.5rem; align-items:center;">
+            <button type="submit">Save log settings</button>
+            <span id="log-config-result" class="hint"></span>
+          </div>
+        </form>
+      </div>
     </section>
   </main>
 
@@ -354,6 +377,9 @@
     const logLevel = document.querySelector("#log-level");
     const logQuery = document.querySelector("#log-query");
     const configResult = document.querySelector("#config-result");
+    const logRetention = document.querySelector("#log-retention");
+    const logConfigResult = document.querySelector("#log-config-result");
+    const logStats = document.querySelector("#log-stats");
 
     let configCache = null;
 
@@ -385,6 +411,7 @@
       const response = await fetch("/api/config");
       const config = await response.json();
       configCache = config;
+      logRetention.value = config.logging?.retention_days ?? 7;
       const profileSelect = document.querySelector("#profile-select");
       profileSelect.innerHTML = "";
       Object.keys(config.profiles).forEach((name) => {
@@ -496,6 +523,25 @@
       }
     }
 
+    function formatBytes(bytes) {
+      if (bytes === 0) return "0 B";
+      const sizes = ["B", "KB", "MB", "GB", "TB"];
+      const i = Math.floor(Math.log(bytes) / Math.log(1024));
+      const value = bytes / 1024 ** i;
+      return `${value.toFixed(value >= 10 ? 0 : 1)} ${sizes[i]}`;
+    }
+
+    async function fetchLogStats() {
+      const response = await fetch("/api/logs/stats");
+      const stats = await response.json();
+      logStats.textContent = `Stored ${stats.total_entries} entr${
+        stats.total_entries === 1 ? "y" : "ies"
+      } (${formatBytes(stats.file_size_bytes)}) with a ${stats.retention_days}-day retention window.`;
+      if (!logRetention.value) {
+        logRetention.value = stats.retention_days;
+      }
+    }
+
     document
       .querySelector("#scan-movies")
       .addEventListener("click", () => enqueueLibraryScan("movies"));
@@ -523,6 +569,25 @@
 
     document.querySelector("#profile-select").addEventListener("change", (event) => {
       loadProfile(event.target.value);
+    });
+
+    document.querySelector("#log-config-form").addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const retentionDays = Number(logRetention.value || "7");
+      logConfigResult.textContent = "Saving...";
+      const response = await fetch("/api/config/logging", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ retention_days: retentionDays }),
+      });
+      const result = await response.json();
+      if (response.ok) {
+        logConfigResult.textContent = `Retention updated to ${result.retention_days} days.`;
+        fetchLogStats();
+        fetchLogs();
+      } else {
+        logConfigResult.textContent = `Save failed: ${result.detail || "Unknown error"}`;
+      }
     });
 
     document.querySelector("#config-form").addEventListener("submit", async (event) => {
@@ -557,12 +622,14 @@
     fetchJobs();
     fetchLogCategories();
     fetchLogs();
+    fetchLogStats();
     refreshQueueState();
     const initialPage = window.location.hash.replace("#", "") || "queue";
     switchPage(initialPage);
     setInterval(fetchJobs, 5000);
     setInterval(fetchLogs, 6000);
     setInterval(fetchLogCategories, 15000);
+    setInterval(fetchLogStats, 20000);
     setInterval(refreshQueueState, 7000);
   </script>
 </body>

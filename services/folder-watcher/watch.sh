@@ -9,6 +9,14 @@ SCAN_INTERVAL="${SCAN_INTERVAL:-60}"
 log() {
   local level="$1" message="$2"
   echo "$(date -Iseconds) [${level}] ${message}"
+  if [[ -n "${ORCHESTRATOR_URL}" ]]; then
+    local payload_message
+    payload_message="${message//\"/\\\"}"
+    curl -sS -X POST "${ORCHESTRATOR_URL}/api/logs/ingest" \
+      -H "Content-Type: application/json" \
+      -d "{\"entries\":[{\"logger\":\"folder-watcher\",\"level\":\"${level}\",\"message\":\"${payload_message}\"}]}" \
+      >/dev/null 2>&1 || true
+  fi
 }
 
 log_info() {
@@ -16,7 +24,7 @@ log_info() {
 }
 
 log_warn() {
-  log "WARN" "$1"
+  log "WARNING" "$1"
 }
 
 if [[ -z "${WATCH_ROOTS}" ]]; then

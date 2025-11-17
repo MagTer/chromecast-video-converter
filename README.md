@@ -33,7 +33,9 @@ Alpine watcher feeds file-system events into the system.
    `./services/orchestrator/app`, so HTML/API updates are picked up on refresh
    without rebuilding.
 5. Visit `http://localhost:9000` for the dashboard and JSON API. Health checks
-   live at `/api/healthz` and `/api/readyz`; logs are available at `/api/logs`.
+   live at `/api/healthz` and `/api/readyz`; logs from every container are
+   centralized behind `/api/logs` with retention controls on the Configuration
+   page (defaults to seven days).
 
    The orchestrator persists any GUI-driven changes back to `config/settings.yaml`,
    so dashboards edits survive restarts; treat `config/settings.yaml.template` only
@@ -42,8 +44,9 @@ Alpine watcher feeds file-system events into the system.
 ### MVP feature set
 
 - **Orchestrator API & dashboard** – Serves health/ready endpoints, exposes
-  queue metrics, streams recent logs from the in-memory log handler, and lets
-  operators trigger rescans of configured libraries.
+  queue metrics, persists centralized logs from every container with a
+  retention slider and disk-usage stats, and lets operators trigger rescans of
+  configured libraries.
 - **Job queue** – Redis-backed queue with pause/resume controls. GPU workers
   pull the next ready job from `/api/jobs/next`, update status back to the API,
   and honor the current profile configuration.

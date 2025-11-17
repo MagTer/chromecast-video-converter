@@ -12,6 +12,7 @@
 - The orchestrator dashboard & API accept JSON/YAML that controls library names, profiles, bitrates, and Jellyfin integration. Those fields are surfaced through the GUI so operators can tune quality and automation; they do not change the host path mappings.
 - When a GUI change adds a new library, ensure its `root` matches one of the existing mount points (e.g., `root: /media/movies`), otherwise the files will not be reachable.
 - Jellyfin integration is optional; omit the `jellyfin` section from `config/settings.yaml` (as shown in `config/settings.yaml.template`) whenever no server is reachable, and the orchestrator will quietly skip those refresh tasks.
+- Log retention is also editable in the GUI. The `logging.retention_days` key in `config/settings.yaml` (default: `7`) controls how long centralized logs from every container stay on disk. The Configuration page displays current disk usage for the log database mounted at `./logs`.
 
 ## Keeping configs aligned
 
