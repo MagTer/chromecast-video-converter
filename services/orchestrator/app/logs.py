@@ -5,7 +5,7 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
-from threading import Lock
+from threading import RLock
 from typing import List, Optional
 
 
@@ -30,7 +30,7 @@ class LogStore:
         self.path = path
         self.retention_days = retention_days
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._lock = Lock()
+        self._lock = RLock()
         self._conn = sqlite3.connect(self.path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._initialize()
