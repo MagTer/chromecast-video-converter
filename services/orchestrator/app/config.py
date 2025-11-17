@@ -122,6 +122,11 @@ class QualityConfig(BaseModel):
             raise ValueError(f"Profile {profile_name} is not defined.")
         return self.profiles[profile_name]
 
+    def profile_named(self, profile_name: str) -> Profile:
+        if profile_name not in self.profiles:
+            raise ValueError(f"Profile {profile_name} is not defined.")
+        return self.profiles[profile_name]
+
 
 @dataclass
 class ConfigSource:
