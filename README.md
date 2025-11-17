@@ -33,6 +33,24 @@ Alpine watcher feeds file-system events into the system.
 5. Visit `http://localhost:9000` for the dashboard and JSON API. Health checks
    live at `/api/healthz` and `/api/readyz`; logs are available at `/api/logs`.
 
+> **Note for Windows checkouts:** The Docker entrypoints are Bash scripts and
+> must keep LF line endings. A `.gitattributes` file enforces this, but if you
+> see `env: can't execute 'bash\r': No such file or directory` during Compose
+> startup, confirm your Git client isn't rewriting line endings (e.g.
+> `git config --global core.autocrlf input`). The change prevents future CRLF
+> checkouts from breaking startup; to repair an existing clone, re-normalize
+> the scripts and Compose files after setting the Git config:
+>
+> ```sh
+> git checkout -- services/folder-watcher/watch.sh \
+>   services/gpu-ffmpeg/entrypoint.sh \
+>   services/orchestrator/entrypoint.sh \
+>   docker-compose.yml
+> ```
+>
+> or re-clone the repository to pull down LF-normalized files before running
+> `docker compose up` again.
+
 ### MVP feature set
 
 - **Orchestrator API & dashboard** – Serves health/ready endpoints, exposes
