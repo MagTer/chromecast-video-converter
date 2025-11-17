@@ -1,45 +1,55 @@
 # Chromecast Video Converter
 
-Repository for experimenting with a container-driven pipeline that keeps a media
-library Chromecast Gen 2/3 friendly through GPU-only transcoding. The first goal
-is to document a resilient architecture and the quality process AI coding
-agents should follow when extending the system.
+Container-driven pipeline that keeps a media library Chromecast Gen 2/3 ready
+through GPU-only transcoding. The MVP is operational: the orchestrator exposes a
+dashboard and JSON API, a Redis-backed job queue coordinates GPU workers, and an
+Alpine watcher feeds file-system events into the system.
 
 ## Documentation map
 
 - [`docs/01_architecture.md`](docs/01_architecture.md) - Component model, data
-  flows, containers, and operational constraints.
+  flows, containers, and operational constraints now implemented in the MVP.
+- [`docs/user/01_getting_started.md`](docs/user/01_getting_started.md) - Stack
+  prerequisites, configuration, and day-one operation.
+- [`docs/user/02_configuration.md`](docs/user/02_configuration.md) - Details on
+  aligning Compose mounts and orchestrator library definitions.
 - [`docs/02_ai_agent_process.md`](docs/02_ai_agent_process.md) - Expectations
-  for AI coding agents, including quality gates and collaboration rules.
-- [`docs/03_implementation_plan.md`](docs/03_implementation_plan.md) - Milestone
-  plan that sequences implementation work and future user documentation.
-
-Future commits will add the actual containers, orchestration logic, and
-user-facing instructions described in these references.
+  for AI coding agents. See `AGENTS.md` for the quick-start rules and quality
+  gates.
+- [`docs/ROADMAP.md`](docs/ROADMAP.md) - Current roadmap, gap analysis, and
+  staged steps toward a production-ready release.
 
 ## Getting started
 
-1. Copy `config/quality.sample.yaml` to `config/quality.yaml` and adjust library
-   profiles, Jellyfin settings, or operational thresholds as needed; keep the
-   host-to-container paths defined in `docker-compose.yml` untouched unless you
-   also update the volume mounts there.
-2. Run `docker compose build` (locks in Python dependencies and GPU image).
-3. Start the stack with `docker compose up`. The orchestrator container bind-
-   mounts `./services/orchestrator/app`, so refreshing the dashboard after a
-   `git pull` picks up new HTML without having to rebuild the image.
-4. Visit `http://localhost:9000` to view the orchestrator dashboard, trigger a
-   manual scan, or monitor job progress and metrics.
+1. Ensure Docker (with NVIDIA Container Toolkit for GPU hosts) is available.
+2. Copy `config/quality.sample.yaml` to `config/quality.yaml` and adjust library
+   profiles or operational limits; the defaults target Chromecast-safe H.264/AAC
+   at 720p with guardrails for GPU temperature and disk usage.
+3. Run `docker compose build` to create the orchestrator, watcher, and
+   `gpu-ffmpeg` images locally.
+4. Start the stack with `docker compose up`. The orchestrator mounts
+   `./services/orchestrator/app`, so HTML/API updates are picked up on refresh
+   without rebuilding.
+5. Visit `http://localhost:9000` for the dashboard and JSON API. Health checks
+   live at `/api/healthz` and `/api/readyz`; logs are available at `/api/logs`.
 
-### Dashboard features
+### MVP feature set
 
-- A left-hand navigation groups queue controls, configuration, and live logs.
-- Logs can be filtered by level or search text to quickly isolate GPU errors or
-  scan activity.
-- Queue management now allows pausing/resuming workers when storage or thermal
-  limits are hit.
-- Encoding profiles can be edited in-browser and are validated against
-  Chromecast Gen 2 constraints (H.264 Baseline/Main/High, level <= 4.1,
-  resolution up to 1080p, and capped bitrates).
+- **Orchestrator API & dashboard** – Serves health/ready endpoints, exposes
+  queue metrics, streams recent logs from the in-memory log handler, and lets
+  operators trigger rescans of configured libraries.
+- **Job queue** – Redis-backed queue with pause/resume controls. GPU workers
+  pull the next ready job from `/api/jobs/next`, update status back to the API,
+  and honor the current profile configuration.
+- **Folder watcher** – Alpine container monitoring bind-mounted `movies` and
+  `series` roots. Emits create/modify events to the orchestrator so newly added
+  files are queued immediately.
+- **Encoding profiles** – Centralized in `config/quality.yaml` and editable via
+  `/api/config/encoding`. Profiles target Chromecast Gen 2/3 constraints (H.264
+  High, level 4.1, 720p, capped bitrate) with AAC stereo audio.
+- **Verification hooks** – After startup, the orchestrator scans configured
+  libraries and preloads jobs for anything not already compliant. On success,
+  progress is reflected in the dashboard and metrics endpoint.
 
 ### GPU access inside Docker Compose
 
