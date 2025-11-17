@@ -67,9 +67,41 @@ def _validate_bitrates(max_bitrate: str, bufsize: str, audio_bitrate: str) -> No
         raise ValueError("Audio bitrate must remain below 512 kbps for Chromecast Gen 2.")
 
 
+def _validate_encoding_options(
+    preset: str, cq: int, rc_mode: str, max_fps: int, audio_channels: int
+) -> None:
+    allowed_presets = {"p1", "p2", "p3", "p4", "p5", "p6", "p7"}
+    if preset.lower() not in allowed_presets:
+        raise ValueError("NVENC preset must be one of p1–p7 for Chromecast-safe outputs.")
+
+    if cq < 0 or cq > 30:
+        raise ValueError(
+            "NVENC CQ must be between 0 and 30 for stable quality on Gen 2 Chromecasts."
+        )
+
+    allowed_rc_modes = {"vbr_hq", "vbr", "cbr"}
+    if rc_mode.lower() not in allowed_rc_modes:
+        raise ValueError(
+            "Rate control must be one of vbr_hq, vbr, or cbr for Chromecast-safe outputs."
+        )
+
+    if max_fps <= 0 or max_fps > 30:
+        raise ValueError("Frame rate must not exceed 30 fps for Chromecast Gen 2 compatibility.")
+
+    if audio_channels != 2:
+        raise ValueError("Audio must remain stereo (2 channels) for Chromecast Gen 2.")
+
+
 class AudioProfile(BaseModel):
     codec: str
     bitrate: str
+    channels: int = Field(default=2, ge=1, le=8)
+
+    @model_validator(mode="after")
+    def validate_channels(self) -> "AudioProfile":
+        if self.channels != 2:
+            raise ValueError("Chromecast Gen 2 supports stereo output; enforce 2 channels.")
+        return self
 
 
 class Profile(BaseModel):
@@ -77,8 +109,12 @@ class Profile(BaseModel):
     profile: str
     level: str
     resolution: str
+    max_fps: int = Field(default=30, gt=0, le=30)
     max_bitrate: str
     bufsize: str
+    preset: str = Field(default="p5")
+    cq: int = Field(default=18, ge=0, le=30)
+    rc: str = Field(default="vbr_hq")
     audio: AudioProfile
 
     @model_validator(mode="after")
@@ -87,6 +123,9 @@ class Profile(BaseModel):
         _validate_profile(values.profile, values.level)
         _validate_resolution(values.resolution)
         _validate_bitrates(values.max_bitrate, values.bufsize, values.audio.bitrate)
+        _validate_encoding_options(
+            values.preset, values.cq, values.rc, values.max_fps, values.audio.channels
+        )
         return values
 
 
