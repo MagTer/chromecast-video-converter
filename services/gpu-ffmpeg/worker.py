@@ -2,13 +2,14 @@ import asyncio
 import logging
 import os
 import re
+import time
 from collections import deque
 from pathlib import Path
 
 import httpx
 import yaml
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.DEBUG)
 LOGGER = logging.getLogger("gpu-ffmpeg.worker")
 
 ORCHESTRATOR_URL = os.environ.get("ORCHESTRATOR_URL", "http://localhost:9000")
@@ -83,6 +84,56 @@ async def _probe_duration(source: Path) -> float:
         return 0.0
 
 
+async def _monitor_progress(
+    stream: asyncio.StreamReader,
+    duration: float,
+    client: httpx.AsyncClient,
+    job_id: str,
+    last_progress: dict[str, int],
+) -> None:
+    last_time = {"value": 0.0}
+    last_update_ts = time.monotonic()
+    while True:
+        line = await stream.readline()
+        if not line:
+            break
+        text = line.decode(errors="ignore").strip()
+        if "=" not in text:
+            continue
+        key, value = text.split("=", 1)
+        if key not in ("out_time", "out_time_ms", "out_time_us"):
+            continue
+        try:
+            if key == "out_time":
+                timecode = await _parse_timecode(value)
+            else:
+                time_ms = float(value)
+                timecode = time_ms / (1000.0 if "ms" in key else 1_000_000.0)
+        except ValueError:
+            continue
+        status_msg = "Encoding in progress"
+        if duration > 0:
+            progress = min(99, int((timecode / duration) * 100))
+        else:
+            if timecode - last_time["value"] < 5:
+                continue
+            progress = min(last_progress["value"] + 1, 2)
+            remaining = max(0, 1200 - timecode)
+            status_msg = f"Encoded {timecode:.1f}s, ETA {remaining:.0f}s"
+        now = time.monotonic()
+        if progress > last_progress["value"] and now - last_update_ts >= 1:
+            await update_job_status(
+                client,
+                job_id,
+                "running",
+                progress,
+                status_msg,
+            )
+            last_progress["value"] = progress
+            last_update_ts = now
+        last_time["value"] = timecode
+
+
 def _build_output_path(source: Path) -> Path:
     return source.parent / f"{source.stem}-chromecast.mp4"
 
@@ -95,13 +146,9 @@ def _build_ffmpeg_command(profile_name: str, source: Path, target: Path) -> list
     audio_cfg = profile.get("audio", {})
     audio_codec = audio_cfg.get("codec", "aac")
     audio_bitrate = audio_cfg.get("bitrate", "192k")
-    return [
+    command = [
         "ffmpeg",
         "-y",
-        "-hwaccel",
-        "cuda",
-        "-hwaccel_output_format",
-        "cuda",
         "-i",
         str(source),
         "-vf",
@@ -128,38 +175,39 @@ def _build_ffmpeg_command(profile_name: str, source: Path, target: Path) -> list
         audio_codec,
         "-b:a",
         audio_bitrate,
+        "-progress",
+        "pipe:1",
         str(target),
     ]
+    return command
 
 
 async def _run_ffmpeg(
     command: list[str], duration: float, client: httpx.AsyncClient, job_id: str
 ) -> int:
+    LOGGER.debug("Executing ffmpeg command: %s", " ".join(command))
     proc = await asyncio.create_subprocess_exec(
         *command,
         stderr=asyncio.subprocess.PIPE,
-        stdout=asyncio.subprocess.DEVNULL,
+        stdout=asyncio.subprocess.PIPE,
     )
-    last_progress = 5
+    last_progress = {"value": 5}
     recent_lines = deque(maxlen=20)
+    progress_task = asyncio.create_task(
+        _monitor_progress(proc.stdout, duration, client, job_id, last_progress)
+    )
+
+    progress_task = asyncio.create_task(
+        _monitor_progress(proc.stdout, duration, client, job_id, last_progress)
+    )
     while True:
         line = await proc.stderr.readline()
         if not line:
             break
         decoded = line.decode(errors="ignore")
         recent_lines.append(decoded.strip())
-        match = PROGRESS_RE.search(decoded)
-        if not match:
-            continue
-        timecode = await _parse_timecode(match.group(1))
-        if duration > 0:
-            progress = min(99, int((timecode / duration) * 100))
-        else:
-            progress = min(99, last_progress + 5)
-        if progress > last_progress:
-            await update_job_status(client, job_id, "running", progress, "Encoding in progress")
-            last_progress = progress
     return_code = await proc.wait()
+    await progress_task
     if return_code != 0:
         LOGGER.error(
             "FFmpeg job %s failed (code %s). Last stderr lines:\n%s",
@@ -187,17 +235,12 @@ async def process_job(client: httpx.AsyncClient, job: dict) -> None:
     return_code = await _run_ffmpeg(command, duration, client, job_id)
     if return_code == 0:
         await update_job_status(
-            client, job_id, "completed", 100, f"Encoding finished to {output_path}"
+            client, job_id, 100, 100, f"Encoding finished to {output_path}"
         )
         LOGGER.info("Job %s completed, output: %s", job_id[:8], output_path)
     else:
-        await update_job_status(
-            client,
-            job_id,
-            "failed",
-            0,
-            f"FFmpeg exited with code {return_code}",
-        )
+        message = f"FFmpeg exited with code {return_code}"
+        await update_job_status(client, job_id, "failed", 0, message)
 
 
 async def main() -> None:

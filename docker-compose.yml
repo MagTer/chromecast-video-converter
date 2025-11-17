@@ -37,23 +37,16 @@ services:
       context: ./services/gpu-ffmpeg
       dockerfile: Dockerfile
     image: chromecast-video-converter/gpu-ffmpeg:dev
-    runtime: nvidia
-    device_requests:
-      - driver: nvidia
-        count: 1
-        capabilities: ["gpu"]
-    device_cgroup_rules:
-      - "c 195:* rmw"
-      - "c 508:* rmw"
+    gpus: all
     volumes:
-      - ./media:/media
-      - ./media:/watch
-      - ./config:/app/config:ro
+    - ./media:/media
+    - ./media:/watch
+    - ./config:/app/config:ro
     environment:
-      - FFMPEG_LOG_LEVEL=info
-      - ORCHESTRATOR_URL=http://orchestrator:9000
-      - NVIDIA_VISIBLE_DEVICES=all
-      - NVIDIA_DRIVER_CAPABILITIES=compute,video,utility
+    - FFMPEG_LOG_LEVEL=info
+    - ORCHESTRATOR_URL=http://orchestrator:9000
+    - NVIDIA_VISIBLE_DEVICES=all
+    - NVIDIA_DRIVER_CAPABILITIES=compute,video,utility
 
   redis:
     image: redis:7
