@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
 from pydantic import BaseModel, Field
@@ -21,7 +21,7 @@ class Job(BaseModel):
     path: str
     library: str
     profile: str
-    encoding: Optional[Dict[str, str]] = None
+    encoding: Optional[Dict[str, Any]] = None
     status: str = JobStatus.PENDING
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
@@ -48,7 +48,11 @@ class JobManager:
         self._pause_reason: Optional[str] = None
 
     async def add_job(
-        self, path: str, library: str, profile: str, encoding: Optional[Dict[str, str]] = None
+        self,
+        path: str,
+        library: str,
+        profile: str,
+        encoding: Optional[Dict[str, Any]] = None,
     ) -> Job:
         async with self._lock:
             for job in self._jobs.values():
@@ -101,7 +105,11 @@ class JobManager:
             return job
 
     async def scan_directory(
-        self, library: str, root: str, profile: str, encoding: Optional[Dict[str, str]] = None
+        self,
+        library: str,
+        root: str,
+        profile: str,
+        encoding: Optional[Dict[str, Any]] = None,
     ) -> List[Job]:
         root_path = Path(root)
         if not root_path.exists():

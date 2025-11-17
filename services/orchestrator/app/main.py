@@ -93,7 +93,7 @@ def sanitize_config(config: config_module.QualityConfig) -> Dict[str, Any]:
 
 
 def encoding_payload(profile_name: str) -> Dict[str, Any]:
-    profile = config_source.config.profile_for(profile_name)
+    profile = config_source.config.profile_named(profile_name)
     return profile.model_dump()
 
 
