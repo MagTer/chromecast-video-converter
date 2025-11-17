@@ -12,6 +12,61 @@ from pydantic import BaseModel, Field, ValidationError, model_validator
 LOGGER = logging.getLogger("orchestrator.config")
 
 
+def _validate_codecs(codec: str, audio_codec: str) -> None:
+    if codec.lower() != "h264":
+        raise ValueError("Only H.264 is supported to keep Chromecast compatibility.")
+    if audio_codec.lower() != "aac":
+        raise ValueError("Audio codec must be AAC for Chromecast.")
+
+
+def _validate_profile(profile: str, level: str) -> None:
+    allowed_profiles = {"baseline", "main", "high"}
+    if profile.lower() not in allowed_profiles:
+        raise ValueError("Chromecast Gen 2 only supports H.264 baseline, main, or high profiles.")
+
+    try:
+        level_value = float(level)
+    except ValueError as exc:  # noqa: BLE001
+        raise ValueError("Video level must be numeric (e.g. 4.1).") from exc
+    if level_value > 4.1:
+        raise ValueError("Chromecast Gen 2 supports up to level 4.1 for H.264.")
+
+
+def _validate_resolution(resolution: str) -> None:
+    try:
+        width_str, height_str = resolution.lower().split("x", 1)
+        width, height = int(width_str), int(height_str)
+    except ValueError as exc:  # noqa: BLE001
+        raise ValueError("Resolution must be formatted as WIDTHxHEIGHT.") from exc
+    if width > 1920 or height > 1080:
+        raise ValueError("Resolution must not exceed 1920x1080 for Chromecast Gen 2.")
+
+
+def _bitrate_to_int(value: str) -> int:
+    normalized = value.strip().lower()
+    if normalized.endswith("k"):
+        return int(float(normalized[:-1]) * 1_000)
+    if normalized.endswith("m"):
+        return int(float(normalized[:-1]) * 1_000_000)
+    return int(float(normalized))
+
+
+def _validate_bitrates(max_bitrate: str, bufsize: str, audio_bitrate: str) -> None:
+    try:
+        maxrate = _bitrate_to_int(max_bitrate)
+        bufsize_value = _bitrate_to_int(bufsize)
+        audio_rate = _bitrate_to_int(audio_bitrate)
+    except ValueError as exc:  # noqa: BLE001
+        raise ValueError("Bitrate values must be numeric and end with 'k' or 'M'.") from exc
+
+    if maxrate > 12_000_000:
+        raise ValueError("Chromecast Gen 2 cannot exceed ~12 Mbps video bitrate.")
+    if bufsize_value > 24_000_000:
+        raise ValueError("Buffer size must remain within Chromecast Gen 2 decoder limits.")
+    if audio_rate > 512_000:
+        raise ValueError("Audio bitrate must remain below 512 kbps for Chromecast Gen 2.")
+
+
 class AudioProfile(BaseModel):
     codec: str
     bitrate: str
@@ -28,12 +83,10 @@ class Profile(BaseModel):
 
     @model_validator(mode="after")
     def validate_codecs(cls, values):
-        codec = values.codec
-        audio = values.audio
-        if codec.lower() != "h264":
-            raise ValueError("Only H.264 is supported to keep Chromecast compatibility.")
-        if audio.codec.lower() != "aac":
-            raise ValueError("Audio codec must be AAC for Chromecast.")
+        _validate_codecs(values.codec, values.audio.codec)
+        _validate_profile(values.profile, values.level)
+        _validate_resolution(values.resolution)
+        _validate_bitrates(values.max_bitrate, values.bufsize, values.audio.bitrate)
         return values
 
 
@@ -74,6 +127,13 @@ class QualityConfig(BaseModel):
 class ConfigSource:
     path: Path
     config: QualityConfig
+
+
+def update_profile(config_source: ConfigSource, name: str, data: dict) -> Profile:
+    profile = Profile(**data)
+    config_source.config.profiles[name] = profile
+    LOGGER.info("Updated encoding profile '%s' for Chromecast-safe settings.", name)
+    return profile
 
 
 def load_config(path: Path) -> ConfigSource:
