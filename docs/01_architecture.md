@@ -28,7 +28,7 @@ All containers join a private Docker network. Bind mounts provide the Windows-ho
 4. **Transcode scheduling** - Non-compliant files become jobs in a durable queue. Orchestrator throttles concurrent ffmpeg invocations to respect GPU memory and disk IO.
 5. **Encoding** - `gpu-ffmpeg` receives a manifest (input path, target profile) and runs ffmpeg with pinned parameters: `-hwaccel cuda -hwaccel_output_format cuda -i <src> -vf "scale=-2:720:force_original_aspect_ratio=decrease" -c:v h264_nvenc -profile:v high -level 4.1 -preset p5 -cq 18 -maxrate 8M -bufsize 16M -pix_fmt yuv420p -movflags +faststart -c:a aac -b:a 192k -ac 2`. Audio/video map decisions come from the manifest.
 6. **Verification** - Upon success, orchestrator triggers another probe to confirm specs, updates catalog metadata (JSON/SQLite), and rotates files (e.g., move original to `archive/` if configured).
-7. **Observability** - Structured logs (JSON) flow to stdout for container log drivers. Orchestrator also emits metrics: queue length, GPU utilization snapshots, success ratio. Alerts fire when policy violations or repeated job failures occur.
+7. **Observability** - Structured logs (JSON) flow to stdout for container log drivers and are centralized by the orchestrator in a SQLite-backed log store exposed via `/api/logs`. Metrics cover queue length, GPU utilization snapshots, and success ratios; alerts fire when policy violations or repeated job failures occur.
 
 ## User interface and manual controls
 

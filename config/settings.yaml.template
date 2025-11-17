@@ -36,6 +36,9 @@ operational:
   max_disk_usage_percent: 90
   remove_original_after_success: false
 
+logging:
+  retention_days: 7
+
 notifiers:
   webhook:
     url: https://hooks.example.com/notify
