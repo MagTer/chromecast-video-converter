@@ -28,6 +28,17 @@ user-facing instructions described in these references.
 4. Visit `http://localhost:9000` to view the orchestrator dashboard, trigger a
    manual scan, or monitor job progress and metrics.
 
+### Dashboard features
+
+- A left-hand navigation groups queue controls, configuration, and live logs.
+- Logs can be filtered by level or search text to quickly isolate GPU errors or
+  scan activity.
+- Queue management now allows pausing/resuming workers when storage or thermal
+  limits are hit.
+- Encoding profiles can be edited in-browser and are validated against
+  Chromecast Gen 2 constraints (H.264 Baseline/Main/High, level <= 4.1,
+  resolution up to 1080p, and capped bitrates).
+
 ### GPU access inside Docker Compose
 
 - Install the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/index.html)
