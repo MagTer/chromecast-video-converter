@@ -21,6 +21,7 @@ class Job(BaseModel):
     path: str
     library: str
     profile: str
+    encoding: Optional[Dict[str, str]] = None
     status: str = JobStatus.PENDING
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
@@ -43,12 +44,17 @@ class JobManager:
         self._lock = asyncio.Lock()
         self._video_extensions = {".mp4", ".m4v", ".mov", ".mkv", ".ts", ".flv"}
 
-    async def add_job(self, path: str, library: str, profile: str) -> Job:
+        self._paused: bool = False
+        self._pause_reason: Optional[str] = None
+
+    async def add_job(
+        self, path: str, library: str, profile: str, encoding: Optional[Dict[str, str]] = None
+    ) -> Job:
         async with self._lock:
             for job in self._jobs.values():
                 if job.path == path and job.status != JobStatus.FAILED:
                     return job
-            job = Job(path=path, library=library, profile=profile)
+            job = Job(path=path, library=library, profile=profile, encoding=encoding)
             self._jobs[job.id] = job
             return job
 
@@ -58,12 +64,28 @@ class JobManager:
 
     async def acquire_next(self) -> Optional[Job]:
         async with self._lock:
+            if self._paused:
+                return None
             for job in self._jobs.values():
                 if job.status == JobStatus.PENDING:
                     job.status = JobStatus.RUNNING
                     job.updated_at = datetime.utcnow()
                     return job
             return None
+
+    async def queue_state(self) -> Dict[str, object]:
+        async with self._lock:
+            return {"paused": self._paused, "reason": self._pause_reason}
+
+    async def pause(self, reason: Optional[str] = None) -> None:
+        async with self._lock:
+            self._paused = True
+            self._pause_reason = reason or "Paused via API"
+
+    async def resume(self) -> None:
+        async with self._lock:
+            self._paused = False
+            self._pause_reason = None
 
     async def update_job(self, job_id: str, update: JobStatusUpdate) -> Job:
         async with self._lock:
@@ -78,7 +100,9 @@ class JobManager:
             job.updated_at = datetime.utcnow()
             return job
 
-    async def scan_directory(self, library: str, root: str, profile: str) -> List[Job]:
+    async def scan_directory(
+        self, library: str, root: str, profile: str, encoding: Optional[Dict[str, str]] = None
+    ) -> List[Job]:
         root_path = Path(root)
         if not root_path.exists():
             return []
@@ -89,6 +113,6 @@ class JobManager:
                 continue
             if "-chromecast" in entry.stem.lower():
                 continue
-            job = await self.add_job(str(entry), library, profile)
+            job = await self.add_job(str(entry), library, profile, encoding=encoding)
             jobs_added.append(job)
         return jobs_added

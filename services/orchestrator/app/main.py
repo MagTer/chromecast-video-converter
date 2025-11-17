@@ -14,9 +14,27 @@ from pydantic import BaseModel, Field
 
 from . import config as config_module
 from . import jellyfin, jobs
+from .logs import InMemoryLogHandler
+
+LOG_HANDLER = InMemoryLogHandler(capacity=750)
+
+
+def configure_logging() -> None:
+    formatter = logging.Formatter("%(asctime)s %(levelname)s [%(name)s] %(message)s")
+    stream_handler = logging.StreamHandler()
+    stream_handler.setFormatter(formatter)
+    LOG_HANDLER.setFormatter(formatter)
+
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.INFO)
+    root_logger.handlers.clear()
+    root_logger.addHandler(stream_handler)
+    root_logger.addHandler(LOG_HANDLER)
+
+
+configure_logging()
 
 LOGGER = logging.getLogger("orchestrator")
-logging.basicConfig(level=logging.INFO)
 
 CONFIG_PATH = Path(os.environ.get("CONFIG_PATH", "/app/config/quality.sample.yaml")).resolve()
 config_source = config_module.load_config(CONFIG_PATH)
@@ -51,12 +69,32 @@ class JobStatusPayload(BaseModel):
     message: Optional[str] = None
 
 
+class QueuePauseRequest(BaseModel):
+    reason: Optional[str] = None
+
+
+class EncodingUpdatePayload(BaseModel):
+    name: str = Field(description="Profile name to upsert")
+    codec: str
+    profile: str
+    level: str
+    resolution: str
+    max_bitrate: str
+    bufsize: str
+    audio: config_module.AudioProfile
+
+
 def sanitize_config(config: config_module.QualityConfig) -> Dict[str, Any]:
     data = config.model_dump()
     jellyfin_cfg = data.get("jellyfin")
     if jellyfin_cfg:
         jellyfin_cfg["api_key"] = "REDACTED"
     return data
+
+
+def encoding_payload(profile_name: str) -> Dict[str, Any]:
+    profile = config_source.config.profile_for(profile_name)
+    return profile.model_dump()
 
 
 def find_library_for_path(path: str) -> Optional[str]:
@@ -79,7 +117,9 @@ async def startup_event() -> None:
     LOGGER.info("Starting initial scan of configured libraries.")
     for name, library in config_source.config.libraries.items():
         LOGGER.info("Scanning library %s at %s", name, library.root)
-        await job_manager.scan_directory(name, library.root, library.profile)
+        await job_manager.scan_directory(
+            name, library.root, library.profile, encoding=encoding_payload(library.profile)
+        )
 
     jellyfin_cfg = config_source.config.jellyfin
     if jellyfin_cfg:
@@ -123,6 +163,33 @@ async def get_config() -> JSONResponse:
     return JSONResponse(sanitize_config(config_source.config))
 
 
+@app.post("/api/config/encoding")
+async def update_encoding(payload: EncodingUpdatePayload) -> JSONResponse:
+    try:
+        profile = config_module.update_profile(
+            config_source,
+            payload.name,
+            {
+                "codec": payload.codec,
+                "profile": payload.profile,
+                "level": payload.level,
+                "resolution": payload.resolution,
+                "max_bitrate": payload.max_bitrate,
+                "bufsize": payload.bufsize,
+                "audio": payload.audio.model_dump(),
+            },
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=422, detail=str(exc))
+    return JSONResponse({"name": payload.name, "profile": profile.model_dump()})
+
+
+@app.get("/api/logs")
+async def list_logs(level: Optional[str] = None, query: Optional[str] = None) -> JSONResponse:
+    entries = LOG_HANDLER.list_entries(level=level, query=query, limit=200)
+    return JSONResponse(entries)
+
+
 @app.get("/api/jobs")
 async def list_jobs() -> JSONResponse:
     jobs_list = await job_manager.list_jobs()
@@ -131,6 +198,9 @@ async def list_jobs() -> JSONResponse:
 
 @app.get("/api/jobs/next")
 async def next_job() -> JSONResponse:
+    queue_state = await job_manager.queue_state()
+    if queue_state["paused"]:
+        return JSONResponse(queue_state | {"detail": "Queue paused"}, status_code=409)
     job = await job_manager.acquire_next()
     if job is None:
         raise HTTPException(status_code=204, detail="No jobs available")
@@ -146,6 +216,25 @@ async def update_job_status(job_id: str, payload: JobStatusPayload) -> JSONRespo
     return JSONResponse(jsonable_encoder(job.model_dump()))
 
 
+@app.get("/api/queue/state")
+async def queue_state() -> JSONResponse:
+    return JSONResponse(await job_manager.queue_state())
+
+
+@app.post("/api/queue/pause")
+async def pause_queue(payload: QueuePauseRequest) -> JSONResponse:
+    await job_manager.pause(payload.reason)
+    LOGGER.warning("Job queue paused: %s", payload.reason or "no reason provided")
+    return JSONResponse(await job_manager.queue_state())
+
+
+@app.post("/api/queue/resume")
+async def resume_queue() -> JSONResponse:
+    await job_manager.resume()
+    LOGGER.info("Job queue resumed")
+    return JSONResponse(await job_manager.queue_state())
+
+
 @app.post("/api/scan")
 async def manual_scan(payload: ScanRequest, background_tasks: BackgroundTasks) -> JSONResponse:
     if payload.library:
@@ -158,7 +247,13 @@ async def manual_scan(payload: ScanRequest, background_tasks: BackgroundTasks) -
     scheduled: List[str] = []
     for name, library in target_libs.items():
         root_path = payload.root or library.root
-        background_tasks.add_task(job_manager.scan_directory, name, root_path, library.profile)
+        background_tasks.add_task(
+            job_manager.scan_directory,
+            name,
+            root_path,
+            library.profile,
+            encoding_payload(library.profile),
+        )
         scheduled.append(name)
     return JSONResponse({"scheduled": scheduled})
 
@@ -169,5 +264,7 @@ async def handle_event(payload: EventPayload) -> JSONResponse:
     if not library_name:
         raise HTTPException(status_code=400, detail="Library could not be determined")
     profile = config_source.config.libraries[library_name].profile
-    job = await job_manager.add_job(payload.path, library_name, profile)
+    job = await job_manager.add_job(
+        payload.path, library_name, profile, encoding=encoding_payload(profile)
+    )
     return JSONResponse(jsonable_encoder(job.model_dump()))
