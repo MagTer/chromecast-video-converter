@@ -24,7 +24,9 @@ LOGGER = configure_logging()
 
 ORCHESTRATOR_URL = os.environ.get("ORCHESTRATOR_URL", "http://localhost:9000")
 POLL_INTERVAL = int(os.environ.get("GPU_POLL_INTERVAL", "5"))
-SCALING_EXPRESSION = "scale=-2:720:force_original_aspect_ratio=decrease"
+# Keep scaling on the GPU to avoid format mismatches between CUDA surfaces and
+# software filters.
+SCALING_EXPRESSION = "scale_cuda=-2:720:force_original_aspect_ratio=decrease"
 
 CONFIG_PATH = Path(os.environ.get("CONFIG_PATH", "/app/config/settings.yaml"))
 try:
@@ -261,8 +263,6 @@ def _build_ffmpeg_command(
         maxrate,
         "-bufsize",
         bufsize,
-        "-pix_fmt",
-        "yuv420p",
         "-movflags",
         "+faststart",
         "-c:a",
