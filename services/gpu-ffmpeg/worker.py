@@ -263,8 +263,6 @@ def _build_ffmpeg_command(
         maxrate,
         "-bufsize",
         bufsize,
-        "-pix_fmt",
-        "yuv420p",
         "-movflags",
         "+faststart",
         "-c:a",
