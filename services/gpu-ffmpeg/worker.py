@@ -54,6 +54,7 @@ def configure_logging() -> logging.Logger:
 LOGGER = configure_logging()
 
 POLL_INTERVAL = int(os.environ.get("GPU_POLL_INTERVAL", "5"))
+STREAM_READER_LIMIT = int(os.environ.get("GPU_STREAM_READER_LIMIT", "1000000"))
 # Keep scaling on the GPU to avoid format mismatches between CUDA surfaces and
 # software filters.
 SCALING_EXPRESSION = "scale_cuda=-2:720:force_original_aspect_ratio=decrease"
@@ -330,6 +331,7 @@ async def _run_ffmpeg(
         *command,
         stderr=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,
+        limit=STREAM_READER_LIMIT,
     )
     last_progress = {"value": 5}
     recent_lines = deque(maxlen=20)
