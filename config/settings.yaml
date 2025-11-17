@@ -37,6 +37,9 @@ operational:
   gpu_temperature_cutoff: 85
   max_disk_usage_percent: 90
 
+logging:
+  retention_days: 7
+
 notifiers:
   webhook:
     url: https://hooks.example.com/notify

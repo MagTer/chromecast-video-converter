@@ -109,10 +109,15 @@ class JellyfinConfig(BaseModel):
     libraries: Dict[str, int]
 
 
+class LoggingConfig(BaseModel):
+    retention_days: int = Field(default=7, ge=1, le=90)
+
+
 class QualityConfig(BaseModel):
     libraries: Dict[str, LibraryConfig]
     profiles: Dict[str, Profile]
     operational: OperationConfig
+    logging: LoggingConfig = Field(default_factory=LoggingConfig)
     notifiers: Dict[str, dict] = Field(default_factory=dict)
     jellyfin: Optional[JellyfinConfig] = None
 

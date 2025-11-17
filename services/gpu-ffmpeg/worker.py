@@ -4,12 +4,38 @@ import os
 import re
 import time
 from collections import deque
+from datetime import datetime
 from pathlib import Path
 
 import httpx
 import yaml
 
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
+ORCHESTRATOR_URL = os.environ.get("ORCHESTRATOR_URL", "http://localhost:9000")
+
+
+class OrchestratorLogHandler(logging.Handler):
+    def __init__(self, base_url: str) -> None:
+        super().__init__()
+        self._client = httpx.Client(base_url=base_url, timeout=5.0)
+
+    def emit(self, record: logging.LogRecord) -> None:
+        message = self.format(record)
+        payload = {
+            "entries": [
+                {
+                    "timestamp": datetime.fromtimestamp(record.created).isoformat(),
+                    "level": record.levelname,
+                    "logger": record.name,
+                    "message": message,
+                }
+            ]
+        }
+        try:
+            self._client.post("/api/logs/ingest", json=payload)
+        except Exception:  # noqa: BLE001
+            # Remote logging failures should not block worker progress.
+            return
 
 
 def configure_logging() -> logging.Logger:
@@ -17,12 +43,16 @@ def configure_logging() -> logging.Logger:
         level=logging.getLevelName(LOG_LEVEL),
         format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
     )
-    return logging.getLogger("gpu-ffmpeg.worker")
+    logger = logging.getLogger("gpu-ffmpeg.worker")
+    handler = OrchestratorLogHandler(ORCHESTRATOR_URL)
+    handler.setLevel(logging.getLevelName(LOG_LEVEL))
+    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s [%(name)s] %(message)s"))
+    logger.addHandler(handler)
+    return logger
 
 
 LOGGER = configure_logging()
 
-ORCHESTRATOR_URL = os.environ.get("ORCHESTRATOR_URL", "http://localhost:9000")
 POLL_INTERVAL = int(os.environ.get("GPU_POLL_INTERVAL", "5"))
 # Keep scaling on the GPU to avoid format mismatches between CUDA surfaces and
 # software filters.

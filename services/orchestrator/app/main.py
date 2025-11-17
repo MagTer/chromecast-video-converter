@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -14,22 +15,24 @@ from pydantic import BaseModel, Field
 
 from . import config as config_module
 from . import jellyfin, jobs
-from .logs import InMemoryLogHandler
+from .logs import LogEntry, LogStore, SQLiteLogHandler
 
-LOG_HANDLER = InMemoryLogHandler(capacity=750)
+LOG_DB_PATH = Path(os.environ.get("LOG_DB_PATH", "/app/logs/events.db")).resolve()
+LOG_STORE = LogStore(LOG_DB_PATH)
 
 
 def configure_logging() -> None:
     formatter = logging.Formatter("%(asctime)s %(levelname)s [%(name)s] %(message)s")
     stream_handler = logging.StreamHandler()
     stream_handler.setFormatter(formatter)
-    LOG_HANDLER.setFormatter(formatter)
+    sqlite_handler = SQLiteLogHandler(LOG_STORE)
+    sqlite_handler.setFormatter(formatter)
 
     root_logger = logging.getLogger()
     root_logger.setLevel(logging.INFO)
     root_logger.handlers.clear()
     root_logger.addHandler(stream_handler)
-    root_logger.addHandler(LOG_HANDLER)
+    root_logger.addHandler(sqlite_handler)
 
 
 configure_logging()
@@ -38,6 +41,7 @@ LOGGER = logging.getLogger("orchestrator")
 
 CONFIG_PATH = Path(os.environ.get("CONFIG_PATH", "/app/config/settings.yaml")).resolve()
 config_source = config_module.load_config(CONFIG_PATH)
+LOG_STORE.update_retention(config_source.config.logging.retention_days)
 job_manager = jobs.JobManager()
 
 TEMPLATE_PATH = Path(__file__).parent / "templates" / "index.html"
@@ -82,6 +86,21 @@ class EncodingUpdatePayload(BaseModel):
     max_bitrate: str
     bufsize: str
     audio: config_module.AudioProfile
+
+
+class LoggingUpdatePayload(BaseModel):
+    retention_days: int = Field(ge=1, le=90)
+
+
+class LogIngestEvent(BaseModel):
+    logger: str
+    level: str
+    message: str
+    timestamp: Optional[datetime] = None
+
+
+class LogIngestBatch(BaseModel):
+    entries: List[LogIngestEvent]
 
 
 def sanitize_config(config: config_module.QualityConfig) -> Dict[str, Any]:
@@ -190,13 +209,43 @@ async def list_logs(
     query: Optional[str] = None,
     logger: Optional[str] = None,
 ) -> JSONResponse:
-    entries = LOG_HANDLER.list_entries(level=level, query=query, logger_name=logger, limit=200)
+    entries = LOG_STORE.list_entries(level=level, query=query, logger_name=logger, limit=200)
     return JSONResponse(entries)
 
 
 @app.get("/api/logs/categories")
 async def list_log_categories() -> JSONResponse:
-    return JSONResponse(LOG_HANDLER.list_categories())
+    return JSONResponse(LOG_STORE.list_categories())
+
+
+@app.get("/api/logs/stats")
+async def log_stats() -> JSONResponse:
+    return JSONResponse(LOG_STORE.stats())
+
+
+@app.post("/api/logs/ingest")
+async def ingest_logs(batch: LogIngestBatch) -> JSONResponse:
+    stored = 0
+    for entry in batch.entries:
+        LOG_STORE.add_entry(
+            LogEntry(
+                timestamp=entry.timestamp or datetime.utcnow(),
+                level=entry.level,
+                logger=entry.logger,
+                message=entry.message,
+            )
+        )
+        stored += 1
+    return JSONResponse({"stored": stored})
+
+
+@app.post("/api/config/logging")
+async def update_logging(payload: LoggingUpdatePayload) -> JSONResponse:
+    config_source.config.logging.retention_days = payload.retention_days
+    config_module.persist_config(config_source)
+    LOG_STORE.update_retention(payload.retention_days)
+    LOGGER.info("Updated log retention to %s days", payload.retention_days)
+    return JSONResponse({"retention_days": payload.retention_days})
 
 
 @app.get("/api/jobs")

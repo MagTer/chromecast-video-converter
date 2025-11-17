@@ -28,7 +28,7 @@ This guide walks through prerequisites, configuration, and day-one operation of 
 - Open `http://localhost:9000` to view the dashboard. It surfaces queue counts, recent logs, and manual scan controls.
 - Health endpoints: `/api/healthz` (confirms libraries are loaded) and `/api/readyz` (signals the API is ready to serve jobs).
 - Queue controls: `/api/queue/pause` and `/api/queue/resume` allow operators to throttle work when storage or thermal limits are reached.
-- Logging: `/api/logs` returns recent log entries with optional level/text filtering so GPU errors or scan activity can be isolated quickly.
+- Logging: `/api/logs` returns recent log entries across the orchestrator, GPU workers, and folder watcher. Configure the retention window (default 7 days) and review log disk usage from the Configuration page.
 - Job lifecycle:
   - `/api/scan` triggers a (re)scan of configured libraries to enqueue work.
   - `/api/jobs/next` supplies the next job to GPU workers.
