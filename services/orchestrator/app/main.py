@@ -19,6 +19,11 @@ from .logs import LogEntry, LogStore, SQLiteLogHandler
 
 LOG_DB_PATH = Path(os.environ.get("LOG_DB_PATH", "/app/logs/events.db")).resolve()
 LOG_STORE = LogStore(LOG_DB_PATH)
+LIBRARY_ROOT_PREFIXES = [
+    Path(prefix.strip())
+    for prefix in os.environ.get("LIBRARY_ROOT_PREFIXES", "/watch,/media").split(",")
+    if prefix.strip()
+]
 
 
 def configure_logging() -> None:
@@ -120,18 +125,41 @@ def encoding_payload(profile_name: str) -> Dict[str, Any]:
     return profile.model_dump()
 
 
+def _resolve_relaxed(path: Path) -> Path:
+    try:
+        return path.resolve()
+    except FileNotFoundError:
+        return path.resolve(strict=False)
+
+
+def _candidate_library_roots(root: Path) -> List[Path]:
+    matches: List[Path] = []
+    resolved_root = _resolve_relaxed(root)
+    for prefix in LIBRARY_ROOT_PREFIXES:
+        resolved_prefix = _resolve_relaxed(prefix)
+        try:
+            suffix = resolved_root.relative_to(resolved_prefix)
+        except ValueError:
+            continue
+        for alt_prefix in LIBRARY_ROOT_PREFIXES:
+            candidate = _resolve_relaxed(alt_prefix / suffix)
+            if candidate not in matches:
+                matches.append(candidate)
+    if resolved_root not in matches:
+        matches.append(resolved_root)
+    return matches
+
+
 def find_library_for_path(path: str) -> Optional[str]:
     try:
         normalized = Path(path).resolve()
     except FileNotFoundError:
         normalized = Path(path)
     for name, library in config_source.config.libraries.items():
-        try:
-            library_root = Path(library.root).resolve()
-        except FileNotFoundError:
-            continue
-        if normalized.is_relative_to(library_root):
-            return name
+        library_root = Path(library.root)
+        for candidate_root in _candidate_library_roots(library_root):
+            if normalized.is_relative_to(candidate_root):
+                return name
     return None
 
 
