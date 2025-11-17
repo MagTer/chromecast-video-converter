@@ -24,7 +24,9 @@ user-facing instructions described in these references.
    host-to-container paths defined in `docker-compose.yml` untouched unless you
    also update the volume mounts there.
 2. Run `docker compose build` (locks in Python dependencies and GPU image).
-3. Start the stack with `docker compose up`.
+3. Start the stack with `docker compose up`. The orchestrator container bind-
+   mounts `./services/orchestrator/app`, so refreshing the dashboard after a
+   `git pull` picks up new HTML without having to rebuild the image.
 4. Visit `http://localhost:9000` to view the orchestrator dashboard, trigger a
    manual scan, or monitor job progress and metrics.
 
