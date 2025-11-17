@@ -19,6 +19,7 @@ profiles:
     audio:
       codec: aac
       bitrate: 192k
+      channels: 2
   series:
     codec: h264
     profile: high
@@ -29,6 +30,7 @@ profiles:
     audio:
       codec: aac
       bitrate: 192k
+      channels: 2
 
 operational:
   max_concurrent_jobs: 1

@@ -24,7 +24,7 @@ LOGGER = configure_logging()
 
 ORCHESTRATOR_URL = os.environ.get("ORCHESTRATOR_URL", "http://localhost:9000")
 POLL_INTERVAL = int(os.environ.get("GPU_POLL_INTERVAL", "5"))
-SCALING_EXPRESSION = "scale=1280:-1"
+SCALING_EXPRESSION = "scale=-2:720:force_original_aspect_ratio=decrease"
 
 CONFIG_PATH = Path(os.environ.get("CONFIG_PATH", "/app/config/settings.yaml"))
 try:
@@ -235,9 +235,14 @@ def _build_ffmpeg_command(
     audio_cfg = profile.get("audio", {})
     audio_codec = audio_cfg.get("codec", "aac")
     audio_bitrate = audio_cfg.get("bitrate", "192k")
+    audio_channels = audio_cfg.get("channels", 2)
     command = [
         "ffmpeg",
         "-y",
+        "-hwaccel",
+        "cuda",
+        "-hwaccel_output_format",
+        "cuda",
         "-i",
         str(source),
         "-vf",
@@ -264,6 +269,8 @@ def _build_ffmpeg_command(
         audio_codec,
         "-b:a",
         audio_bitrate,
+        "-ac",
+        str(audio_channels),
         "-progress",
         "pipe:1",
         str(target),
