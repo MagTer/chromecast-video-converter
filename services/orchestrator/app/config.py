@@ -100,6 +100,7 @@ class OperationConfig(BaseModel):
     max_concurrent_jobs: int
     gpu_temperature_cutoff: int
     max_disk_usage_percent: int
+    remove_original_after_success: bool = False
 
 
 class JellyfinConfig(BaseModel):
