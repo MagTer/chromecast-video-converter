@@ -270,9 +270,10 @@
           </select>
           <select id="log-level">
             <option value="">All levels</option>
-            <option>INFO</option>
-            <option>WARNING</option>
-            <option>ERROR</option>
+            <option value="INFO" selected>INFO</option>
+            <option value="WARNING">WARNING</option>
+            <option value="ERROR">ERROR</option>
+            <option value="VERBOSE">VERBOSE</option>
           </select>
           <input id="log-query" placeholder="Filter by text" />
           <button id="refresh-logs" type="button">Filter</button>
@@ -444,6 +445,10 @@
 
     let configCache = null;
 
+    if (!logLevel.value) {
+      logLevel.value = "INFO";
+    }
+
     function ensureOption(select, value, label) {
       if (value === undefined || value === null) return;
       const stringValue = String(value);
@@ -563,6 +568,17 @@
       }
     }
 
+    function formatLogTimestamp(rawTimestamp) {
+      const parsed = new Date(rawTimestamp);
+      if (Number.isNaN(parsed.getTime())) {
+        return rawTimestamp;
+      }
+      return parsed.toLocaleString(undefined, {
+        dateStyle: "medium",
+        timeStyle: "medium",
+      });
+    }
+
     async function fetchLogs() {
       const params = new URLSearchParams();
       if (logCategory.value) params.set("logger", logCategory.value);
@@ -575,7 +591,7 @@
         const container = document.createElement("div");
         container.className = "log-entry";
         container.innerHTML = `
-          <div class="log-meta">${entry.timestamp} • ${entry.level} • ${entry.logger}</div>
+          <div class="log-meta">${formatLogTimestamp(entry.timestamp)} • ${entry.level} • ${entry.logger}</div>
           <div class="log-message">${entry.message}</div>
         `;
         logList.appendChild(container);

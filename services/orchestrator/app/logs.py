@@ -3,10 +3,26 @@ from __future__ import annotations
 import logging
 import sqlite3
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from threading import RLock
 from typing import List, Optional
+
+VERBOSE_LEVEL_NAME = "VERBOSE"
+logging.addLevelName(logging.DEBUG, VERBOSE_LEVEL_NAME)
+
+
+def _normalize_level(level: str) -> str:
+    normalized = level.upper()
+    if normalized == "DEBUG":
+        return VERBOSE_LEVEL_NAME
+    return normalized
+
+
+def _ensure_utc(timestamp: datetime) -> datetime:
+    if timestamp.tzinfo is None:
+        return timestamp.replace(tzinfo=timezone.utc)
+    return timestamp.astimezone(timezone.utc)
 
 
 @dataclass
@@ -18,8 +34,8 @@ class LogEntry:
 
     def to_dict(self) -> dict:
         return {
-            "timestamp": self.timestamp.isoformat(),
-            "level": self.level,
+            "timestamp": _ensure_utc(self.timestamp).isoformat(),
+            "level": _normalize_level(self.level),
             "logger": self.logger,
             "message": self.message,
         }
@@ -55,7 +71,7 @@ class LogStore:
             self._prune_expired()
 
     def _prune_expired(self) -> None:
-        cutoff = datetime.utcnow() - timedelta(days=self.retention_days)
+        cutoff = datetime.now(timezone.utc) - timedelta(days=self.retention_days)
         with self._lock:
             self._conn.execute("DELETE FROM logs WHERE timestamp < ?", (cutoff.timestamp(),))
             self._conn.commit()
@@ -65,10 +81,12 @@ class LogStore:
         self._prune_expired()
 
     def add_entry(self, entry: LogEntry) -> None:
+        utc_timestamp = _ensure_utc(entry.timestamp)
+        normalized_level = _normalize_level(entry.level)
         with self._lock:
             self._conn.execute(
                 "INSERT INTO logs(timestamp, level, logger, message) VALUES (?, ?, ?, ?)",
-                (entry.timestamp.timestamp(), entry.level.upper(), entry.logger, entry.message),
+                (utc_timestamp.timestamp(), normalized_level, entry.logger, entry.message),
             )
             self._conn.commit()
         self._prune_expired()
@@ -84,8 +102,13 @@ class LogStore:
         clauses = []
         params: list = []
         if level:
-            clauses.append("level = ?")
-            params.append(level.upper())
+            normalized = _normalize_level(level)
+            if normalized == VERBOSE_LEVEL_NAME:
+                clauses.append("(level = ? OR level = ?)")
+                params.extend([VERBOSE_LEVEL_NAME, "DEBUG"])
+            else:
+                clauses.append("level = ?")
+                params.append(normalized)
         if logger_name:
             clauses.append("LOWER(logger) = ?")
             params.append(logger_name.lower())
@@ -115,8 +138,10 @@ class LogStore:
         for row in rows:
             entries.append(
                 LogEntry(
-                    timestamp=datetime.fromtimestamp(row["timestamp"]),
-                    level=row["level"],
+                    timestamp=_ensure_utc(
+                        datetime.fromtimestamp(row["timestamp"], tz=timezone.utc)
+                    ),
+                    level=_normalize_level(row["level"]),
                     logger=row["logger"],
                     message=row["message"],
                 ).to_dict()
@@ -149,8 +174,8 @@ class SQLiteLogHandler(logging.Handler):
     def emit(self, record: logging.LogRecord) -> None:
         message = self.format(record)
         entry = LogEntry(
-            timestamp=datetime.fromtimestamp(record.created),
-            level=record.levelname,
+            timestamp=_ensure_utc(datetime.fromtimestamp(record.created, tz=timezone.utc)),
+            level=_normalize_level(record.levelname),
             logger=record.name,
             message=message,
         )

@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -17,6 +17,8 @@ from . import config as config_module
 from . import jellyfin, jobs
 from .logs import LogEntry, LogStore, SQLiteLogHandler
 
+logging.addLevelName(logging.DEBUG, "VERBOSE")
+
 LOG_DB_PATH = Path(os.environ.get("LOG_DB_PATH", "/app/logs/events.db")).resolve()
 LOG_STORE = LogStore(LOG_DB_PATH)
 LIBRARY_ROOT_PREFIXES = [
@@ -29,12 +31,14 @@ LIBRARY_ROOT_PREFIXES = [
 def configure_logging() -> None:
     formatter = logging.Formatter("%(asctime)s %(levelname)s [%(name)s] %(message)s")
     stream_handler = logging.StreamHandler()
+    stream_handler.setLevel(logging.INFO)
     stream_handler.setFormatter(formatter)
     sqlite_handler = SQLiteLogHandler(LOG_STORE)
+    sqlite_handler.setLevel(logging.DEBUG)
     sqlite_handler.setFormatter(formatter)
 
     root_logger = logging.getLogger()
-    root_logger.setLevel(logging.INFO)
+    root_logger.setLevel(logging.DEBUG)
     root_logger.handlers.clear()
     root_logger.addHandler(stream_handler)
     root_logger.addHandler(sqlite_handler)
@@ -265,7 +269,7 @@ async def ingest_logs(batch: LogIngestBatch) -> JSONResponse:
     for entry in batch.entries:
         LOG_STORE.add_entry(
             LogEntry(
-                timestamp=entry.timestamp or datetime.utcnow(),
+                timestamp=entry.timestamp or datetime.now(timezone.utc),
                 level=entry.level,
                 logger=entry.logger,
                 message=entry.message,

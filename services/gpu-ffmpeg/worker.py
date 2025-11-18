@@ -4,13 +4,17 @@ import os
 import re
 import time
 from collections import deque
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 import httpx
 import yaml
 
+logging.addLevelName(logging.DEBUG, "VERBOSE")
+
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
+if LOG_LEVEL == "VERBOSE":
+    LOG_LEVEL = "DEBUG"
 ORCHESTRATOR_URL = os.environ.get("ORCHESTRATOR_URL", "http://localhost:9000")
 
 
@@ -24,7 +28,9 @@ class OrchestratorLogHandler(logging.Handler):
         payload = {
             "entries": [
                 {
-                    "timestamp": datetime.fromtimestamp(record.created).isoformat(),
+                    "timestamp": datetime.fromtimestamp(
+                        record.created, tz=timezone.utc
+                    ).isoformat(),
                     "level": record.levelname,
                     "logger": record.name,
                     "message": message,
