@@ -252,7 +252,9 @@ def _build_disposition_flags(
     return flags
 
 
-def build_ffmpeg_command(analysis_json: dict, input_path: Path, output_path: Path) -> list[str]:
+def build_ffmpeg_command(  # noqa: C901
+    analysis_json: dict, input_path: Path, output_path: Path
+) -> list[str]:
     profile = analysis_json.get("encoding") or PROFILES.get(
         analysis_json.get("profile"),
         {},
@@ -361,6 +363,9 @@ def build_ffmpeg_command(analysis_json: dict, input_path: Path, output_path: Pat
                 str(audio_channels),
             ]
         )
+
+    if selected_subtitles:
+        command.extend(["-c:s", "mov_text"])
 
     command.extend(audio_dispositions)
     command.extend(subtitle_dispositions)
