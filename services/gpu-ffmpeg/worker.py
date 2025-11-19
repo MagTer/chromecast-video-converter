@@ -1,9 +1,9 @@
 import asyncio
+import json
 import logging
 import os
-import re
+import subprocess
 import time
-from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -60,7 +60,6 @@ def configure_logging() -> logging.Logger:
 LOGGER = configure_logging()
 
 POLL_INTERVAL = int(os.environ.get("GPU_POLL_INTERVAL", "5"))
-STREAM_READER_LIMIT = int(os.environ.get("GPU_STREAM_READER_LIMIT", "1000000"))
 # Keep scaling on the GPU to avoid format mismatches between CUDA surfaces and
 # software filters.
 SCALING_EXPRESSION = "scale_cuda=-2:720:force_original_aspect_ratio=decrease"
@@ -80,18 +79,292 @@ if _CONFIG:
     )
 else:
     LOGGER.warning("No settings config present at %s; using defaults", CONFIG_PATH)
-FFPROBE_CMD = [
+FFPROBE_ANALYSIS_CMD = [
     "ffprobe",
     "-v",
-    "error",
-    "-show_entries",
-    "format=duration",
-    "-of",
-    "default=noprint_wrappers=1:nokey=1",
+    "quiet",
+    "-print_format",
+    "json",
+    "-show_format",
+    "-show_streams",
 ]
-PROGRESS_RE = re.compile(r"time=(\d+:\d+:\d+\.\d+)")
 OPERATIONAL_CONFIG = _CONFIG.get("operational", {})
 REMOVE_ORIGINAL = bool(OPERATIONAL_CONFIG.get("remove_original_after_success", False))
+
+
+def probe_file(filepath: str | Path) -> dict:
+    command = [*FFPROBE_ANALYSIS_CMD, str(filepath)]
+    try:
+        result = subprocess.run(
+            command,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except subprocess.SubprocessError as exc:
+        LOGGER.warning("ffprobe analysis failed for %s: %s", filepath, exc)
+        return {}
+    try:
+        return json.loads(result.stdout)
+    except json.JSONDecodeError:
+        LOGGER.warning("Failed to parse ffprobe output for %s", filepath)
+        return {}
+
+
+def _normalize_language(language: str | None) -> str | None:
+    if not language:
+        return None
+    code = language.lower()
+    if code in {"swe", "sv"}:
+        return "swe"
+    if code in {"eng", "en"}:
+        return "eng"
+    return code
+
+
+def _gather_streams(streams: list[dict]) -> tuple[bool, list[dict], list[dict]]:
+    video_present = False
+    audio_streams: list[dict] = []
+    subtitle_streams: list[dict] = []
+    audio_pos = 0
+    subtitle_pos = 0
+    for stream in streams:
+        codec_type = stream.get("codec_type")
+        if codec_type == "video":
+            video_present = True
+        elif codec_type == "audio":
+            audio_streams.append(
+                {
+                    "input_index": audio_pos,
+                    "language": _normalize_language(stream.get("tags", {}).get("language")),
+                    "disposition": stream.get("disposition", {}),
+                }
+            )
+            audio_pos += 1
+        elif codec_type == "subtitle":
+            subtitle_streams.append(
+                {
+                    "input_index": subtitle_pos,
+                    "language": _normalize_language(stream.get("tags", {}).get("language")),
+                    "disposition": stream.get("disposition", {}),
+                }
+            )
+            subtitle_pos += 1
+    return video_present, audio_streams, subtitle_streams
+
+
+def _select_priority_streams(stream_list: list[dict]) -> tuple[list[dict], int | None]:
+    mapped: list[dict] = []
+    seen_inputs: set[int] = set()
+
+    swedish = [s for s in stream_list if s.get("language") == "swe"]
+    english = [s for s in stream_list if s.get("language") == "eng"]
+
+    original = next(
+        (s for s in stream_list if s.get("disposition", {}).get("original")),
+        None,
+    )
+    if original is None:
+        original = next(
+            (s for s in stream_list if s.get("disposition", {}).get("default")),
+            None,
+        )
+    if original is None and stream_list:
+        original = stream_list[0]
+
+    for candidate in [*swedish, *english, original]:
+        if candidate is None:
+            continue
+        idx = candidate["input_index"]
+        if idx in seen_inputs:
+            continue
+        mapped.append(candidate)
+        seen_inputs.add(idx)
+
+    default_idx: int | None = None
+    if swedish:
+        for i, stream in enumerate(mapped):
+            if stream in swedish:
+                default_idx = i
+                break
+    elif mapped:
+        default_idx = 0
+    return mapped, default_idx
+
+
+def _build_disposition_flags(
+    mapped_streams: list[dict], default_idx: int | None, stream_type: str
+) -> list[str]:
+    flags: list[str] = []
+    for output_idx in range(len(mapped_streams)):
+        disposition_value = "default" if default_idx == output_idx else "0"
+        flags.extend([f"-disposition:{stream_type}:{output_idx}", disposition_value])
+    return flags
+
+
+def build_ffmpeg_command(analysis_json: dict, input_path: Path, output_path: Path) -> list[str]:
+    profile = analysis_json.get("encoding") or PROFILES.get(
+        analysis_json.get("profile"),
+        {},
+    )
+
+    profile = profile or {}
+    maxrate = profile.get("max_bitrate", "8M")
+    bufsize = profile.get("bufsize", "16M")
+    level = profile.get("level", "4.1")
+    max_fps = int(profile.get("max_fps", 30) or 30)
+    preset = str(profile.get("preset", "p5"))
+    rc_mode = str(profile.get("rc", "vbr_hq"))
+    cq = str(profile.get("cq", 18))
+    audio_cfg = profile.get("audio", {})
+    audio_codec = audio_cfg.get("codec", "aac")
+    audio_bitrate = audio_cfg.get("bitrate", "192k")
+    audio_channels = int(audio_cfg.get("channels", 2) or 2)
+
+    streams = analysis_json.get("streams", [])
+    video_present, audio_streams, subtitle_streams = _gather_streams(streams)
+
+    selected_audio, default_audio_idx = _select_priority_streams(audio_streams)
+    selected_subtitles, default_sub_idx = _select_priority_streams(subtitle_streams)
+
+    command: list[str] = [
+        "ffmpeg",
+        "-y",
+        "-hwaccel",
+        "cuda",
+        "-hwaccel_output_format",
+        "cuda",
+        "-i",
+        str(input_path),
+    ]
+
+    if video_present:
+        command.extend(["-map", "0:v"])
+
+    for audio_stream in selected_audio:
+        command.extend(["-map", f"0:a:{audio_stream['input_index']}"])
+
+    for subtitle_stream in selected_subtitles:
+        command.extend(["-map", f"0:s:{subtitle_stream['input_index']}"])
+
+    audio_dispositions = _build_disposition_flags(selected_audio, default_audio_idx, "a")
+    subtitle_dispositions = _build_disposition_flags(selected_subtitles, default_sub_idx, "s")
+
+    filters = [SCALING_EXPRESSION]
+    if max_fps > 0:
+        filters.append(f"fps={min(max_fps, 30)}")
+    video_filter = ",".join(filters)
+
+    command.extend(
+        [
+            "-vf",
+            video_filter,
+            "-c:v",
+            "h264_nvenc",
+            "-rc",
+            rc_mode,
+            "-preset",
+            preset,
+            "-profile:v",
+            "high",
+            "-level",
+            level,
+            "-cq",
+            cq,
+            "-maxrate",
+            maxrate,
+            "-bufsize",
+            bufsize,
+            "-movflags",
+            "+faststart",
+        ]
+    )
+
+    if selected_audio:
+        command.extend(
+            [
+                "-c:a",
+                audio_codec,
+                "-b:a",
+                audio_bitrate,
+                "-ac",
+                str(audio_channels),
+            ]
+        )
+
+    command.extend(audio_dispositions)
+    command.extend(subtitle_dispositions)
+
+    command.extend(["-progress", "pipe:1", str(output_path)])
+
+    return command
+
+
+def run_conversion(command: list[str], progress_callback) -> int:
+    process = subprocess.Popen(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    assert process.stdout is not None
+    try:
+        while True:
+            line = process.stdout.readline()
+            if line == "" and process.poll() is not None:
+                break
+            if not line:
+                continue
+            text_line = line.strip()
+            if text_line.startswith("out_time_ms="):
+                try:
+                    out_time_ms = int(text_line.split("=", 1)[1])
+                except ValueError:
+                    continue
+                progress_callback(out_time_ms)
+    finally:
+        return_code = process.wait()
+    return return_code
+
+
+def _extract_duration(analysis: dict) -> float:
+    try:
+        return float(analysis.get("format", {}).get("duration", 0))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _progress_callback_factory(
+    duration: float,
+    loop: asyncio.AbstractEventLoop,
+    client: httpx.AsyncClient,
+    job_id: str,
+) -> tuple[callable, dict, dict]:
+    last_progress = {"value": 5}
+    last_update_ts = {"value": time.monotonic()}
+
+    def progress_callback(out_time_ms: int) -> None:
+        if duration <= 0:
+            return
+        elapsed_seconds = out_time_ms / 1_000_000.0
+        percentage = min(99, int((elapsed_seconds / duration) * 100))
+        now = time.monotonic()
+        if percentage <= last_progress["value"] or now - last_update_ts["value"] < 1:
+            return
+        last_progress["value"] = percentage
+        last_update_ts["value"] = now
+        loop.call_soon_threadsafe(
+            asyncio.create_task,
+            update_job_status(
+                client,
+                job_id,
+                "running",
+                percentage,
+                f"Encoded {elapsed_seconds:.1f}s",
+            ),
+        )
+
+    return progress_callback, last_progress, last_update_ts
 
 
 async def claim_job(client: httpx.AsyncClient) -> dict | None:
@@ -127,25 +400,11 @@ async def update_job_status(
         LOGGER.error("Failed to update job %s status: %s", job_id[:8], exc)
 
 
-def _parse_timecode(code: str) -> float:
-    hours, minutes, seconds = code.strip().split(":")
-    return int(hours) * 3600 + int(minutes) * 60 + float(seconds)
-
-
 async def _probe_duration(source: Path) -> float:
-    command = [*FFPROBE_CMD, str(source)]
-    proc = await asyncio.create_subprocess_exec(
-        *command,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.DEVNULL,
-    )
-    stdout, _ = await proc.communicate()
-    if proc.returncode != 0:
-        LOGGER.warning("ffprobe failed for %s with exit code %s", source, proc.returncode)
-        return 0.0
+    analysis = await asyncio.to_thread(probe_file, source)
     try:
-        return float(stdout.decode().strip())
-    except ValueError:
+        return float(analysis.get("format", {}).get("duration", 0))
+    except (TypeError, ValueError):
         LOGGER.debug("Unable to parse duration from ffprobe output for %s", source)
         return 0.0
 
@@ -174,77 +433,6 @@ async def _validate_output(output: Path, expected_duration: float) -> bool:
     return True
 
 
-def _timecode_from_progress(key: str, value: str) -> tuple[float | None, bool]:
-    try:
-        if key == "out_time":
-            return _parse_timecode(value), False
-        if key in {"out_time_us", "out_time_ms"}:
-            # FFmpeg reports out_time_ms/out_time_us in microseconds despite the
-            # slightly misleading name.
-            return float(value) / 1_000_000.0, False
-        if key == "progress" and value == "end":
-            return None, True
-    except ValueError:
-        return None, False
-    return None, False
-
-
-def _calculate_progress(
-    timecode: float, duration: float, last_progress: dict[str, int], last_time: dict[str, float]
-) -> tuple[int | None, str]:
-    if duration > 0:
-        return min(99, int((timecode / duration) * 100)), "Encoding in progress"
-    if timecode - last_time["value"] < 5:
-        return None, ""
-    progress = min(last_progress["value"] + 1, 2)
-    remaining = max(0, 1200 - timecode)
-    return progress, f"Encoded {timecode:.1f}s, ETA {remaining:.0f}s"
-
-
-async def _monitor_progress(
-    stream: asyncio.StreamReader,
-    duration: float,
-    client: httpx.AsyncClient,
-    job_id: str,
-    last_progress: dict[str, int],
-) -> None:
-    last_time = {"value": 0.0}
-    last_update_ts = time.monotonic()
-    while True:
-        line = await stream.readline()
-        if not line:
-            break
-        text = line.decode(errors="ignore").strip()
-        if "=" not in text:
-            continue
-        key, value = text.split("=", 1)
-        if key not in {"out_time", "out_time_ms", "out_time_us", "progress"}:
-            continue
-        timecode, ended = _timecode_from_progress(key, value)
-        if ended:
-            await update_job_status(client, job_id, "running", 100, "Encoding finished")
-            last_progress["value"] = 100
-            break
-        if timecode is None:
-            continue
-        progress, status_msg = _calculate_progress(timecode, duration, last_progress, last_time)
-        if progress is None:
-            last_time["value"] = timecode
-            continue
-        now = time.monotonic()
-        if progress > last_progress["value"] and now - last_update_ts >= 1:
-            await update_job_status(
-                client,
-                job_id,
-                "running",
-                progress,
-                status_msg,
-            )
-            last_progress["value"] = progress
-            last_update_ts = now
-        last_time["value"] = timecode
-
-
 def _build_output_path(source: Path) -> Path:
     return source.parent / f"{source.stem}-chromecast.mp4"
 
@@ -264,104 +452,6 @@ async def _maybe_remove_original(source: Path, output_path: Path, expected_durat
     return True
 
 
-def _build_ffmpeg_command(
-    profile_name: str, source: Path, target: Path, encoding: dict | None = None
-) -> list[str]:
-    profile = encoding or PROFILES.get(profile_name, {})
-    maxrate = profile.get("max_bitrate", "8M")
-    bufsize = profile.get("bufsize", "16M")
-    level = profile.get("level", "4.1")
-    max_fps = int(profile.get("max_fps", 30) or 30)
-    preset = str(profile.get("preset", "p5"))
-    rc_mode = str(profile.get("rc", "vbr_hq"))
-    cq = str(profile.get("cq", 18))
-    audio_cfg = profile.get("audio", {})
-    audio_codec = audio_cfg.get("codec", "aac")
-    audio_bitrate = audio_cfg.get("bitrate", "192k")
-    audio_channels = int(audio_cfg.get("channels", 2) or 2)
-    filters = [SCALING_EXPRESSION]
-    if max_fps > 0:
-        filters.append(f"fps={min(max_fps, 30)}")
-    video_filter = ",".join(filters)
-    command = [
-        "ffmpeg",
-        "-y",
-        "-hwaccel",
-        "cuda",
-        "-hwaccel_output_format",
-        "cuda",
-        "-i",
-        str(source),
-        "-map",
-        "0:v:0",
-        "-map",
-        "0:a?",
-        "-vf",
-        video_filter,
-        "-c:v",
-        "h264_nvenc",
-        "-rc",
-        rc_mode,
-        "-preset",
-        preset,
-        "-profile:v",
-        "high",
-        "-level",
-        level,
-        "-cq",
-        cq,
-        "-maxrate",
-        maxrate,
-        "-bufsize",
-        bufsize,
-        "-movflags",
-        "+faststart",
-        "-c:a",
-        audio_codec,
-        "-b:a",
-        audio_bitrate,
-        "-ac",
-        str(audio_channels),
-        "-progress",
-        "pipe:1",
-        str(target),
-    ]
-    return command
-
-
-async def _run_ffmpeg(
-    command: list[str], duration: float, client: httpx.AsyncClient, job_id: str
-) -> int:
-    LOGGER.debug("Executing ffmpeg command: %s", " ".join(command))
-    proc = await asyncio.create_subprocess_exec(
-        *command,
-        stderr=asyncio.subprocess.PIPE,
-        stdout=asyncio.subprocess.PIPE,
-        limit=STREAM_READER_LIMIT,
-    )
-    last_progress = {"value": 5}
-    recent_lines = deque(maxlen=20)
-    progress_task = asyncio.create_task(
-        _monitor_progress(proc.stdout, duration, client, job_id, last_progress)
-    )
-    while True:
-        line = await proc.stderr.readline()
-        if not line:
-            break
-        decoded = line.decode(errors="ignore")
-        recent_lines.append(decoded.strip())
-    return_code = await proc.wait()
-    await progress_task
-    if return_code != 0:
-        LOGGER.error(
-            "FFmpeg job %s failed (code %s). Last stderr lines:\n%s",
-            job_id[:8],
-            return_code,
-            "\n".join(recent_lines),
-        )
-    return return_code
-
-
 async def process_job(client: httpx.AsyncClient, job: dict) -> None:
     job_id = job["id"]
     source = job["path"]
@@ -373,9 +463,13 @@ async def process_job(client: httpx.AsyncClient, job: dict) -> None:
         LOGGER.error("%s", message)
         await update_job_status(client, job_id, "failed", 0, message)
         return
-    duration = await _probe_duration(playback_target)
+
+    analysis = await asyncio.to_thread(probe_file, playback_target)
+    analysis = analysis or {}
+    duration = _extract_duration(analysis)
     if duration == 0:
         LOGGER.warning("Duration probe for %s returned 0 seconds", playback_target)
+
     output_path = _build_output_path(playback_target)
     encoding = job.get("encoding") or PROFILES.get(job["profile"], {})
     if not encoding:
@@ -383,17 +477,31 @@ async def process_job(client: httpx.AsyncClient, job: dict) -> None:
             "No encoding settings supplied for profile %s; using defaults.",
             job["profile"],
         )
+
+    analysis["encoding"] = encoding
+    analysis["profile"] = job.get("profile")
+
     if await _validate_output(output_path, duration):
         message = f"Output already present at {output_path}; skipping encode"
         await update_job_status(client, job_id, "completed", 100, message)
         LOGGER.info("Job %s completed from existing output %s", job_id[:8], output_path)
         if await _maybe_remove_original(playback_target, output_path, duration):
             await update_job_status(
-                client, job_id, "completed", 100, f"{message}. Original removed"
+                client,
+                job_id,
+                "completed",
+                100,
+                f"{message}. Original removed",
             )
         return
-    command = _build_ffmpeg_command(job["profile"], playback_target, output_path, encoding)
-    return_code = await _run_ffmpeg(command, duration, client, job_id)
+
+    command = build_ffmpeg_command(analysis, playback_target, output_path)
+
+    loop = asyncio.get_running_loop()
+    progress_callback, _, _ = _progress_callback_factory(duration, loop, client, job_id)
+
+    return_code = await asyncio.to_thread(run_conversion, command, progress_callback)
+
     if return_code == 0:
         message = f"Encoding finished to {output_path}"
         if not await _validate_output(output_path, duration):
