@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import json
 import logging
 from dataclasses import dataclass
@@ -212,6 +213,16 @@ def persist_config(source: ConfigSource) -> None:
         serialized = yaml.safe_dump(payload, sort_keys=False)
         source.path.write_text(serialized, encoding="utf-8")
         LOGGER.info("Persisted settings to %s", source.path)
+    except OSError as exc:
+        if exc.errno == errno.EROFS:
+            LOGGER.warning(
+                "Config path %s is read-only; keeping updates in memory only (%s)",
+                source.path,
+                exc,
+            )
+            return
+        LOGGER.error("Failed to persist settings to %s: %s", source.path, exc)
+        raise
     except Exception as exc:  # noqa: BLE001
         LOGGER.error("Failed to persist settings to %s: %s", source.path, exc)
         raise

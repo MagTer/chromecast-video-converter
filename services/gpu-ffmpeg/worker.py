@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import os
+import platform
 import subprocess
 import time
 from datetime import datetime, timezone
@@ -16,6 +17,7 @@ LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
 if LOG_LEVEL == "VERBOSE":
     LOG_LEVEL = "DEBUG"
 ORCHESTRATOR_URL = os.environ.get("ORCHESTRATOR_URL", "http://localhost:9000")
+STREAM_READER_LIMIT = int(os.environ.get("GPU_STREAM_READER_LIMIT", "1000000"))
 
 
 class OrchestratorLogHandler(logging.Handler):
@@ -63,6 +65,52 @@ POLL_INTERVAL = int(os.environ.get("GPU_POLL_INTERVAL", "5"))
 # Keep scaling on the GPU to avoid format mismatches between CUDA surfaces and
 # software filters.
 SCALING_EXPRESSION = "scale_cuda=-2:720:force_original_aspect_ratio=decrease"
+
+
+def _detect_host_environment() -> dict[str, bool]:
+    uname = platform.uname()
+    release = uname.release.lower()
+    version = uname.version.lower()
+    return {"is_wsl": "microsoft" in release or "microsoft" in version}
+
+
+def _probe_nvenc_capabilities() -> dict[str, bool]:
+    capabilities = {"rc_vbr_hq": True, "multipass_fullres": True}
+    try:
+        result = subprocess.run(
+            [
+                "ffmpeg",
+                "-hide_banner",
+                "-loglevel",
+                "quiet",
+                "-h",
+                "encoder=h264_nvenc",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except subprocess.SubprocessError as exc:
+        LOGGER.warning("Unable to probe NVENC encoder capabilities: %s", exc)
+        return capabilities
+
+    output = result.stdout.lower()
+    capabilities["rc_vbr_hq"] = "vbr_hq" in output
+    capabilities["multipass_fullres"] = "fullres" in output
+
+    LOGGER.info(
+        "NVENC capabilities detected (vbr_hq=%s, multipass_fullres=%s)",
+        capabilities["rc_vbr_hq"],
+        capabilities["multipass_fullres"],
+    )
+    return capabilities
+
+
+HOST_ENVIRONMENT = _detect_host_environment()
+NVENC_CAPABILITIES = _probe_nvenc_capabilities()
+
+if HOST_ENVIRONMENT["is_wsl"]:
+    LOGGER.warning("Detected WSL kernel; NVENC rate-control and multipass support may be limited")
 
 CONFIG_PATH = Path(os.environ.get("CONFIG_PATH", "/app/config/settings.yaml"))
 try:
@@ -214,8 +262,25 @@ def build_ffmpeg_command(analysis_json: dict, input_path: Path, output_path: Pat
     level = profile.get("level", "4.1")
     max_fps = int(profile.get("max_fps", 30) or 30)
     preset = str(profile.get("preset", "p5"))
-    rc_mode = str(profile.get("rc", "vbr_hq"))
+    rc_mode = str(profile.get("rc", "vbr_hq")).lower()
     cq = str(profile.get("cq", 18))
+    multipass_mode: str | None = None
+    if rc_mode == "vbr_hq":
+        multipass_mode = "fullres"
+
+    if rc_mode == "vbr_hq" and not NVENC_CAPABILITIES.get("rc_vbr_hq", True):
+        LOGGER.warning(
+            "Requested rc mode vbr_hq is unavailable; falling back to vbr (WSL=%s)",
+            HOST_ENVIRONMENT["is_wsl"],
+        )
+        rc_mode = "vbr"
+        multipass_mode = None
+
+    if multipass_mode and not NVENC_CAPABILITIES.get("multipass_fullres", True):
+        LOGGER.warning(
+            "NVENC multipass fullres mode is unavailable; continuing without multipass",
+        )
+        multipass_mode = None
     audio_cfg = profile.get("audio", {})
     audio_codec = audio_cfg.get("codec", "aac")
     audio_bitrate = audio_cfg.get("bitrate", "192k")
@@ -280,6 +345,9 @@ def build_ffmpeg_command(analysis_json: dict, input_path: Path, output_path: Pat
         ]
     )
 
+    if multipass_mode:
+        command.extend(["-multipass", multipass_mode])
+
     if selected_audio:
         command.extend(
             [
@@ -306,11 +374,13 @@ def run_conversion(command: list[str], progress_callback) -> int:
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
+        encoding="utf-8",
+        errors="replace",
     )
     assert process.stdout is not None
     try:
         while True:
-            line = process.stdout.readline()
+            line = process.stdout.readline(STREAM_READER_LIMIT)
             if line == "" and process.poll() is not None:
                 break
             if not line:
