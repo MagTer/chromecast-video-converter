@@ -3,8 +3,10 @@ import json
 import logging
 import os
 import platform
+import shlex
 import subprocess
 import time
+from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -368,7 +370,13 @@ def build_ffmpeg_command(analysis_json: dict, input_path: Path, output_path: Pat
     return command
 
 
-def run_conversion(command: list[str], progress_callback) -> int:
+def _loggable_command(command: list[str]) -> str:
+    return " ".join(shlex.quote(arg) for arg in command)
+
+
+def run_conversion(command: list[str], progress_callback) -> tuple[int, list[str]]:
+    LOGGER.info("Starting FFmpeg with command: %s", _loggable_command(command))
+    ffmpeg_logs: deque[str] = deque(maxlen=100)
     process = subprocess.Popen(
         command,
         stdout=subprocess.PIPE,
@@ -392,9 +400,12 @@ def run_conversion(command: list[str], progress_callback) -> int:
                 except ValueError:
                     continue
                 progress_callback(out_time_ms)
+            else:
+                LOGGER.debug("ffmpeg: %s", text_line)
+                ffmpeg_logs.append(text_line)
     finally:
         return_code = process.wait()
-    return return_code
+    return return_code, list(ffmpeg_logs)
 
 
 def _extract_duration(analysis: dict) -> float:
@@ -570,7 +581,7 @@ async def process_job(client: httpx.AsyncClient, job: dict) -> None:
     loop = asyncio.get_running_loop()
     progress_callback, _, _ = _progress_callback_factory(duration, loop, client, job_id)
 
-    return_code = await asyncio.to_thread(run_conversion, command, progress_callback)
+    return_code, ffmpeg_logs = await asyncio.to_thread(run_conversion, command, progress_callback)
 
     if return_code == 0:
         message = f"Encoding finished to {output_path}"
@@ -590,6 +601,14 @@ async def process_job(client: httpx.AsyncClient, job: dict) -> None:
         LOGGER.info("Job %s completed, output: %s", job_id[:8], output_path)
     else:
         message = f"FFmpeg exited with code {return_code}"
+        if ffmpeg_logs:
+            LOGGER.error(
+                "Job %s failed (code %s). Last FFmpeg output:\n%s",
+                job_id[:8],
+                return_code,
+                "\n".join(ffmpeg_logs),
+            )
+            message = f"{message}; last log line: {ffmpeg_logs[-1]}"
         await update_job_status(client, job_id, "failed", 0, message)
 
 
