@@ -1,18 +1,20 @@
 # Chromecast Video Converter
 
 Container-driven pipeline that keeps a media library Chromecast Gen 2/3 ready
-through GPU-only transcoding. The MVP is operational: the orchestrator exposes a
-dashboard and JSON API, a Redis-backed job queue coordinates GPU workers, and an
-Alpine watcher feeds file-system events into the system.
+through GPU-only transcoding. The orchestrator now runs as a Flask application
+backed by a SQLite database and implements a database-driven finite state
+machine for every media asset. A smart scanner keeps the database aligned with
+the filesystem, while a persistent worker thread advances jobs through
+`New -> Queued -> Processing -> Completed/Failed/Archived` states.
 
 ## Documentation map
 
-- [`docs/01_architecture.md`](docs/01_architecture.md) - Component model, data
-  flows, containers, and operational constraints now implemented in the MVP.
+- [`docs/01_architecture.md`](docs/01_architecture.md) - Component model,
+  container build, and operational constraints.
 - [`docs/user/01_getting_started.md`](docs/user/01_getting_started.md) - Stack
-  prerequisites, configuration, and day-one operation.
-- [`docs/user/02_configuration.md`](docs/user/02_configuration.md) - Details on
-  aligning Compose mounts and orchestrator library definitions.
+  prerequisites, configuration, and day-one operation for Docker Compose.
+- [`docs/user/02_configuration.md`](docs/user/02_configuration.md) - Library
+  configuration and mount alignment for the Flask orchestrator.
 - [`docs/02_ai_agent_process.md`](docs/02_ai_agent_process.md) - Expectations
   for AI coding agents. See `AGENTS.md` for the quick-start rules and quality
   gates.
@@ -35,37 +37,26 @@ Alpine watcher feeds file-system events into the system.
 4. Run `docker compose build` to create the orchestrator, watcher, and
    `gpu-ffmpeg` images locally.
 5. Start the stack with `docker compose up`. The orchestrator mounts
-   `./services/orchestrator/app`, so HTML/API updates are picked up on refresh
+   `./services/orchestrator/app`, so HTML updates are picked up on refresh
    without rebuilding.
-6. Visit `http://localhost:9000` for the dashboard and JSON API. Health checks
-   live at `/api/healthz` and `/api/readyz`; logs from every container are
-   centralized behind `/api/logs` with retention controls on the Configuration
-   page (defaults to seven days).
+6. Visit `http://localhost:9000/library` for the database-backed library view.
+   Rescans and re-process actions are available directly from the UI and update
+   the SQLite-backed finite state machine in real time.
 
-   The orchestrator persists any GUI-driven changes back to `config/settings.yaml`,
-   so dashboards edits survive restarts; treat `config/settings.yaml.template` only
-   as the initial seed.
+### Orchestrator finite state machine
 
-### MVP feature set
-
-- **Orchestrator API & dashboard** – Serves health/ready endpoints, exposes
-  queue metrics, persists centralized logs from every container with a
-  retention slider and disk-usage stats, and lets operators trigger rescans of
-  configured libraries.
-- **Job queue** – Redis-backed queue with pause/resume controls. GPU workers
-  pull the next ready job from `/api/jobs/next`, update status back to the API,
-  and honor the current profile configuration.
-- **Folder watcher** – Alpine container monitoring bind-mounted `movies` and
-  `series` roots. Emits create/modify events to the orchestrator so newly added
-  files are queued immediately.
-- **Encoding profiles** – Centralized in `config/settings.yaml` and editable via
-  `/api/config/encoding`. Profiles target Chromecast Gen 2/3 constraints (H.264
-  High, level 4.1, 720p, capped bitrate) with AAC stereo audio and dropdowns for
-  NVENC presets, CQ targets, and a 30 fps ceiling that keeps every audio track
-  mapped as stereo AAC.
-- **Verification hooks** – After startup, the orchestrator scans configured
-  libraries and preloads jobs for anything not already compliant. On success,
-  progress is reflected in the dashboard and metrics endpoint.
+- **Database-backed MediaAssets** – SQLite with WAL enabled to allow concurrent
+  reads and writes. Each asset tracks `file_path`, `file_hash`, `file_size`,
+  modification time, state, retries, and any processing errors.
+- **Smart scanner** – Walks the configured media root, syncing the database to
+  disk. Hash matches trigger rename updates, modified files reset to `New`, and
+  missing files are removed unless already `Archived`.
+- **Robust worker** – A background loop claims `Queued` jobs, marks them
+  `Processing`, runs ffmpeg, verifies outputs with ffprobe, and marks
+  `Completed`/`Failed`/`Archived` with optional deletion of originals.
+- **Flask dashboard** – `/library` shows paginated assets with colored badges
+  (`Completed` green, `Archived` grey, `Failed` red) and lets operators rescan or
+  re-queue assets when safe.
 
 ### GPU access inside Docker Compose
 
@@ -82,8 +73,7 @@ Alpine watcher feeds file-system events into the system.
 
 - The folder watcher image now tracks Alpine 3.20 so its inotify tooling stays on
   a supported security baseline.
-- The orchestrator service pins FastAPI 0.115, Pydantic 2.9, and Uvicorn 0.30
-  along with refreshed Jinja2 and HTTPX releases to pick up the newest ASGI
-  features and fixes.
-- GPU workers also track HTTPX 0.27.2 so request handling matches the
-  orchestrator's HTTP stack.
+- The orchestrator service now ships with Flask 3.x and Flask-SQLAlchemy 3.x to
+  support the database-backed finite state machine and server-side rendering.
+- GPU workers continue to rely on ffmpeg with NVENC enabled; ensure NVIDIA
+  drivers and CUDA runtimes are available on the host.

@@ -2,6 +2,7 @@
 
 set -euo pipefail
 
-PORT="${PORT:-9000}"
+PORT="${PORT:-8080}"
+export FLASK_APP=app.app:app
 
-exec uvicorn app.main:app --host 0.0.0.0 --port "${PORT}"
+exec flask run --host 0.0.0.0 --port "${PORT}"
