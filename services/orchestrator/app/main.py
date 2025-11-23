@@ -18,7 +18,14 @@ from . import jellyfin, jobs
 from .db import Base, create_session_factory
 from .job_history import JobHistoryEntry, JobHistoryStatus, JobHistoryStore
 from .library_entries import EntryUpdate, LibraryEntry, LibraryEntryStore, LibraryStatus
-from .logs import LogEntry, LogStore, SQLiteLogHandler
+from .logs import (
+    LogEntry,
+    LogStore,
+    SQLiteLogHandler,
+    StructuredLogFilter,
+    derive_source_category,
+    severity_value,
+)
 from .profiles import (
     EncodingProfile,
     LibraryConfig,
@@ -67,10 +74,14 @@ def configure_logging() -> None:
     sqlite_handler = SQLiteLogHandler(LOG_STORE)
     sqlite_handler.setLevel(logging.DEBUG)
     sqlite_handler.setFormatter(formatter)
+    context_filter = StructuredLogFilter()
+    stream_handler.addFilter(context_filter)
+    sqlite_handler.addFilter(context_filter)
 
     root_logger = logging.getLogger()
     root_logger.setLevel(logging.DEBUG)
     root_logger.handlers.clear()
+    root_logger.addFilter(context_filter)
     root_logger.addHandler(stream_handler)
     root_logger.addHandler(sqlite_handler)
 
@@ -177,6 +188,9 @@ class LogIngestEvent(BaseModel):
     logger: str
     level: str
     message: str
+    severity: Optional[str] = None
+    source: Optional[str] = None
+    category: Optional[str] = None
     timestamp: Optional[datetime] = None
 
 
@@ -354,13 +368,18 @@ def _entry_status_for_path(path: Path) -> tuple[str, Path, bool]:
     output_path = job_manager.output_path(path)
     if not path.exists():
         return LibraryStatus.REMOVED, output_path, False
-    if job_manager.is_converted(path):
+    if job_manager.is_converted(path, log=False):
         return LibraryStatus.CONVERTED, output_path, True
     return LibraryStatus.PENDING, output_path, True
 
 
 async def _record_library_entry(
-    library_name: str, path: Path, profile: str, profile_id: int
+    library_name: str,
+    path: Path,
+    profile: str,
+    profile_id: int,
+    *,
+    emit_log: bool = True,
 ) -> tuple[LibraryEntry, Optional[jobs.Job]]:
     status, output_path, original_exists = _entry_status_for_path(path)
     entry = LIBRARY_STORE.upsert(
@@ -381,6 +400,7 @@ async def _record_library_entry(
             profile,
             profile_id=profile_id,
             encoding=encoding_payload(profile_id),
+            emit_log=emit_log,
         )
         LIBRARY_STORE.attach_job(entry.id, job.id)
         _record_job_history(job, JobHistoryStatus.PENDING)
@@ -488,14 +508,35 @@ async def reconcile_library(library_name: str, root: str, profile: str, profile_
         return
 
     seen: Set[str] = set()
+    queued = 0
+    converted = 0
+    tracked_pending = 0
     for entry in root_path.rglob("*.*"):
         if not _should_track_file(entry):
             continue
         seen.add(str(entry))
-        await _record_library_entry(library_name, entry, profile, profile_id)
+        library_entry, job = await _record_library_entry(
+            library_name, entry, profile, profile_id, emit_log=False
+        )
+        if job:
+            queued += 1
+        elif library_entry.status == LibraryStatus.CONVERTED:
+            converted += 1
+        elif library_entry.status == LibraryStatus.PENDING:
+            tracked_pending += 1
     removed = LIBRARY_STORE.mark_missing(library_name, seen)
-    if removed:
-        LOGGER.info("Marked %s missing entries as removed for library %s", removed, library_name)
+    LOGGER.info(
+        (
+            "Completed scan for %s: %s media files, queued %s, %s already converted, "
+            "%s already tracked, %s removed"
+        ),
+        library_name,
+        len(seen),
+        queued,
+        converted,
+        tracked_pending,
+        removed,
+    )
 
 
 def find_library_for_path(path: str) -> Optional[str]:
@@ -688,16 +729,33 @@ async def update_library_profile(library_name: str, payload: LibraryProfilePaylo
 @app.get("/api/logs")
 async def list_logs(
     level: Optional[str] = None,
+    min_severity: Optional[str] = None,
     query: Optional[str] = None,
     logger: Optional[str] = None,
+    source: Optional[str] = None,
+    category: Optional[str] = None,
 ) -> JSONResponse:
-    entries = LOG_STORE.list_entries(level=level, query=query, logger_name=logger, limit=200)
+    severity_filter = None if min_severity == "ALL" else (min_severity or "INFO")
+    entries = LOG_STORE.list_entries(
+        level=level,
+        min_severity=severity_filter,
+        query=query,
+        logger_name=logger,
+        category=category,
+        source=source,
+        limit=200,
+    )
     return JSONResponse(entries)
 
 
 @app.get("/api/logs/categories")
 async def list_log_categories() -> JSONResponse:
     return JSONResponse(LOG_STORE.list_categories())
+
+
+@app.get("/api/logs/sources")
+async def list_log_sources() -> JSONResponse:
+    return JSONResponse(LOG_STORE.list_sources())
 
 
 @app.get("/api/logs/stats")
@@ -709,11 +767,22 @@ async def log_stats() -> JSONResponse:
 async def ingest_logs(batch: LogIngestBatch) -> JSONResponse:
     stored = 0
     for entry in batch.entries:
+        severity = entry.severity or entry.level
+        source = entry.source
+        category = entry.category
+        if not source or not category:
+            derived_source, derived_category = derive_source_category(entry.logger)
+            source = source or derived_source
+            category = category or derived_category
         LOG_STORE.add_entry(
             LogEntry(
                 timestamp=entry.timestamp or datetime.now(timezone.utc),
                 level=entry.level,
+                severity=severity,
+                severity_value=severity_value(severity),
                 logger=entry.logger,
+                source=source,
+                category=category,
                 message=entry.message,
             )
         )

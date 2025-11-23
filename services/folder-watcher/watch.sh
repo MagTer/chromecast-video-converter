@@ -17,7 +17,7 @@ log() {
     payload_message="${message//\"/\\\"}"
     curl -sS -X POST "${ORCHESTRATOR_URL}/api/logs/ingest" \
       -H "Content-Type: application/json" \
-      -d "{\"entries\":[{\"logger\":\"folder-watcher\",\"level\":\"${level}\",\"message\":\"${payload_message}\"}]}" \
+      -d "{\"entries\":[{\"logger\":\"folder-watcher\",\"level\":\"${level}\",\"severity\":\"${level}\",\"source\":\"folder-watcher\",\"category\":\"events\",\"message\":\"${payload_message}\"}]}" \
       >/dev/null 2>&1 || true
   fi
 }

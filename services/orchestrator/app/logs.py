@@ -12,11 +12,35 @@ VERBOSE_LEVEL_NAME = "VERBOSE"
 logging.addLevelName(logging.DEBUG, VERBOSE_LEVEL_NAME)
 
 
+def derive_source_category(logger_name: str) -> tuple[str, str]:
+    normalized = logger_name or "orchestrator"
+    parts = normalized.replace(" ", "_").split(".")
+    source = parts[0] if parts else normalized
+    category = ".".join(parts[1:]) if len(parts) > 1 else normalized
+    return source, category or source
+
+
 def _normalize_level(level: str) -> str:
     normalized = level.upper()
     if normalized == "DEBUG":
         return VERBOSE_LEVEL_NAME
     return normalized
+
+
+def _severity_value(level: str) -> int:
+    normalized = _normalize_level(level)
+    order = {
+        VERBOSE_LEVEL_NAME: 10,
+        "INFO": 20,
+        "WARNING": 30,
+        "ERROR": 40,
+        "CRITICAL": 50,
+    }
+    return order.get(normalized, 0)
+
+
+def severity_value(level: str) -> int:
+    return _severity_value(level)
 
 
 def _ensure_utc(timestamp: datetime) -> datetime:
@@ -29,6 +53,10 @@ def _ensure_utc(timestamp: datetime) -> datetime:
 class LogEntry:
     timestamp: datetime
     level: str
+    severity: str
+    severity_value: int
+    source: str
+    category: str
     logger: str
     message: str
 
@@ -36,6 +64,10 @@ class LogEntry:
         return {
             "timestamp": _ensure_utc(self.timestamp).isoformat(),
             "level": _normalize_level(self.level),
+            "severity": _normalize_level(self.severity),
+            "severity_value": self.severity_value,
+            "source": self.source,
+            "category": self.category,
             "logger": self.logger,
             "message": self.message,
         }
@@ -59,16 +91,78 @@ class LogStore:
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     timestamp REAL NOT NULL,
                     level TEXT NOT NULL,
+                    severity TEXT NOT NULL,
+                    severity_value INTEGER NOT NULL,
                     logger TEXT NOT NULL,
+                    source TEXT NOT NULL,
+                    category TEXT NOT NULL,
                     message TEXT NOT NULL
                 )
                 """
             )
-            self._conn.execute("CREATE INDEX IF NOT EXISTS idx_logs_level ON logs(level)")
-            self._conn.execute("CREATE INDEX IF NOT EXISTS idx_logs_logger ON logs(logger)")
+            self._ensure_columns()
+            self._conn.execute("CREATE INDEX IF NOT EXISTS idx_logs_level ON logs(severity_value)")
+            self._conn.execute("CREATE INDEX IF NOT EXISTS idx_logs_logger ON logs(category)")
+            self._conn.execute("CREATE INDEX IF NOT EXISTS idx_logs_source ON logs(source)")
             self._conn.execute("CREATE INDEX IF NOT EXISTS idx_logs_timestamp ON logs(timestamp)")
             self._conn.commit()
             self._prune_expired()
+
+    def _ensure_columns(self) -> None:
+        with self._lock:
+            columns = {
+                row["name"] for row in self._conn.execute("PRAGMA table_info(logs)").fetchall()
+            }
+            schema_updated = False
+            if "severity" not in columns:
+                self._conn.execute("ALTER TABLE logs ADD COLUMN severity TEXT NOT NULL DEFAULT ''")
+                schema_updated = True
+            if "severity_value" not in columns:
+                self._conn.execute(
+                    "ALTER TABLE logs ADD COLUMN severity_value INTEGER NOT NULL DEFAULT 0"
+                )
+                schema_updated = True
+            if "source" not in columns:
+                self._conn.execute("ALTER TABLE logs ADD COLUMN source TEXT NOT NULL DEFAULT ''")
+                schema_updated = True
+            if "category" not in columns:
+                self._conn.execute("ALTER TABLE logs ADD COLUMN category TEXT NOT NULL DEFAULT ''")
+                schema_updated = True
+            if schema_updated:
+                self._conn.commit()
+            self._backfill_schema()
+
+    def _backfill_schema(self) -> None:
+        with self._lock:
+            cursor = self._conn.execute(
+                "SELECT id, level, logger, severity, severity_value, source, category FROM logs"
+            )
+            rows = cursor.fetchall()
+            for row in rows:
+                severity = row["severity"] or row["level"]
+                source = row["source"]
+                category = row["category"]
+                if not source or not category:
+                    derived_source, derived_category = derive_source_category(row["logger"])
+                    source = source or derived_source
+                    category = category or derived_category
+                normalized_severity = _normalize_level(severity)
+                self._conn.execute(
+                    """
+                    UPDATE logs
+                    SET severity = ?, severity_value = ?, source = ?, category = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        normalized_severity,
+                        _severity_value(normalized_severity),
+                        source,
+                        category,
+                        row["id"],
+                    ),
+                )
+            if rows:
+                self._conn.commit()
 
     def _prune_expired(self) -> None:
         cutoff = datetime.now(timezone.utc) - timedelta(days=self.retention_days)
@@ -82,11 +176,37 @@ class LogStore:
 
     def add_entry(self, entry: LogEntry) -> None:
         utc_timestamp = _ensure_utc(entry.timestamp)
-        normalized_level = _normalize_level(entry.level)
+        normalized_severity = _normalize_level(entry.severity or entry.level)
+        severity_value = _severity_value(normalized_severity)
+        source = entry.source
+        category = entry.category
+        if not source or not category:
+            source, category = derive_source_category(entry.logger)
         with self._lock:
             self._conn.execute(
-                "INSERT INTO logs(timestamp, level, logger, message) VALUES (?, ?, ?, ?)",
-                (utc_timestamp.timestamp(), normalized_level, entry.logger, entry.message),
+                """
+                INSERT INTO logs(
+                    timestamp,
+                    level,
+                    severity,
+                    severity_value,
+                    logger,
+                    source,
+                    category,
+                    message
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    utc_timestamp.timestamp(),
+                    entry.level,
+                    normalized_severity,
+                    severity_value,
+                    entry.logger,
+                    source,
+                    category,
+                    entry.message,
+                ),
             )
             self._conn.commit()
         self._prune_expired()
@@ -95,23 +215,32 @@ class LogStore:
         self,
         *,
         level: Optional[str] = None,
+        severity: Optional[str] = None,
+        min_severity: Optional[str] = None,
         query: Optional[str] = None,
         logger_name: Optional[str] = None,
+        category: Optional[str] = None,
+        source: Optional[str] = None,
     ) -> tuple[str, list]:
-        sql = "SELECT timestamp, level, logger, message FROM logs"
+        sql = (
+            "SELECT timestamp, level, severity, severity_value, logger, source, "
+            "category, message FROM logs"
+        )
         clauses = []
         params: list = []
-        if level:
-            normalized = _normalize_level(level)
-            if normalized == VERBOSE_LEVEL_NAME:
-                clauses.append("(level = ? OR level = ?)")
-                params.extend([VERBOSE_LEVEL_NAME, "DEBUG"])
-            else:
-                clauses.append("level = ?")
-                params.append(normalized)
+        minimum = min_severity or severity or level
+        if minimum:
+            params.append(_severity_value(minimum))
+            clauses.append("severity_value >= ?")
+        if category:
+            clauses.append("LOWER(category) = ?")
+            params.append(category.lower())
         if logger_name:
             clauses.append("LOWER(logger) = ?")
             params.append(logger_name.lower())
+        if source:
+            clauses.append("LOWER(source) = ?")
+            params.append(source.lower())
         if query:
             clauses.append("LOWER(message) LIKE ?")
             params.append(f"%{query.lower()}%")
@@ -125,24 +254,48 @@ class LogStore:
         self,
         *,
         level: Optional[str] = None,
+        severity: Optional[str] = None,
+        min_severity: Optional[str] = None,
         query: Optional[str] = None,
         logger_name: Optional[str] = None,
+        category: Optional[str] = None,
+        source: Optional[str] = None,
         limit: int = 100,
     ) -> List[dict]:
-        sql, params = self._filter_query(level=level, query=query, logger_name=logger_name)
+        sql, params = self._filter_query(
+            level=level,
+            severity=severity,
+            min_severity=min_severity,
+            query=query,
+            logger_name=logger_name,
+            category=category,
+            source=source,
+        )
         params[-1] = limit
         with self._lock:
             cursor = self._conn.execute(sql, params)
             rows = cursor.fetchall()
         entries = []
         for row in rows:
+            row_keys = set(row.keys())
+            severity = row["severity"] if "severity" in row_keys else row["level"]
+            category = row["category"] if "category" in row_keys else row["logger"]
+            source = row["source"] if "source" in row_keys else ""
             entries.append(
                 LogEntry(
                     timestamp=_ensure_utc(
                         datetime.fromtimestamp(row["timestamp"], tz=timezone.utc)
                     ),
-                    level=_normalize_level(row["level"]),
+                    level=row["level"],
+                    severity=severity,
+                    severity_value=(
+                        row["severity_value"]
+                        if "severity_value" in row_keys
+                        else _severity_value(severity)
+                    ),
                     logger=row["logger"],
+                    source=source,
+                    category=category,
                     message=row["message"],
                 ).to_dict()
             )
@@ -150,7 +303,13 @@ class LogStore:
 
     def list_categories(self) -> List[str]:
         with self._lock:
-            cursor = self._conn.execute("SELECT DISTINCT logger FROM logs ORDER BY logger")
+            cursor = self._conn.execute("SELECT DISTINCT category FROM logs ORDER BY category")
+            rows = cursor.fetchall()
+        return [row[0] for row in rows]
+
+    def list_sources(self) -> List[str]:
+        with self._lock:
+            cursor = self._conn.execute("SELECT DISTINCT source FROM logs ORDER BY source")
             rows = cursor.fetchall()
         return [row[0] for row in rows]
 
@@ -166,6 +325,22 @@ class LogStore:
         }
 
 
+class StructuredLogFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:  # noqa: D401
+        """Attach structured context to log records before formatting."""
+
+        derived_source, derived_category = derive_source_category(record.name)
+        severity = getattr(record, "severity", record.levelname)
+        normalized_severity = _normalize_level(severity)
+        record.severity = normalized_severity
+        record.severity_value = getattr(
+            record, "severity_value", _severity_value(normalized_severity)
+        )
+        record.source = getattr(record, "source", None) or derived_source
+        record.category = getattr(record, "category", None) or derived_category
+        return True
+
+
 class SQLiteLogHandler(logging.Handler):
     def __init__(self, store: LogStore) -> None:
         super().__init__()
@@ -173,10 +348,19 @@ class SQLiteLogHandler(logging.Handler):
 
     def emit(self, record: logging.LogRecord) -> None:
         message = self.format(record)
+        source = getattr(record, "source", None)
+        category = getattr(record, "category", None)
+        severity = getattr(record, "severity", record.levelname)
+        severity_value = getattr(record, "severity_value", _severity_value(severity))
+        derived_source, derived_category = derive_source_category(record.name)
         entry = LogEntry(
             timestamp=_ensure_utc(datetime.fromtimestamp(record.created, tz=timezone.utc)),
-            level=_normalize_level(record.levelname),
+            level=record.levelname,
+            severity=severity,
+            severity_value=severity_value,
             logger=record.name,
+            source=source or derived_source,
+            category=category or derived_category,
             message=message,
         )
         try:

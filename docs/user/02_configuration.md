@@ -25,6 +25,7 @@ The Compose stack still mounts `./config` into both the orchestrator and GPU wor
 - When a GUI change adds a new library, ensure its `root` matches one of the existing mount points (e.g., `root: /media/movies`), otherwise the files will not be reachable.
 - Jellyfin integration is optional; omit the `jellyfin` section from the seed (as shown in `config/settings.yaml.template`) whenever no server is reachable, and the orchestrator will quietly skip those refresh tasks.
 - Log retention is also editable in the GUI. The `logging.retention_days` field is stored in the config database (default: `7`) and controls how long centralized logs from every container stay on disk. The Configuration page displays current disk usage for the log database mounted at `./logs`.
+- Log records include `severity`, `source`, and `category` metadata in the `/api/logs` payloads, and the dashboard filters default to `INFO` and above to suppress verbose chatter. Keep orchestrator, watcher, and worker containers at `LOG_LEVEL=INFO` during normal operation; only switch to `VERBOSE` temporarily when debugging and rely on the UI filters to surface warnings and errors quickly.
 
 ## Keeping configs aligned
 
