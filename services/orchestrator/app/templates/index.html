@@ -197,7 +197,8 @@
     .log-message { margin-top: 0.15rem; }
 
     .queue-actions { display: flex; align-items: center; gap: 0.5rem; width: 100%; }
-    .queue-actions #queue-status { margin-left: auto; }
+    .queue-actions #queue-metrics { margin-left: auto; }
+    .queue-actions #queue-status { margin-left: 0; }
     .queue-buttons {
       display: flex;
       gap: 0.5rem;
@@ -232,6 +233,7 @@
             <button id="scan-series" type="button">Scan Series</button>
             <button id="pause-toggle" type="button">Pause</button>
           </div>
+          <span id="queue-metrics" class="status-pill status-idle">Depth: …</span>
           <span id="queue-status" class="status-pill status-idle">Loading…</span>
         </div>
       </header>
@@ -470,6 +472,7 @@
     const jobRows = document.querySelector("#job-rows");
     const scanResult = document.querySelector("#scan-result");
     const queueStatus = document.querySelector("#queue-status");
+    const queueMetrics = document.querySelector("#queue-metrics");
     const pauseToggle = document.querySelector("#pause-toggle");
     const logList = document.querySelector("#log-list");
     const logCategory = document.querySelector("#log-category");
@@ -710,6 +713,8 @@
     async function refreshQueueState() {
       const response = await fetch("/api/queue/state");
       const state = await response.json();
+      queueMetrics.textContent = `Depth: ${state.depth ?? 0} (pending ${state.pending ?? 0})`;
+      queueMetrics.className = "status-pill status-idle";
       if (state.paused) {
         queueStatus.textContent = "Paused";
         queueStatus.className = "status-pill status-paused";

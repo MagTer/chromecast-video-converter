@@ -16,6 +16,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from . import config as config_module
 from . import jellyfin, jobs
 from .db import Base, create_session_factory
+from .job_history import JobHistoryEntry, JobHistoryStatus, JobHistoryStore
 from .library_entries import EntryUpdate, LibraryEntry, LibraryEntryStore, LibraryStatus
 from .logs import LogEntry, LogStore, SQLiteLogHandler
 from .profiles import (
@@ -43,6 +44,7 @@ Base.metadata.create_all(ENGINE)
 PROFILE_STORE = ProfileStore(SESSION_FACTORY)
 LIBRARY_CONFIG_STORE = LibraryConfigStore(SESSION_FACTORY)
 LIBRARY_STORE = LibraryEntryStore(LIBRARY_DB_PATH, session_factory=SESSION_FACTORY, engine=ENGINE)
+JOB_HISTORY_STORE = JobHistoryStore(SESSION_FACTORY)
 LIBRARY_STATUSES = {
     LibraryStatus.PENDING,
     LibraryStatus.CONVERTING,
@@ -111,6 +113,10 @@ class JobStatusPayload(BaseModel):
     status: str
     progress: Optional[int] = None
     message: Optional[str] = None
+
+
+class JobAckPayload(BaseModel):
+    delivery_id: str
 
 
 class QueuePauseRequest(BaseModel):
@@ -268,7 +274,9 @@ config_service = config_module.ConfigService(
 config_snapshot = config_service.reload()
 _seed_profiles_and_libraries(config_snapshot)
 LOG_STORE.update_retention(config_snapshot.config.logging.retention_days)
-job_manager = jobs.JobManager()
+JOB_QUEUE_URL = os.environ.get("JOB_QUEUE", "redis://localhost:6379/0")
+JOB_VISIBILITY_TIMEOUT = int(os.environ.get("JOB_VISIBILITY_TIMEOUT", "300"))
+job_manager = jobs.JobManager(JOB_QUEUE_URL, visibility_timeout=JOB_VISIBILITY_TIMEOUT)
 
 
 def encoding_payload(profile_id: int) -> Dict[str, Any]:
@@ -375,6 +383,7 @@ async def _record_library_entry(
             encoding=encoding_payload(profile_id),
         )
         LIBRARY_STORE.attach_job(entry.id, job.id)
+        _record_job_history(job, JobHistoryStatus.PENDING)
         return entry, job
     return entry, None
 
@@ -400,6 +409,27 @@ def _sync_entry_from_job(job: jobs.Job, status: str, message: Optional[str] = No
         output_path=str(job_manager.output_path(source)),
         original_missing=original_missing,
     )
+
+
+def _record_job_history(
+    job: jobs.Job, status: str, message: Optional[str] = None, *, completed: bool = False
+) -> None:
+    completed_at = datetime.utcnow() if completed else None
+    try:
+        JOB_HISTORY_STORE.record(
+            JobHistoryEntry(
+                job_id=job.id,
+                path=job.path,
+                library=job.library,
+                profile=job.profile,
+                status=status,
+                message=message,
+                started_at=job.created_at,
+                completed_at=completed_at,
+            )
+        )
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.error("Failed to persist job history for %s: %s", job.id[:8], exc)
 
 
 def _get_entry_or_404(entry_id: int) -> LibraryEntry:
@@ -483,6 +513,7 @@ def find_library_for_path(path: str) -> Optional[str]:
 
 @app.on_event("startup")
 async def startup_event() -> None:
+    await job_manager.initialize()
     LOGGER.info("Starting initial scan of configured libraries.")
     for library in LIBRARY_CONFIG_STORE.list_libraries():
         profile = PROFILE_STORE.get(library.profile_id)
@@ -715,11 +746,13 @@ async def next_job() -> JSONResponse:
     queue_state = await job_manager.queue_state()
     if queue_state["paused"]:
         return JSONResponse(queue_state | {"detail": "Queue paused"}, status_code=409)
-    job = await job_manager.acquire_next()
-    if job is None:
+    claimed = await job_manager.acquire_next("api")
+    if claimed is None:
         raise HTTPException(status_code=204, detail="No jobs available")
+    delivery_id, job = claimed
     _sync_entry_from_job(job, LibraryStatus.CONVERTING)
-    return JSONResponse(jsonable_encoder(job.model_dump()))
+    _record_job_history(job, JobHistoryStatus.RUNNING)
+    return JSONResponse(jsonable_encoder(job.model_dump() | {"delivery_id": delivery_id}))
 
 
 @app.post("/api/jobs/{job_id}/status")
@@ -728,13 +761,21 @@ async def update_job_status(job_id: str, payload: JobStatusPayload) -> JSONRespo
         job = await job_manager.update_job(job_id, jobs.JobStatusUpdate(**payload.model_dump()))
     except KeyError:
         raise HTTPException(status_code=404, detail="Job not found")
+    completed = payload.status in {jobs.JobStatus.COMPLETED, jobs.JobStatus.FAILED}
     if payload.status == jobs.JobStatus.RUNNING:
         _sync_entry_from_job(job, LibraryStatus.CONVERTING, payload.message)
     elif payload.status == jobs.JobStatus.COMPLETED:
         _sync_entry_from_job(job, LibraryStatus.CONVERTED, payload.message)
     elif payload.status == jobs.JobStatus.FAILED:
         _sync_entry_from_job(job, LibraryStatus.FAILED, payload.message)
+    _record_job_history(job, payload.status, payload.message, completed=completed)
     return JSONResponse(jsonable_encoder(job.model_dump()))
+
+
+@app.post("/api/jobs/{job_id}/ack")
+async def acknowledge_job(job_id: str, payload: JobAckPayload) -> JSONResponse:
+    await job_manager.acknowledge(payload.delivery_id, job_id)
+    return JSONResponse({"acknowledged": True})
 
 
 @app.get("/api/queue/state")
