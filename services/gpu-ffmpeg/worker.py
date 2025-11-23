@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import httpx
+import redis.asyncio as redis
 import yaml
 
 logging.addLevelName(logging.DEBUG, "VERBOSE")
@@ -19,6 +20,10 @@ LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
 if LOG_LEVEL == "VERBOSE":
     LOG_LEVEL = "DEBUG"
 ORCHESTRATOR_URL = os.environ.get("ORCHESTRATOR_URL", "http://localhost:9000")
+JOB_QUEUE_URL = os.environ.get("JOB_QUEUE", "redis://redis:6379/0")
+JOB_QUEUE_STREAM = os.environ.get("JOB_QUEUE_STREAM", "job_queue")
+JOB_QUEUE_GROUP = os.environ.get("JOB_QUEUE_GROUP", "workers")
+JOB_VISIBILITY_TIMEOUT = int(os.environ.get("JOB_VISIBILITY_TIMEOUT", "300"))
 STREAM_READER_LIMIT = int(os.environ.get("GPU_STREAM_READER_LIMIT", "1000000"))
 
 
@@ -518,20 +523,60 @@ async def resolve_encoding_for_job(job: dict, client: httpx.AsyncClient) -> dict
     return encoding or {}
 
 
-async def claim_job(client: httpx.AsyncClient) -> dict | None:
+async def ensure_queue(redis_client: redis.Redis) -> None:
     try:
-        response = await client.get("/api/jobs/next")
-    except httpx.RequestError as exc:
-        LOGGER.error("HTTP error while claiming job: %s", exc)
+        await redis_client.xgroup_create(JOB_QUEUE_STREAM, JOB_QUEUE_GROUP, id="0-0", mkstream=True)
+    except redis.ResponseError as exc:
+        if "BUSYGROUP" not in str(exc):
+            raise
+
+
+def _normalize_job(payload: dict) -> dict:
+    normalized = dict(payload)
+    if isinstance(normalized.get("encoding"), str):
+        try:
+            normalized["encoding"] = json.loads(normalized["encoding"])
+        except json.JSONDecodeError:
+            normalized["encoding"] = {}
+    if normalized.get("profile_id") not in (None, ""):
+        try:
+            normalized["profile_id"] = int(normalized["profile_id"])
+        except (TypeError, ValueError):
+            normalized["profile_id"] = None
+    normalized["progress"] = int(normalized.get("progress") or 0)
+    return normalized
+
+
+async def _claim_stalled(redis_client: redis.Redis, consumer: str) -> tuple[str, dict] | None:
+    message_id, messages = await redis_client.xautoclaim(
+        JOB_QUEUE_STREAM,
+        JOB_QUEUE_GROUP,
+        consumer,
+        min_idle_time=JOB_VISIBILITY_TIMEOUT * 1000,
+        start_id="0-0",
+        count=1,
+    )
+    if not messages:
         return None
-    if response.status_code == 409:
-        detail = response.json()
-        LOGGER.warning("Job queue paused: %s", detail.get("reason") or detail.get("detail"))
+    entry_id, fields = messages[0]
+    payload = json.loads(fields.get("payload", "{}"))
+    return entry_id, _normalize_job(payload)
+
+
+async def claim_job(redis_client: redis.Redis, consumer: str) -> tuple[str, dict] | None:
+    pending = await _claim_stalled(redis_client, consumer)
+    if pending:
+        return pending
+
+    result = await redis_client.xreadgroup(
+        JOB_QUEUE_GROUP, consumer, {JOB_QUEUE_STREAM: ">"}, count=1, block=1000
+    )
+    if not result:
         return None
-    if response.status_code == 204:
-        return None
-    response.raise_for_status()
-    return response.json()
+    _, messages = result[0]
+    entry_id, fields = messages[0]
+    payload = json.loads(fields.get("payload", "{}"))
+    return entry_id, _normalize_job(payload)
 
 
 async def update_job_status(
@@ -549,6 +594,19 @@ async def update_job_status(
         response.raise_for_status()
     except httpx.HTTPError as exc:
         LOGGER.error("Failed to update job %s status: %s", job_id[:8], exc)
+
+
+async def acknowledge_job(client: httpx.AsyncClient, job_id: str, delivery_id: str) -> None:
+    try:
+        await client.post(f"/api/jobs/{job_id}/ack", json={"delivery_id": delivery_id})
+    except httpx.HTTPError as exc:
+        LOGGER.error("Failed to acknowledge job %s: %s", job_id[:8], exc)
+
+
+async def queue_paused(redis_client: redis.Redis) -> tuple[bool, str | None]:
+    paused = await redis_client.get(f"{JOB_QUEUE_STREAM}:paused")
+    reason = await redis_client.get(f"{JOB_QUEUE_STREAM}:pause_reason")
+    return bool(int(paused)) if paused is not None else False, reason
 
 
 async def _probe_duration(source: Path) -> float:
@@ -689,19 +747,38 @@ async def main() -> None:
         POLL_INTERVAL,
         LOG_LEVEL,
     )
+    consumer_id = f"worker-{os.getpid()}"
+    redis_client = redis.from_url(JOB_QUEUE_URL, decode_responses=True)
+    await ensure_queue(redis_client)
+    last_pause_reason: str | None = None
     async with httpx.AsyncClient(base_url=ORCHESTRATOR_URL, timeout=30.0) as client:
-        while True:
-            job = await claim_job(client)
-            if not job:
-                LOGGER.debug("No job available; sleeping for %ss", POLL_INTERVAL)
-                await asyncio.sleep(POLL_INTERVAL)
-                continue
-            try:
-                await process_job(client, job)
-            except Exception as exc:  # noqa: BLE001
-                LOGGER.exception("Job %s failed: %s", job["id"][:8], exc)
-                await update_job_status(client, job["id"], "failed", 0, str(exc))
-            await asyncio.sleep(1)
+        try:
+            while True:
+                paused, reason = await queue_paused(redis_client)
+                if paused:
+                    if reason != last_pause_reason:
+                        LOGGER.warning("Job queue paused: %s", reason or "no reason provided")
+                        last_pause_reason = reason
+                    await asyncio.sleep(POLL_INTERVAL)
+                    continue
+                last_pause_reason = None
+
+                claimed = await claim_job(redis_client, consumer_id)
+                if not claimed:
+                    LOGGER.debug("No job available; sleeping for %ss", POLL_INTERVAL)
+                    await asyncio.sleep(POLL_INTERVAL)
+                    continue
+                delivery_id, job = claimed
+                try:
+                    await process_job(client, job)
+                except Exception as exc:  # noqa: BLE001
+                    LOGGER.exception("Job %s failed: %s", job["id"][:8], exc)
+                    await update_job_status(client, job["id"], "failed", 0, str(exc))
+                finally:
+                    await acknowledge_job(client, job["id"], delivery_id)
+                await asyncio.sleep(1)
+        finally:
+            await redis_client.aclose()
 
 
 if __name__ == "__main__":
