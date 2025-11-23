@@ -21,9 +21,10 @@ touch points, minimize moving parts, and keep operational work predictable.
 - **GPU worker** – A polling worker claims jobs, builds FFmpeg commands for
   NVENC, streams progress back to the orchestrator, validates the resulting
   output, and optionally deletes the source after success.
-- **Folder watcher** – An Alpine-based loop requests scans for each configured
-  root on a fixed interval so new or changed media is enqueued without manual
-  action.
+- **Folder watcher** – An Alpine-based inotify loop streams create/modify/delete
+  events (plus metadata) for each configured root so new or changed media is
+  enqueued without manual action, buffering events locally when the
+  orchestrator API is temporarily unavailable.
 
 ## Gaps and risks
 
@@ -33,9 +34,9 @@ touch points, minimize moving parts, and keep operational work predictable.
 - **Queue durability and scaling** – Jobs are stored in an in-memory manager;
   Redis is deployed but unused. Orchestrator restarts wipe the queue, and
   multiple GPU workers cannot safely coordinate job claims.
-- **Watcher fidelity** – The watcher issues full library scans on a timer rather
-  than streaming file system events, leading to latency and repeated work.
-  Missed or partial scans are not retried.
+- **Watcher durability** – Event buffering is in-memory only; if the watcher
+  container restarts mid-outage, unsent events are lost. There is no dedupe
+  layer when multiple watchers cover the same path.
 - **Operational guardrails** – There is no enforcement of GPU temperature,
   disk-space thresholds, or concurrency limits beyond the static FFmpeg
   invocation. Metrics and alerting are absent.

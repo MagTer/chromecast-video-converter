@@ -22,7 +22,7 @@ All containers join a private Docker network. Bind mounts provide the Windows-ho
 
 ## Data flow
 
-1. **Change detection** - Each `folder-watcher` instance monitors a root directory and reports file creates/modifies/deletes plus metadata (path, size, hash) to the orchestrator.
+1. **Change detection** - Each `folder-watcher` instance monitors a root directory and reports file creates/modifies/deletes plus metadata (path, size, modified time) to the orchestrator with optional buffering and retry backoff.
 2. **Policy evaluation** - Orchestrator loads quality profiles (per movies/series) from the SQLite-backed config store (seeded from `config/settings.yaml` or the template). It validates config shape and warns about unsupported codecs/levels before persisting any change.
 3. **Compliance check** - Orchestrator inspects new or updated files by invoking `gpu-ffmpeg` in probe mode to extract codecs, resolution, bitrate, and HDR flags. Files already compliant are flagged `ready`.
 4. **Transcode scheduling** - Non-compliant files become jobs in a durable queue. Orchestrator throttles concurrent ffmpeg invocations to respect GPU memory and disk IO.
@@ -45,7 +45,7 @@ All containers join a private Docker network. Bind mounts provide the Windows-ho
 - **Idempotent jobs** - Each job references content by checksum, allowing safe retries.
 - **Circuit breakers** - Orchestrator can pause scheduling if GPU temperature exceeds thresholds or storage free space is low.
 - **Rollback strategy** - Originals persist until verification passes. Failures keep source files untouched and log detailed ffmpeg stderr for analysis.
-- **Self-healing watchers** - `folder-watcher` restarts quickly (tiny Alpine image). If orchestrator is unavailable, watchers buffer events locally before replaying.
+- **Self-healing watchers** - `folder-watcher` restarts quickly (tiny Alpine image). If orchestrator is unavailable, watchers retry with exponential backoff and can buffer events locally before replaying.
 
 ## Configuration model
 

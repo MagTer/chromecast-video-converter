@@ -37,7 +37,10 @@ services:
     environment:
       - WATCH_ROOTS=movies:/watch/movies,series:/watch/series
       - ORCHESTRATOR_URL=http://orchestrator:9000
-      - SCAN_INTERVAL=60
+      - EVENT_BUFFER_SECONDS=2
+      - EVENT_RETRY_ATTEMPTS=5
+      - EVENT_RETRY_BACKOFF_SECONDS=2
+      - ROOT_RETRY_SECONDS=5
 
   gpu-ffmpeg:
     build:

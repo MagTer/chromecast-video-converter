@@ -7,6 +7,13 @@
 - Because these host-root bindings determine what the containers actually see, the orchestrator’s library definitions stored in the config database must use one of the mounted Linux paths (`/watch/movies`, `/watch/series`, `/media/...`) while the Windows host path stays locked to the left-hand side of the Compose mounts.
 - Optional worker overrides can also live in `.env`. Set `GPU_STREAM_READER_LIMIT` if long FFmpeg stderr lines trigger `LimitOverrunError` during encoding; Compose forwards that value to the GPU worker (default: `1000000`).
 
+## Watcher configuration flags
+
+- `WATCH_ROOTS` pairs library names with absolute paths inside the container (e.g., `movies:/watch/movies,series:/watch/series`).
+- `EVENT_BUFFER_SECONDS` controls optional batching of inotify events before they are posted to the orchestrator. Set to `0` to send immediately or a positive integer to flush on that cadence.
+- `EVENT_RETRY_ATTEMPTS` and `EVENT_RETRY_BACKOFF_SECONDS` define the retry window when the orchestrator API is temporarily unavailable. Retries use exponential backoff based on the provided delay.
+- `ROOT_RETRY_SECONDS` governs how frequently the watcher waits for a missing mount to appear before starting the inotify loop.
+
 `config/settings.yaml.template` is solely a starter copy that seeds the SQLite config store (`./logs/config.db`). If `config/settings.yaml` exists on first boot, the orchestrator imports it once, validates it, and ignores the YAML copies afterward. The GPU worker now pulls settings from the orchestrator API, so ongoing edits should happen through the dashboard/API rather than direct file edits.
 
 The Compose stack still mounts `./config` into both the orchestrator and GPU worker so the template and any legacy overrides remain available for seeding, but runtime state persists in the database under `CONFIG_DB_PATH` (`./logs/config.db` by default).

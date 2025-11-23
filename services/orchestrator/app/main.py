@@ -98,6 +98,13 @@ class EventPayload(BaseModel):
     path: str
     library: Optional[str] = None
     event: str = Field(default="created")
+    size: Optional[int] = None
+    modified_at: Optional[datetime] = None
+    is_directory: bool = False
+
+
+class EventBatch(BaseModel):
+    events: List[EventPayload]
 
 
 class JobStatusPayload(BaseModel):
@@ -400,6 +407,47 @@ def _get_entry_or_404(entry_id: int) -> LibraryEntry:
     if entry is None:
         raise HTTPException(status_code=404, detail="Library entry not found")
     return entry
+
+
+async def _process_event_payload(payload: EventPayload) -> Optional[Dict[str, Any]]:
+    event_type = payload.event.lower()
+    if event_type not in {"created", "modified", "deleted"}:
+        raise HTTPException(status_code=400, detail="Unsupported event type")
+    library_name = payload.library or find_library_for_path(payload.path)
+    if not library_name:
+        raise HTTPException(status_code=400, detail="Library could not be determined")
+    library, profile = _library_profile(library_name)
+
+    path = Path(payload.path)
+    if payload.is_directory:
+        LOGGER.debug("Ignoring directory event for %s", path)
+        return None
+
+    if event_type == "deleted":
+        entry = LIBRARY_STORE.update_status(
+            str(path),
+            LibraryStatus.REMOVED,
+            library=library.name,
+            profile=profile.name,
+            profile_id=profile.id,
+            output_path=str(job_manager.output_path(path)),
+            original_missing=True,
+        )
+        return {"entry": _entry_to_response(entry), "event": event_type}
+
+    if not _should_track_file(path):
+        LOGGER.debug("Ignoring non-media event for %s", path)
+        return None
+
+    try:
+        entry, job = await _record_library_entry(library.name, path, profile.name, profile.id)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+
+    response: Dict[str, Any] = {"entry": _entry_to_response(entry), "event": event_type}
+    if job:
+        response["job"] = job.model_dump()
+    return response
 
 
 async def reconcile_library(library_name: str, root: str, profile: str, profile_id: int) -> None:
@@ -856,18 +904,13 @@ async def manual_scan(payload: ScanRequest, background_tasks: BackgroundTasks) -
 
 
 @app.post("/api/events")
-async def handle_event(payload: EventPayload) -> JSONResponse:
-    library_name = payload.library or find_library_for_path(payload.path)
-    if not library_name:
-        raise HTTPException(status_code=400, detail="Library could not be determined")
-    library, profile = _library_profile(library_name)
-    try:
-        entry, job = await _record_library_entry(
-            library_name, Path(payload.path), profile.name, profile.id
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=409, detail=str(exc))
-    response: Dict[str, Any] = {"entry": LibraryEntryResponse.model_validate(entry)}
-    if job:
-        response["job"] = job.model_dump()
-    return JSONResponse(jsonable_encoder(response))
+async def handle_event(payload: EventBatch | EventPayload) -> JSONResponse:
+    events = payload.events if isinstance(payload, EventBatch) else [payload]
+    processed: List[Dict[str, Any]] = []
+
+    for event in events:
+        result = await _process_event_payload(event)
+        if result:
+            processed.append(result)
+
+    return JSONResponse(jsonable_encoder({"processed": processed, "count": len(processed)}))
