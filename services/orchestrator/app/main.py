@@ -5,22 +5,32 @@ import logging
 import os
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 
 from fastapi import BackgroundTasks, FastAPI, HTTPException
 from fastapi.encoders import jsonable_encoder
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from . import config as config_module
 from . import jellyfin, jobs
+from .library_entries import EntryUpdate, LibraryEntry, LibraryEntryStore, LibraryStatus
 from .logs import LogEntry, LogStore, SQLiteLogHandler
 
 logging.addLevelName(logging.DEBUG, "VERBOSE")
 
 LOG_DB_PATH = Path(os.environ.get("LOG_DB_PATH", "/app/logs/events.db")).resolve()
 LOG_STORE = LogStore(LOG_DB_PATH)
+LIBRARY_DB_PATH = Path(os.environ.get("LIBRARY_DB_PATH", "/app/logs/library.db")).resolve()
+LIBRARY_STORE = LibraryEntryStore(LIBRARY_DB_PATH)
+LIBRARY_STATUSES = {
+    LibraryStatus.PENDING,
+    LibraryStatus.CONVERTING,
+    LibraryStatus.CONVERTED,
+    LibraryStatus.FAILED,
+    LibraryStatus.REMOVED,
+}
 LIBRARY_ROOT_PREFIXES = [
     Path(prefix.strip())
     for prefix in os.environ.get("LIBRARY_ROOT_PREFIXES", "/watch,/media").split(",")
@@ -84,6 +94,24 @@ class JobStatusPayload(BaseModel):
 
 class QueuePauseRequest(BaseModel):
     reason: Optional[str] = None
+
+
+class LibraryEntryResponse(BaseModel):
+    id: int
+    path: str
+    library: str
+    profile: str
+    status: str
+    output_path: Optional[str] = None
+    last_error: Optional[str] = None
+    last_job_id: Optional[str] = None
+    original_missing: bool
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = ConfigDict(
+        from_attributes=True, json_encoders={datetime: lambda value: value.isoformat()}
+    )
 
 
 class EncodingUpdatePayload(BaseModel):
@@ -154,6 +182,93 @@ def _candidate_library_roots(root: Path) -> List[Path]:
     return matches
 
 
+def _should_track_file(path: Path) -> bool:
+    return (
+        path.is_file()
+        and path.suffix.lower() in job_manager.video_extensions
+        and "-chromecast" not in path.stem.lower()
+    )
+
+
+def _entry_status_for_path(path: Path) -> tuple[str, Path, bool]:
+    output_path = job_manager.output_path(path)
+    if not path.exists():
+        return LibraryStatus.REMOVED, output_path, False
+    if job_manager.is_converted(path):
+        return LibraryStatus.CONVERTED, output_path, True
+    return LibraryStatus.PENDING, output_path, True
+
+
+async def _record_library_entry(
+    library_name: str, path: Path, profile: str
+) -> tuple[LibraryEntry, Optional[jobs.Job]]:
+    status, output_path, original_exists = _entry_status_for_path(path)
+    entry = LIBRARY_STORE.upsert(
+        EntryUpdate(
+            path=str(path),
+            library=library_name,
+            profile=profile,
+            status=status,
+            output_path=str(output_path),
+            original_missing=not original_exists,
+        ),
+    )
+    if status == LibraryStatus.PENDING:
+        job = await job_manager.add_job(
+            str(path), library_name, profile, encoding=encoding_payload(profile)
+        )
+        LIBRARY_STORE.attach_job(entry.id, job.id)
+        return entry, job
+    return entry, None
+
+
+def _entry_to_response(entry: LibraryEntry) -> Dict[str, Any]:
+    return LibraryEntryResponse.model_validate(entry).model_dump()
+
+
+def _sync_entry_from_job(job: jobs.Job, status: str, message: Optional[str] = None) -> None:
+    source = Path(job.path)
+    original_missing = not source.exists()
+    final_status = status
+    if status == LibraryStatus.CONVERTED and original_missing:
+        final_status = LibraryStatus.REMOVED
+    LIBRARY_STORE.safe_update_status(
+        job.path,
+        final_status,
+        library=job.library,
+        profile=job.profile,
+        message=message,
+        job_id=job.id,
+        output_path=str(job_manager.output_path(source)),
+        original_missing=original_missing,
+    )
+
+
+def _get_entry_or_404(entry_id: int) -> LibraryEntry:
+    entry = LIBRARY_STORE.get(entry_id)
+    if entry is None:
+        raise HTTPException(status_code=404, detail="Library entry not found")
+    return entry
+
+
+async def reconcile_library(library_name: str, root: str, profile: str) -> None:
+    root_path = Path(root)
+    if not root_path.exists():
+        LOGGER.warning("Library root %s missing; marking entries removed", root_path)
+        LIBRARY_STORE.mark_missing(library_name, set())
+        return
+
+    seen: Set[str] = set()
+    for entry in root_path.rglob("*.*"):
+        if not _should_track_file(entry):
+            continue
+        seen.add(str(entry))
+        await _record_library_entry(library_name, entry, profile)
+    removed = LIBRARY_STORE.mark_missing(library_name, seen)
+    if removed:
+        LOGGER.info("Marked %s missing entries as removed for library %s", removed, library_name)
+
+
 def find_library_for_path(path: str) -> Optional[str]:
     try:
         normalized = Path(path).resolve()
@@ -172,9 +287,7 @@ async def startup_event() -> None:
     LOGGER.info("Starting initial scan of configured libraries.")
     for name, library in config_source.config.libraries.items():
         LOGGER.info("Scanning library %s at %s", name, library.root)
-        await job_manager.scan_directory(
-            name, library.root, library.profile, encoding=encoding_payload(library.profile)
-        )
+        await reconcile_library(name, library.root, library.profile)
 
     jellyfin_cfg = config_source.config.jellyfin
     if jellyfin_cfg:
@@ -302,6 +415,7 @@ async def next_job() -> JSONResponse:
     job = await job_manager.acquire_next()
     if job is None:
         raise HTTPException(status_code=204, detail="No jobs available")
+    _sync_entry_from_job(job, LibraryStatus.CONVERTING)
     return JSONResponse(jsonable_encoder(job.model_dump()))
 
 
@@ -311,6 +425,12 @@ async def update_job_status(job_id: str, payload: JobStatusPayload) -> JSONRespo
         job = await job_manager.update_job(job_id, jobs.JobStatusUpdate(**payload.model_dump()))
     except KeyError:
         raise HTTPException(status_code=404, detail="Job not found")
+    if payload.status == jobs.JobStatus.RUNNING:
+        _sync_entry_from_job(job, LibraryStatus.CONVERTING, payload.message)
+    elif payload.status == jobs.JobStatus.COMPLETED:
+        _sync_entry_from_job(job, LibraryStatus.CONVERTED, payload.message)
+    elif payload.status == jobs.JobStatus.FAILED:
+        _sync_entry_from_job(job, LibraryStatus.FAILED, payload.message)
     return JSONResponse(jsonable_encoder(job.model_dump()))
 
 
@@ -333,6 +453,79 @@ async def resume_queue() -> JSONResponse:
     return JSONResponse(await job_manager.queue_state())
 
 
+@app.get("/api/library/entries")
+async def list_library_entries(
+    status: Optional[str] = None, library: Optional[str] = None
+) -> JSONResponse:
+    if status and status not in LIBRARY_STATUSES:
+        raise HTTPException(status_code=400, detail="Invalid status filter")
+    entries = LIBRARY_STORE.list_entries(status=status, library=library)
+    return JSONResponse(jsonable_encoder([_entry_to_response(entry) for entry in entries]))
+
+
+@app.post("/api/library/entries/{entry_id}/reprocess")
+async def reprocess_entry(entry_id: int) -> JSONResponse:
+    entry = _get_entry_or_404(entry_id)
+    source = Path(entry.path)
+    if not source.exists():
+        updated = LIBRARY_STORE.update_status(
+            entry.path,
+            LibraryStatus.REMOVED,
+            message="Original missing",
+            job_id=None,
+            original_missing=True,
+        )
+        raise HTTPException(status_code=409, detail=_entry_to_response(updated))
+    job = await job_manager.add_job(
+        entry.path,
+        entry.library,
+        entry.profile,
+        encoding=encoding_payload(entry.profile),
+        force=True,
+    )
+    updated = LIBRARY_STORE.update_status(
+        entry.path,
+        LibraryStatus.PENDING,
+        job_id=job.id,
+        output_path=str(job_manager.output_path(source)),
+        original_missing=False,
+    )
+    payload = {"entry": _entry_to_response(updated), "job": job.model_dump()}
+    return JSONResponse(jsonable_encoder(payload))
+
+
+@app.post("/api/library/entries/{entry_id}/remove-original")
+async def remove_original(entry_id: int) -> JSONResponse:
+    entry = _get_entry_or_404(entry_id)
+    output_path = Path(entry.output_path or job_manager.output_path(Path(entry.path)))
+    if not output_path.exists() or output_path.stat().st_size == 0:
+        raise HTTPException(status_code=409, detail="Converted output missing or empty")
+
+    source = Path(entry.path)
+    if not source.exists():
+        updated = LIBRARY_STORE.update_status(
+            entry.path,
+            LibraryStatus.REMOVED,
+            original_missing=True,
+            output_path=str(output_path),
+        )
+        return JSONResponse(jsonable_encoder({"entry": _entry_to_response(updated)}))
+
+    try:
+        source.unlink()
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+    updated = LIBRARY_STORE.update_status(
+        entry.path,
+        LibraryStatus.REMOVED,
+        job_id=entry.last_job_id,
+        output_path=str(output_path),
+        original_missing=True,
+    )
+    return JSONResponse(jsonable_encoder({"entry": _entry_to_response(updated)}))
+
+
 @app.post("/api/scan")
 async def manual_scan(payload: ScanRequest, background_tasks: BackgroundTasks) -> JSONResponse:
     if payload.library:
@@ -346,11 +539,10 @@ async def manual_scan(payload: ScanRequest, background_tasks: BackgroundTasks) -
     for name, library in target_libs.items():
         root_path = payload.root or library.root
         background_tasks.add_task(
-            job_manager.scan_directory,
+            reconcile_library,
             name,
             root_path,
             library.profile,
-            encoding_payload(library.profile),
         )
         scheduled.append(name)
     return JSONResponse({"scheduled": scheduled})
@@ -363,9 +555,10 @@ async def handle_event(payload: EventPayload) -> JSONResponse:
         raise HTTPException(status_code=400, detail="Library could not be determined")
     profile = config_source.config.libraries[library_name].profile
     try:
-        job = await job_manager.add_job(
-            payload.path, library_name, profile, encoding=encoding_payload(profile)
-        )
+        entry, job = await _record_library_entry(library_name, Path(payload.path), profile)
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
-    return JSONResponse(jsonable_encoder(job.model_dump()))
+    response: Dict[str, Any] = {"entry": LibraryEntryResponse.model_validate(entry)}
+    if job:
+        response["job"] = job.model_dump()
+    return JSONResponse(jsonable_encoder(response))
