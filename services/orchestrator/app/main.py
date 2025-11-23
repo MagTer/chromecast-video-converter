@@ -64,6 +64,7 @@ LIBRARY_ROOT_PREFIXES = [
     for prefix in os.environ.get("LIBRARY_ROOT_PREFIXES", "/watch,/media").split(",")
     if prefix.strip()
 ]
+WORKER_TELEMETRY: Dict[str, "WorkerTelemetryPayload"] = {}
 
 
 def configure_logging() -> None:
@@ -144,6 +145,23 @@ class LibraryProfilePayload(BaseModel):
 
 class EntryProfilePayload(BaseModel):
     profile_id: int
+
+
+class WorkerTelemetryPayload(BaseModel):
+    worker_id: str
+    gpu_available: bool
+    devices: List[str] = Field(default_factory=list)
+    cuda_available: bool
+    nvenc_available: bool
+    checked_at: datetime
+    message: Optional[str] = None
+
+
+def _worker_metrics_summary() -> Dict[str, Any]:
+    payloads = list(WORKER_TELEMETRY.values())
+    telemetry = [jsonable_encoder(item) for item in payloads]
+    available = sum(1 for item in payloads if item.gpu_available)
+    return {"workers": len(payloads), "available": available, "telemetry": telemetry}
 
 
 class LibraryEntryResponse(BaseModel):
@@ -592,13 +610,20 @@ async def readyz() -> JSONResponse:
     return JSONResponse({"status": "ready"})
 
 
+@app.post("/api/workers/telemetry")
+async def ingest_worker_telemetry(payload: WorkerTelemetryPayload) -> JSONResponse:
+    WORKER_TELEMETRY[payload.worker_id] = payload
+    return JSONResponse({"stored": True})
+
+
 @app.get("/api/metrics")
 async def metrics() -> JSONResponse:
     jobs_list = await job_manager.list_jobs()
     count_by_status: Dict[str, int] = {}
     for job in jobs_list:
         count_by_status[job.status] = count_by_status.get(job.status, 0) + 1
-    return JSONResponse({"jobs": count_by_status})
+    worker_metrics = _worker_metrics_summary()
+    return JSONResponse({"jobs": count_by_status, "workers": worker_metrics})
 
 
 @app.get("/api/config")
@@ -849,7 +874,9 @@ async def acknowledge_job(job_id: str, payload: JobAckPayload) -> JSONResponse:
 
 @app.get("/api/queue/state")
 async def queue_state() -> JSONResponse:
-    return JSONResponse(await job_manager.queue_state())
+    state = await job_manager.queue_state()
+    state["workers"] = _worker_metrics_summary()
+    return JSONResponse(state)
 
 
 @app.post("/api/queue/pause")

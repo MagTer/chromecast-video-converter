@@ -7,8 +7,10 @@ import shlex
 import subprocess
 import time
 from collections import deque
+from contextlib import suppress
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 import httpx
 import redis.asyncio as redis
@@ -25,6 +27,7 @@ JOB_QUEUE_STREAM = os.environ.get("JOB_QUEUE_STREAM", "job_queue")
 JOB_QUEUE_GROUP = os.environ.get("JOB_QUEUE_GROUP", "workers")
 JOB_VISIBILITY_TIMEOUT = int(os.environ.get("JOB_VISIBILITY_TIMEOUT", "300"))
 STREAM_READER_LIMIT = int(os.environ.get("GPU_STREAM_READER_LIMIT", "1000000"))
+WORKER_ID = os.environ.get("WORKER_ID", f"worker-{os.getpid()}")
 
 
 def _normalize_level(level: str) -> str:
@@ -143,6 +146,7 @@ CONFIG_PATH = Path(os.environ.get("CONFIG_PATH", "/app/config/settings.yaml"))
 PROFILES: dict = {}
 OPERATIONAL_CONFIG: dict = {}
 REMOVE_ORIGINAL = False
+GPU_TELEMETRY_INTERVAL = int(os.environ.get("GPU_TELEMETRY_INTERVAL", "30"))
 
 
 def _hydrate_config(raw: dict) -> None:
@@ -196,6 +200,86 @@ FFPROBE_ANALYSIS_CMD = [
     "-show_format",
     "-show_streams",
 ]
+
+
+def _probe_gpu_devices() -> tuple[list[str], list[str]]:
+    devices: list[str] = []
+    errors: list[str] = []
+    try:
+        result = subprocess.run(
+            ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        for line in result.stdout.splitlines():
+            name = line.strip()
+            if name:
+                devices.append(name)
+    except FileNotFoundError:
+        errors.append("nvidia-smi not installed")
+    except subprocess.SubprocessError as exc:
+        errors.append(f"nvidia-smi probe failed: {exc}")
+
+    if not devices:
+        for device in sorted(Path("/dev").glob("nvidia[0-9]*")):
+            devices.append(device.name)
+
+    return devices, errors
+
+
+def _probe_ffmpeg_support() -> tuple[dict[str, Any], list[str]]:
+    errors: list[str] = []
+    support: dict[str, Any] = {"cuda": False, "nvenc": False}
+    try:
+        result = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-loglevel", "quiet", "-hwaccels"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        support["cuda"] = any("cuda" == line.strip().lower() for line in result.stdout.splitlines())
+    except subprocess.SubprocessError as exc:
+        errors.append(f"ffmpeg hwaccel probe failed: {exc}")
+
+    try:
+        result = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-loglevel", "quiet", "-encoders"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        support["nvenc"] = "h264_nvenc" in result.stdout
+    except subprocess.SubprocessError as exc:
+        errors.append(f"ffmpeg encoder probe failed: {exc}")
+
+    return support, errors
+
+
+def snapshot_gpu_state() -> dict[str, Any]:
+    devices, device_errors = _probe_gpu_devices()
+    ffmpeg_support, ffmpeg_errors = _probe_ffmpeg_support()
+    message_parts = device_errors + ffmpeg_errors
+    message = "; ".join(message_parts)
+    available = bool(devices) and ffmpeg_support.get("cuda") and ffmpeg_support.get("nvenc")
+    if not available and not message:
+        message = "CUDA devices or NVENC encoder not detected"
+    return {
+        "available": available,
+        "devices": devices,
+        "cuda_available": bool(ffmpeg_support.get("cuda")),
+        "nvenc_available": bool(ffmpeg_support.get("nvenc")),
+        "message": message,
+        "checked_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def require_gpu(gpu_state: dict[str, Any] | None = None) -> dict[str, Any]:
+    state = gpu_state or snapshot_gpu_state()
+    if not state.get("available"):
+        message = state.get("message") or "GPU unavailable for NVENC workloads"
+        raise RuntimeError(message)
+    return state
 
 
 def probe_file(filepath: str | Path) -> dict:
@@ -321,6 +405,19 @@ def _build_disposition_flags(
     return flags
 
 
+def _ffmpeg_base_command(input_path: Path) -> list[str]:
+    return [
+        "ffmpeg",
+        "-y",
+        "-hwaccel",
+        "cuda",
+        "-hwaccel_output_format",
+        "cuda",
+        "-i",
+        str(input_path),
+    ]
+
+
 def build_ffmpeg_command(  # noqa: C901
     analysis_json: dict, input_path: Path, output_path: Path
 ) -> list[str]:
@@ -366,16 +463,7 @@ def build_ffmpeg_command(  # noqa: C901
     selected_audio, default_audio_idx = _select_priority_streams(audio_streams)
     selected_subtitles, default_sub_idx = _select_priority_streams(subtitle_streams)
 
-    command: list[str] = [
-        "ffmpeg",
-        "-y",
-        "-hwaccel",
-        "cuda",
-        "-hwaccel_output_format",
-        "cuda",
-        "-i",
-        str(input_path),
-    ]
+    command: list[str] = _ffmpeg_base_command(input_path)
 
     if video_present:
         command.extend(["-map", "0:v"])
@@ -616,6 +704,44 @@ async def update_job_status(
         LOGGER.error("Failed to update job %s status: %s", job_id[:8], exc)
 
 
+async def publish_worker_telemetry(
+    client: httpx.AsyncClient, worker_id: str, gpu_state: dict[str, Any]
+) -> None:
+    payload = {
+        "worker_id": worker_id,
+        "gpu_available": bool(gpu_state.get("available")),
+        "devices": gpu_state.get("devices") or [],
+        "cuda_available": bool(gpu_state.get("cuda_available")),
+        "nvenc_available": bool(gpu_state.get("nvenc_available")),
+        "checked_at": gpu_state.get("checked_at") or datetime.now(timezone.utc).isoformat(),
+        "message": gpu_state.get("message"),
+    }
+    try:
+        await client.post("/api/workers/telemetry", json=payload)
+    except httpx.HTTPError as exc:
+        LOGGER.debug("Failed to publish GPU telemetry: %s", exc)
+
+
+async def telemetry_loop(client: httpx.AsyncClient, worker_id: str) -> None:
+    while True:
+        gpu_state = snapshot_gpu_state()
+        await publish_worker_telemetry(client, worker_id, gpu_state)
+        await asyncio.sleep(max(GPU_TELEMETRY_INTERVAL, 5))
+
+
+async def _ensure_gpu_ready(client: httpx.AsyncClient, job_id: str) -> bool:
+    gpu_state = snapshot_gpu_state()
+    try:
+        require_gpu(gpu_state)
+    except RuntimeError as exc:
+        message = f"GPU unavailable: {exc}"
+        LOGGER.error("%s", message)
+        await publish_worker_telemetry(client, WORKER_ID, gpu_state)
+        await update_job_status(client, job_id, "failed", 0, message)
+        return False
+    return True
+
+
 async def acknowledge_job(client: httpx.AsyncClient, job_id: str, delivery_id: str) -> None:
     try:
         await client.post(f"/api/jobs/{job_id}/ack", json={"delivery_id": delivery_id})
@@ -681,7 +807,7 @@ async def _maybe_remove_original(source: Path, output_path: Path, expected_durat
     return True
 
 
-async def process_job(client: httpx.AsyncClient, job: dict) -> None:
+async def process_job(client: httpx.AsyncClient, job: dict) -> None:  # noqa: C901
     job_id = job["id"]
     source = job["path"]
     LOGGER.info("Picked up job %s for %s", job_id[:8], source)
@@ -691,6 +817,9 @@ async def process_job(client: httpx.AsyncClient, job: dict) -> None:
         message = f"Source file not found: {source}"
         LOGGER.error("%s", message)
         await update_job_status(client, job_id, "failed", 0, message)
+        return
+
+    if not await _ensure_gpu_ready(client, job_id):
         return
 
     analysis = await asyncio.to_thread(probe_file, playback_target)
@@ -767,11 +896,12 @@ async def main() -> None:
         POLL_INTERVAL,
         LOG_LEVEL,
     )
-    consumer_id = f"worker-{os.getpid()}"
+    consumer_id = WORKER_ID
     redis_client = redis.from_url(JOB_QUEUE_URL, decode_responses=True)
     await ensure_queue(redis_client)
     last_pause_reason: str | None = None
     async with httpx.AsyncClient(base_url=ORCHESTRATOR_URL, timeout=30.0) as client:
+        telemetry_task = asyncio.create_task(telemetry_loop(client, consumer_id))
         try:
             while True:
                 paused, reason = await queue_paused(redis_client)
@@ -798,6 +928,9 @@ async def main() -> None:
                     await acknowledge_job(client, job["id"], delivery_id)
                 await asyncio.sleep(1)
         finally:
+            telemetry_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await telemetry_task
             await redis_client.aclose()
 
 
