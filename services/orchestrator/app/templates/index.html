@@ -89,6 +89,10 @@
       gap: 1.25rem;
     }
 
+    .stacked-page {
+      gap: 1rem;
+    }
+
     .page header {
       display: flex;
       justify-content: space-between;
@@ -181,6 +185,23 @@
     .status-paused { background: rgba(252, 211, 77, 0.2); color: #fcd34d; }
     .status-idle { background: rgba(148, 163, 184, 0.2); color: #cbd5e1; }
 
+    .status-chip {
+      display: inline-flex;
+      align-items: center;
+      padding: 0.25rem 0.75rem;
+      border-radius: 999px;
+      font-weight: 700;
+      text-transform: capitalize;
+      letter-spacing: 0.01em;
+      border: 1px solid transparent;
+    }
+
+    .status-pending { background: rgba(252, 211, 77, 0.1); color: #facc15; border-color: rgba(250, 204, 21, 0.4); }
+    .status-converting { background: rgba(96, 165, 250, 0.1); color: #60a5fa; border-color: rgba(96, 165, 250, 0.4); }
+    .status-converted { background: rgba(52, 211, 153, 0.1); color: #34d399; border-color: rgba(52, 211, 153, 0.4); }
+    .status-failed { background: rgba(248, 113, 113, 0.1); color: #f87171; border-color: rgba(248, 113, 113, 0.4); }
+    .status-removed { background: rgba(148, 163, 184, 0.1); color: #94a3b8; border-color: rgba(148, 163, 184, 0.4); }
+
     .log-list {
       min-height: 320px;
       max-height: 520px;
@@ -206,6 +227,20 @@
     }
     .hint { color: var(--muted); font-size: 0.9rem; }
     .stacked { display: grid; gap: 0.5rem; }
+
+    .filters { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center; }
+    .filters label { display: flex; flex-direction: column; gap: 0.25rem; font-weight: 600; font-size: 0.95rem; }
+    .filters .compact { width: 180px; }
+
+    .summary-grid { display: grid; gap: 0.75rem; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); }
+    .stat-card { border: 1px solid #1e293b; border-radius: 0.65rem; padding: 0.75rem 0.85rem; background: #0b1220; display: grid; gap: 0.25rem; }
+    .stat-card h4 { margin: 0; font-size: 0.95rem; color: var(--muted); }
+    .stat-card .stat-value { font-size: 1.35rem; font-weight: 800; }
+
+    .profile-chip { display: inline-flex; align-items: center; gap: 0.35rem; padding: 0.2rem 0.6rem; border-radius: 999px; border: 1px solid #334155; background: rgba(51, 65, 85, 0.4); font-weight: 700; }
+
+    .row-actions { display: flex; flex-wrap: wrap; gap: 0.35rem; }
+    .row-actions button { padding: 0.35rem 0.6rem; font-size: 0.9rem; }
   </style>
 </head>
 <body>
@@ -216,6 +251,7 @@
     </div>
     <ul>
       <li><a href="#queue" data-page="queue" class="active">Queue management</a></li>
+      <li><a href="#library" data-page="library">Library entries</a></li>
       <li><a href="#logs" data-page="logs">Logs</a></li>
       <li><a href="#config" data-page="config">Configuration</a></li>
     </ul>
@@ -283,6 +319,70 @@
       </header>
       <div class="panel">
         <div class="log-list" id="log-list"></div>
+      </div>
+    </section>
+
+    <section class="page stacked-page" data-page="library">
+      <header>
+        <div>
+          <h2>Library entries</h2>
+          <p class="subtitle">Browse converted items, reprocess failures, or trim originals.</p>
+        </div>
+        <div style="display:flex; gap:0.5rem; align-items:center;">
+          <button id="refresh-entries" type="button">Refresh</button>
+          <span id="library-status" class="hint"></span>
+        </div>
+      </header>
+      <div class="panel" style="display:grid; gap:0.75rem;">
+        <div class="filters">
+          <label style="flex:1; min-width:260px;">
+            Search path or library
+            <input id="entry-search" placeholder="/library/movies/..." />
+          </label>
+          <label class="compact">
+            Library
+            <select id="entry-library-filter"></select>
+          </label>
+          <label class="compact">
+            Status
+            <select id="entry-status-filter">
+              <option value="">All</option>
+              <option value="pending">Pending</option>
+              <option value="converting">Converting</option>
+              <option value="converted">Converted</option>
+              <option value="failed">Failed</option>
+              <option value="removed">Removed</option>
+            </select>
+          </label>
+          <label class="compact">
+            Page size
+            <select id="entry-page-size">
+              <option value="10">10</option>
+              <option value="20">20</option>
+              <option value="50">50</option>
+            </select>
+          </label>
+        </div>
+        <div class="summary-grid" id="entry-summary"></div>
+        <table>
+          <thead>
+            <tr>
+              <th>ID</th>
+              <th>Status</th>
+              <th>Library</th>
+              <th>Path</th>
+              <th>Profile</th>
+              <th>Updated</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody id="entry-rows"></tbody>
+        </table>
+        <div style="display:flex; align-items:center; gap:0.5rem;">
+          <button id="entry-prev" type="button" class="secondary">Prev</button>
+          <button id="entry-next" type="button" class="secondary">Next</button>
+          <span id="entry-page-indicator" class="hint"></span>
+        </div>
       </div>
     </section>
 
@@ -487,8 +587,21 @@
     const entryProfileForm = document.querySelector("#entry-profile-form");
     const entryProfileSelect = document.querySelector("#entry-profile-select");
     const entryProfileResult = document.querySelector("#entry-profile-result");
+    const entryRows = document.querySelector("#entry-rows");
+    const entrySummary = document.querySelector("#entry-summary");
+    const entrySearch = document.querySelector("#entry-search");
+    const entryLibraryFilter = document.querySelector("#entry-library-filter");
+    const entryStatusFilter = document.querySelector("#entry-status-filter");
+    const entryPageSize = document.querySelector("#entry-page-size");
+    const entryPageIndicator = document.querySelector("#entry-page-indicator");
+    const refreshEntriesBtn = document.querySelector("#refresh-entries");
+    const entryPrev = document.querySelector("#entry-prev");
+    const entryNext = document.querySelector("#entry-next");
+    const libraryStatus = document.querySelector("#library-status");
 
     let configCache = null;
+    let libraryEntries = [];
+    let entryPage = 1;
 
     if (!logLevel.value) {
       logLevel.value = "INFO";
@@ -613,6 +726,26 @@
       });
     }
 
+    function renderLibraryFilters() {
+      if (!entryLibraryFilter) return;
+      const libraries = libraryList();
+      const previous = entryLibraryFilter.value;
+      entryLibraryFilter.innerHTML = "";
+      const all = document.createElement("option");
+      all.value = "";
+      all.textContent = "All libraries";
+      entryLibraryFilter.appendChild(all);
+      libraries.forEach((library) => {
+        const option = document.createElement("option");
+        option.value = library.name;
+        option.textContent = library.name;
+        entryLibraryFilter.appendChild(option);
+      });
+      if (previous && libraries.some((library) => library.name === previous)) {
+        entryLibraryFilter.value = previous;
+      }
+    }
+
     function switchPage(pageName) {
       pages.forEach((page) => {
         page.classList.toggle("active", page.dataset.page === pageName);
@@ -648,6 +781,7 @@
         loadProfile(profileSelect.value);
       }
       renderLibraryProfiles();
+      renderLibraryFilters();
       renderEntryProfileSelect();
     }
 
@@ -754,6 +888,152 @@
         `;
         logList.appendChild(container);
       });
+    }
+
+    function summarizeEntries(entries) {
+      const summary = {
+        pending: 0,
+        converting: 0,
+        converted: 0,
+        failed: 0,
+      };
+      entries.forEach((entry) => {
+        if (summary[entry.status] !== undefined) {
+          summary[entry.status] += 1;
+        }
+      });
+      return summary;
+    }
+
+    function formatStatusChip(status) {
+      const normalized = status || "unknown";
+      return `<span class="status-chip status-${normalized}">${normalized}</span>`;
+    }
+
+    function formatProfile(entry) {
+      const parts = [entry.profile];
+      if (entry.profile_id) parts.push(`#${entry.profile_id}`);
+      return `<span class="profile-chip">${parts.join(" ")}</span>`;
+    }
+
+    function formatUpdated(value) {
+      if (!value) return "";
+      const date = new Date(value);
+      if (Number.isNaN(date.getTime())) return value;
+      return date.toLocaleString();
+    }
+
+    function filteredEntries() {
+      const term = (entrySearch.value || "").toLowerCase();
+      const library = entryLibraryFilter.value;
+      const status = entryStatusFilter.value;
+      return libraryEntries.filter((entry) => {
+        if (library && entry.library !== library) return false;
+        if (status && entry.status !== status) return false;
+        if (!term) return true;
+        return (
+          entry.path.toLowerCase().includes(term) ||
+          entry.library.toLowerCase().includes(term)
+        );
+      });
+    }
+
+    function renderEntrySummary() {
+      const summary = summarizeEntries(libraryEntries);
+      const entries = [
+        { label: "Pending", key: "pending" },
+        { label: "Converting", key: "converting" },
+        { label: "Converted", key: "converted" },
+        { label: "Failed", key: "failed" },
+      ];
+      entrySummary.innerHTML = "";
+      entries.forEach((item) => {
+        const card = document.createElement("div");
+        card.className = "stat-card";
+        card.innerHTML = `
+          <h4>${item.label}</h4>
+          <div class="stat-value">${summary[item.key] ?? 0}</div>
+        `;
+        entrySummary.appendChild(card);
+      });
+    }
+
+    function renderEntryTable() {
+      const entries = filteredEntries();
+      const pageSize = Number(entryPageSize.value || "10");
+      const totalPages = Math.max(1, Math.ceil(entries.length / pageSize));
+      if (entryPage > totalPages) entryPage = totalPages;
+      const start = (entryPage - 1) * pageSize;
+      const slice = entries.slice(start, start + pageSize);
+      entryRows.innerHTML = "";
+      slice.forEach((entry) => {
+        const tr = document.createElement("tr");
+        tr.innerHTML = `
+          <td>${entry.id}</td>
+          <td>${formatStatusChip(entry.status)}</td>
+          <td>${entry.library}</td>
+          <td class="path-cell" title="${entry.path}">${entry.path}</td>
+          <td>${formatProfile(entry)}</td>
+          <td>${formatUpdated(entry.updated_at)}</td>
+          <td>
+            <div class="row-actions">
+              <button type="button" data-action="reprocess" data-entry-id="${entry.id}">Reprocess</button>
+              <button type="button" class="secondary" data-action="remove" data-entry-id="${entry.id}">Delete original</button>
+              <button type="button" class="secondary" data-action="logs" data-entry-id="${entry.id}">View logs</button>
+            </div>
+          </td>
+        `;
+        tr.dataset.entryId = entry.id;
+        tr.dataset.jobId = entry.last_job_id || "";
+        tr.dataset.path = entry.path;
+        entryRows.appendChild(tr);
+      });
+      entryPrev.disabled = entryPage <= 1;
+      entryNext.disabled = entryPage >= totalPages;
+      entryPageIndicator.textContent = `Page ${entryPage} of ${totalPages} (${entries.length} entr${
+        entries.length === 1 ? "y" : "ies"
+      })`;
+    }
+
+    async function refreshLibraryEntries() {
+      libraryStatus.textContent = "Loading entries...";
+      const response = await fetch("/api/library/entries");
+      const entries = await response.json();
+      libraryEntries = Array.isArray(entries) ? entries : [];
+      renderEntrySummary();
+      renderEntryTable();
+      libraryStatus.textContent = `Loaded ${libraryEntries.length} entries`;
+    }
+
+    async function handleEntryAction(action, entryId, button) {
+      if (!entryId) return;
+      if (action === "logs") {
+        const row = button.closest("tr");
+        const jobId = row?.dataset.jobId;
+        const path = row?.dataset.path;
+        logQuery.value = jobId || path || "";
+        switchPage("logs");
+        fetchLogs();
+        return;
+      }
+      const endpoint =
+        action === "reprocess"
+          ? `/api/library/entries/${entryId}/reprocess`
+          : `/api/library/entries/${entryId}/remove-original`;
+      const label = button.textContent;
+      button.textContent = "Working...";
+      button.disabled = true;
+      try {
+        const response = await fetch(endpoint, { method: "POST" });
+        if (!response.ok) {
+          const detail = await response.json();
+          alert(detail.detail || "Request failed");
+        }
+        await refreshLibraryEntries();
+      } finally {
+        button.textContent = label;
+        button.disabled = false;
+      }
     }
 
     async function fetchLogCategories() {
@@ -942,11 +1222,44 @@
       }
     });
 
+    refreshEntriesBtn.addEventListener("click", refreshLibraryEntries);
+
+    [entrySearch, entryLibraryFilter, entryStatusFilter, entryPageSize].forEach((control) => {
+      control.addEventListener("input", () => {
+        entryPage = 1;
+        renderEntryTable();
+      });
+      control.addEventListener("change", () => {
+        entryPage = 1;
+        renderEntryTable();
+      });
+    });
+
+    entryPrev.addEventListener("click", () => {
+      if (entryPage > 1) {
+        entryPage -= 1;
+        renderEntryTable();
+      }
+    });
+
+    entryNext.addEventListener("click", () => {
+      entryPage += 1;
+      renderEntryTable();
+    });
+
+    entryRows.addEventListener("click", (event) => {
+      const button = event.target.closest("button[data-action]");
+      if (!button) return;
+      const { action, entryId } = button.dataset;
+      handleEntryAction(action, entryId, button);
+    });
+
     fetchConfig();
     fetchJobs();
     fetchLogCategories();
     fetchLogs();
     fetchLogStats();
+    refreshLibraryEntries();
     refreshQueueState();
     const initialPage = window.location.hash.replace("#", "") || "queue";
     switchPage(initialPage);
@@ -955,6 +1268,7 @@
     setInterval(fetchLogCategories, 15000);
     setInterval(fetchLogStats, 20000);
     setInterval(refreshQueueState, 7000);
+    setInterval(refreshLibraryEntries, 12000);
   </script>
 </body>
 </html>
