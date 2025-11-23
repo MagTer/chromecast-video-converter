@@ -35,7 +35,7 @@ This guide walks through prerequisites, configuration, and day-one operation of 
 
 ## Media watcher behavior
 
-The `folder-watcher` container monitors the mounted `movies` and `series` directories. Create or modify files under those paths and the watcher will notify the orchestrator, which then queues verification/transcoding jobs based on the active profile.
+The `folder-watcher` container uses `inotifywait` to stream create/modify/delete events from the mounted `movies` and `series` directories. Events include the library name, full path, basic metadata, and whether the entry is a directory. The watcher backs off and retries when the orchestrator API is temporarily unavailable and can optionally buffer events for batch delivery. Set `EVENT_BUFFER_SECONDS` to a non-zero value in `docker-compose.yml` to group events into timed batches; adjust `EVENT_RETRY_ATTEMPTS` and `EVENT_RETRY_BACKOFF_SECONDS` to control the retry window if the API is down.
 
 ## Cleanup and troubleshooting
 

@@ -57,8 +57,10 @@ Alpine watcher feeds file-system events into the system.
   pull the next ready job from `/api/jobs/next`, update status back to the API,
   and honor the current profile configuration.
 - **Folder watcher** – Alpine container monitoring bind-mounted `movies` and
-  `series` roots. Emits create/modify events to the orchestrator so newly added
-  files are queued immediately.
+  `series` roots. Streams create/modify/delete events (with file metadata) to
+  the orchestrator with optional buffering and retry backoff so newly added or
+  replaced files are queued immediately and removals are reflected in the
+  library catalog.
 - **Encoding profiles** – Centralized in a SQLite config store seeded from
   `config/settings.yaml.template` (or an existing `settings.yaml`) and editable
   via `/api/config/encoding`. Profiles target Chromecast Gen 2/3 constraints
