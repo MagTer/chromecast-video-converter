@@ -136,6 +136,7 @@ class LibraryConfig(BaseModel):
     root: str
     depth: str
     profile: str
+    profile_id: Optional[int] = None
 
 
 class OperationConfig(BaseModel):
