@@ -20,6 +20,7 @@ services:
       - PORT=9000
       - JOB_QUEUE=redis://redis:6379/0
       - CONFIG_PATH=/app/config/settings.yaml
+      - DATABASE_URL=sqlite:////app/config/orchestrator.db
 
   folder-watcher:
     build:
@@ -38,8 +39,8 @@ services:
 
   gpu-ffmpeg:
     build:
-      context: ./services/gpu-ffmpeg
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: ./services/gpu-ffmpeg/Dockerfile
     image: chromecast-video-converter/gpu-ffmpeg:dev
     gpus: all
     volumes:
@@ -54,6 +55,7 @@ services:
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=compute,video,utility
       - GPU_STREAM_READER_LIMIT=${GPU_STREAM_READER_LIMIT:-1000000}
+      - DATABASE_URL=sqlite:////app/config/orchestrator.db
 
   redis:
     image: redis:7
