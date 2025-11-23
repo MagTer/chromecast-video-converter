@@ -85,12 +85,37 @@ Alpine watcher feeds file-system events into the system.
   `NVIDIA_DRIVER_CAPABILITIES=compute,video,utility` environment variables to
   make the GPU encoder visible inside the container.
 - Compose also applies cgroup rules (`c 195:* rmw`, `c 508:* rmw`) so the
-  container can open `/dev/nvidia*` without hitting permission errors when the
-  stack is launched from WSL2 or other constrained environments.
+ container can open `/dev/nvidia*` without hitting permission errors when the
+ stack is launched from WSL2 or other constrained environments.
 - Workers hard-require CUDA/NVENC; when the GPU or encoder stack is missing,
   jobs fail fast with clear log messages and the dashboard highlights GPU
   readiness (0/X ready) in the queue header instead of silently falling back to
   CPU encoding.
+
+## Local testing and linting
+
+1. Create and activate a virtual environment (for example, `python -m venv .venv`
+   followed by `source .venv/bin/activate`).
+2. Install tooling and service dependencies:
+
+   ```bash
+   python -m pip install -r requirements-dev.txt \
+       -r services/orchestrator/requirements.txt \
+       -r services/gpu-ffmpeg/requirements.txt
+   ```
+
+3. Run the quality gates locally:
+
+   ```bash
+   ruff check .
+   black --check .
+   pytest
+   ```
+
+The test suite stubs GPU and Redis interactions so it passes without CUDA or a
+Redis daemon. For an optional integration-style run against real services, start
+Redis with `docker compose up -d redis` (and the GPU worker if you have NVENC
+hardware available) before invoking `pytest`.
 
 ### Dependency refresh
 
