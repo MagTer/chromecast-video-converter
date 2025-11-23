@@ -115,20 +115,49 @@ if HOST_ENVIRONMENT["is_wsl"]:
     LOGGER.warning("Detected WSL kernel; NVENC rate-control and multipass support may be limited")
 
 CONFIG_PATH = Path(os.environ.get("CONFIG_PATH", "/app/config/settings.yaml"))
-try:
-    with CONFIG_PATH.open("r", encoding="utf-8") as fh:
-        _CONFIG = yaml.safe_load(fh) or {}
-except FileNotFoundError:
-    _CONFIG = {}
-PROFILES = _CONFIG.get("profiles", {})
-if _CONFIG:
+PROFILES: dict = {}
+OPERATIONAL_CONFIG: dict = {}
+REMOVE_ORIGINAL = False
+
+
+def _hydrate_config(raw: dict) -> None:
+    global PROFILES, OPERATIONAL_CONFIG, REMOVE_ORIGINAL
+    PROFILES = raw.get("profiles", {}) or {}
+    OPERATIONAL_CONFIG = raw.get("operational", {}) or {}
+    REMOVE_ORIGINAL = bool(OPERATIONAL_CONFIG.get("remove_original_after_success", False))
+
+
+def _load_config_from_api() -> bool:
+    try:
+        response = httpx.get(
+            f"{ORCHESTRATOR_URL}/api/config?ts={int(time.time())}",
+            timeout=10.0,
+            headers={"Cache-Control": "no-store"},
+        )
+        response.raise_for_status()
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.warning("Unable to fetch config from orchestrator: %s", exc)
+        return False
+    _hydrate_config(response.json())
+    LOGGER.info("Loaded settings config from orchestrator (%s profiles)", len(PROFILES))
+    return True
+
+
+def _load_config_from_disk() -> None:
+    try:
+        with CONFIG_PATH.open("r", encoding="utf-8") as fh:
+            raw = yaml.safe_load(fh) or {}
+    except FileNotFoundError:
+        LOGGER.warning("No settings config present at %s; using defaults", CONFIG_PATH)
+        return
+    _hydrate_config(raw)
     LOGGER.info(
-        "Loaded settings config from %s (%s profiles available)",
-        CONFIG_PATH,
-        len(PROFILES),
+        "Loaded settings config from %s (%s profiles available)", CONFIG_PATH, len(PROFILES)
     )
-else:
-    LOGGER.warning("No settings config present at %s; using defaults", CONFIG_PATH)
+
+
+if not _load_config_from_api():
+    _load_config_from_disk()
 FFPROBE_ANALYSIS_CMD = [
     "ffprobe",
     "-v",
@@ -138,8 +167,6 @@ FFPROBE_ANALYSIS_CMD = [
     "-show_format",
     "-show_streams",
 ]
-OPERATIONAL_CONFIG = _CONFIG.get("operational", {})
-REMOVE_ORIGINAL = bool(OPERATIONAL_CONFIG.get("remove_original_after_success", False))
 
 
 def probe_file(filepath: str | Path) -> dict:

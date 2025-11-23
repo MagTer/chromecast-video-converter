@@ -18,12 +18,12 @@
 | `gpu-ffmpeg` | Ubuntu + FFmpeg + CUDA/NVIDIA runtime | Executes validation and transcode jobs using NVENC. Launches via orchestrator with bind-mounted file chunks and temp workspace. |
 | `queue` (optional) | Redis | Buffers work to smooth spikes. |
 
-All containers join a private Docker network. Bind mounts provide the Windows-host media folders and a `config/` directory containing YAML definitions for libraries and quality rules. NVIDIA Container Toolkit is required so `gpu-ffmpeg` can access the RTX 3060 from WSL2.
+All containers join a private Docker network. Bind mounts provide the Windows-host media folders and a `config/` directory containing the template/legacy YAML used to seed the SQLite configuration store. NVIDIA Container Toolkit is required so `gpu-ffmpeg` can access the RTX 3060 from WSL2.
 
 ## Data flow
 
 1. **Change detection** - Each `folder-watcher` instance monitors a root directory and reports file creates/modifies/deletes plus metadata (path, size, hash) to the orchestrator.
-2. **Policy evaluation** - Orchestrator loads quality profiles (per movies/series) from `config/settings.yaml`. It validates config shape and warns about unsupported codecs/levels before persisting any change.
+2. **Policy evaluation** - Orchestrator loads quality profiles (per movies/series) from the SQLite-backed config store (seeded from `config/settings.yaml` or the template). It validates config shape and warns about unsupported codecs/levels before persisting any change.
 3. **Compliance check** - Orchestrator inspects new or updated files by invoking `gpu-ffmpeg` in probe mode to extract codecs, resolution, bitrate, and HDR flags. Files already compliant are flagged `ready`.
 4. **Transcode scheduling** - Non-compliant files become jobs in a durable queue. Orchestrator throttles concurrent ffmpeg invocations to respect GPU memory and disk IO.
 5. **Encoding** - `gpu-ffmpeg` receives a manifest (input path, target profile) and runs ffmpeg with pinned parameters: `-hwaccel cuda -hwaccel_output_format cuda -i <src> -vf "scale=-2:720:force_original_aspect_ratio=decrease" -c:v h264_nvenc -profile:v high -level 4.1 -preset p5 -cq 18 -maxrate 8M -bufsize 16M -pix_fmt yuv420p -movflags +faststart -c:a aac -b:a 192k -ac 2`. Audio/video map decisions come from the manifest.
@@ -49,14 +49,14 @@ All containers join a private Docker network. Bind mounts provide the Windows-ho
 
 ## Configuration model
 
-`config/settings.yaml` (validated via JSON Schema) captures:
+The SQLite config store (seeded from `config/settings.yaml` when present) captures:
 
 - Libraries (`movies`, `series`, additional custom roots) with mount paths, recursion depth, naming hints.
 - Quality profile per library (resolution cap, bitrate budget, scaling rules, audio layout).
 - Operational thresholds (max concurrent jobs, GPU temp cutoffs, disk usage guardrails).
 - Notification sinks (Webhook, email) for warnings/errors.
 
-Invalid combinations (e.g., requesting HEVC) are rejected with actionable errors so users cannot break Chromecast compatibility.
+All persisted entries are validated with Pydantic to reject invalid or Chromecast-incompatible combinations (e.g., HEVC, excessive bitrates) before they are stored.
 
 ## Production logging and monitoring
 
