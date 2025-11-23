@@ -1,0 +1,211 @@
+from __future__ import annotations
+
+import logging
+from dataclasses import asdict, dataclass
+from datetime import datetime
+from pathlib import Path
+from threading import RLock
+from typing import Iterable, List, Optional
+
+from sqlalchemy import Boolean, Column, DateTime, Integer, String, create_engine, select
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.orm import declarative_base, sessionmaker
+
+LOGGER = logging.getLogger("orchestrator.library")
+
+Base = declarative_base()
+
+
+class LibraryStatus(str):
+    PENDING = "pending"
+    CONVERTING = "converting"
+    CONVERTED = "converted"
+    FAILED = "failed"
+    REMOVED = "removed"
+
+
+class LibraryEntry(Base):
+    __tablename__ = "library_entries"
+
+    id = Column(Integer, primary_key=True)
+    path = Column(String, unique=True, nullable=False)
+    library = Column(String, nullable=False)
+    profile = Column(String, nullable=False)
+    status = Column(String, nullable=False, default=LibraryStatus.PENDING)
+    output_path = Column(String, nullable=True)
+    last_error = Column(String, nullable=True)
+    last_job_id = Column(String, nullable=True)
+    original_missing = Column(Boolean, default=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "path": self.path,
+            "library": self.library,
+            "profile": self.profile,
+            "status": self.status,
+            "output_path": self.output_path,
+            "last_error": self.last_error,
+            "last_job_id": self.last_job_id,
+            "original_missing": bool(self.original_missing),
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+        }
+
+
+@dataclass
+class EntryUpdate:
+    path: str
+    library: str
+    profile: str
+    status: str
+    output_path: Optional[str] = None
+    last_error: Optional[str] = None
+    last_job_id: Optional[str] = None
+    original_missing: bool = False
+
+
+class LibraryEntryStore:
+    def __init__(self, db_path: Path) -> None:
+        self._lock = RLock()
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._engine = create_engine(f"sqlite:///{db_path}", future=True)
+        self._Session = sessionmaker(bind=self._engine, expire_on_commit=False, future=True)
+        Base.metadata.create_all(self._engine)
+        LOGGER.info("Library entry store initialized at %s", db_path)
+
+    def _session(self):
+        return self._Session()
+
+    def list_entries(
+        self, *, status: Optional[str] = None, library: Optional[str] = None
+    ) -> List[LibraryEntry]:
+        stmt = select(LibraryEntry)
+        if status:
+            stmt = stmt.where(LibraryEntry.status == status)
+        if library:
+            stmt = stmt.where(LibraryEntry.library == library)
+        stmt = stmt.order_by(LibraryEntry.updated_at.desc())
+        with self._lock, self._session() as session:
+            return list(session.scalars(stmt).all())
+
+    def get(self, entry_id: int) -> Optional[LibraryEntry]:
+        with self._lock, self._session() as session:
+            return session.get(LibraryEntry, entry_id)
+
+    def upsert(self, payload: EntryUpdate) -> LibraryEntry:
+        with self._lock, self._session() as session:
+            existing = session.scalar(select(LibraryEntry).where(LibraryEntry.path == payload.path))
+            timestamp = datetime.utcnow()
+            if existing:
+                for key, value in asdict(payload).items():
+                    setattr(existing, key, value)
+                existing.updated_at = timestamp
+                session.add(existing)
+                session.commit()
+                session.refresh(existing)
+                return existing
+
+            entry = LibraryEntry(
+                path=payload.path,
+                library=payload.library,
+                profile=payload.profile,
+                status=payload.status,
+                output_path=payload.output_path,
+                last_error=payload.last_error,
+                last_job_id=payload.last_job_id,
+                original_missing=payload.original_missing,
+                created_at=timestamp,
+                updated_at=timestamp,
+            )
+            session.add(entry)
+            session.commit()
+            session.refresh(entry)
+            return entry
+
+    def attach_job(self, entry_id: int, job_id: str) -> Optional[LibraryEntry]:
+        with self._lock, self._session() as session:
+            entry = session.get(LibraryEntry, entry_id)
+            if entry is None:
+                return None
+            entry.last_job_id = job_id
+            entry.updated_at = datetime.utcnow()
+            session.commit()
+            session.refresh(entry)
+            return entry
+
+    def mark_missing(self, library: str, known_paths: Iterable[str]) -> int:
+        known_set = set(known_paths)
+        stmt = select(LibraryEntry).where(LibraryEntry.library == library)
+        if known_set:
+            stmt = stmt.where(~LibraryEntry.path.in_(known_set))
+        updated = 0
+        with self._lock, self._session() as session:
+            for entry in session.scalars(stmt).all():
+                entry.status = LibraryStatus.REMOVED
+                entry.original_missing = True
+                entry.updated_at = datetime.utcnow()
+                session.add(entry)
+                updated += 1
+            session.commit()
+        return updated
+
+    def update_status(
+        self,
+        path: str,
+        status: str,
+        *,
+        library: Optional[str] = None,
+        profile: Optional[str] = None,
+        message: Optional[str] = None,
+        job_id: Optional[str] = None,
+        output_path: Optional[str] = None,
+        original_missing: bool = False,
+    ) -> LibraryEntry:
+        with self._lock, self._session() as session:
+            entry = session.scalar(select(LibraryEntry).where(LibraryEntry.path == path))
+            timestamp = datetime.utcnow()
+            if entry is None:
+                if not library or not profile:
+                    raise KeyError("Library and profile are required for new entries")
+                entry = LibraryEntry(
+                    path=path,
+                    library=library,
+                    profile=profile,
+                    status=status,
+                    created_at=timestamp,
+                )
+            entry.status = status
+            entry.output_path = output_path or entry.output_path
+            entry.last_error = message if status == LibraryStatus.FAILED else None
+            entry.last_job_id = job_id or entry.last_job_id
+            entry.original_missing = original_missing
+            entry.updated_at = timestamp
+            session.add(entry)
+            session.commit()
+            session.refresh(entry)
+            return entry
+
+    def safe_update_status(self, *args, **kwargs) -> Optional[LibraryEntry]:
+        try:
+            return self.update_status(*args, **kwargs)
+        except SQLAlchemyError as exc:
+            LOGGER.error("Failed to persist library entry update: %s", exc)
+            return None
+
+    def delete_original(self, entry: LibraryEntry) -> LibraryEntry:
+        source = Path(entry.path)
+        if source.exists():
+            source.unlink()
+        with self._lock, self._session() as session:
+            stored = session.get(LibraryEntry, entry.id)
+            if stored is None:
+                raise KeyError(entry.id)
+            stored.status = LibraryStatus.REMOVED
+            stored.original_missing = True
+            stored.updated_at = datetime.utcnow()
+            session.commit()
+            session.refresh(stored)
+            return stored

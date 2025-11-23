@@ -66,6 +66,10 @@ Alpine watcher feeds file-system events into the system.
 - **Verification hooks** – After startup, the orchestrator scans configured
   libraries and preloads jobs for anything not already compliant. On success,
   progress is reflected in the dashboard and metrics endpoint.
+- **Library catalog** – The orchestrator now persists library entries with
+  statuses for pending, converting, converted, failed, and removed items.
+  Operators can list entries, trigger reprocessing, or request removal of
+  originals (after confirming converted outputs exist) via the API.
 
 ### GPU access inside Docker Compose
 

@@ -70,12 +70,24 @@ class JobManager:
             return True
         return False
 
+    @property
+    def video_extensions(self) -> set[str]:
+        return set(self._video_extensions)
+
+    def output_path(self, source: Path) -> Path:
+        return self._output_path(source)
+
+    def is_converted(self, source: Path) -> bool:
+        return self._already_converted(source)
+
     async def add_job(
         self,
         path: str,
         library: str,
         profile: str,
         encoding: Optional[Dict[str, Any]] = None,
+        *,
+        force: bool = False,
     ) -> Job:
         source = Path(path)
         if source.suffix.lower() not in self._video_extensions:
@@ -86,7 +98,14 @@ class JobManager:
             raise ValueError(f"Output already exists for {path}")
         async with self._lock:
             for job in self._jobs.values():
-                if job.path == path and job.status != JobStatus.FAILED:
+                if job.path == path:
+                    if force or job.status == JobStatus.FAILED:
+                        job.status = JobStatus.PENDING
+                        job.progress = 0
+                        job.message = None
+                        job.updated_at = datetime.utcnow()
+                        self._logger.info("Re-queued existing job %s for %s", job.id[:8], path)
+                        return job
                     self._logger.debug("Job already tracked for %s", path)
                     return job
             job = Job(path=path, library=library, profile=profile, encoding=encoding)
