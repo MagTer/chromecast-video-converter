@@ -295,8 +295,12 @@
         <form id="config-form">
           <div class="grid-two">
             <label>
-              Profile
+              Profile preset
               <select id="profile-select"></select>
+            </label>
+            <label>
+              Profile name
+              <input id="profile-name" placeholder="movies" />
             </label>
             <label>
               H.264 profile
@@ -404,6 +408,39 @@
       <div class="panel">
         <header>
           <div>
+            <h3 style="margin:0">Library defaults</h3>
+            <p class="hint" style="margin:0">Assign a profile to each monitored library.</p>
+          </div>
+        </header>
+        <div id="library-profiles" class="stacked" style="gap:0.75rem;"></div>
+      </div>
+      <div class="panel">
+        <header>
+          <div>
+            <h3 style="margin:0">Entry profile override</h3>
+            <p class="hint" style="margin:0">Update a single entry before reprocessing.</p>
+          </div>
+        </header>
+        <form id="entry-profile-form" class="stacked" style="gap:0.75rem;">
+          <div class="grid-two">
+            <label>
+              Entry ID
+              <input id="entry-id" type="number" min="1" placeholder="123" />
+            </label>
+            <label>
+              Encoding profile
+              <select id="entry-profile-select"></select>
+            </label>
+          </div>
+          <div style="display:flex; gap:0.5rem; align-items:center;">
+            <button type="submit">Apply profile to entry</button>
+            <span id="entry-profile-result" class="hint"></span>
+          </div>
+        </form>
+      </div>
+      <div class="panel">
+        <header>
+          <div>
             <h3 style="margin:0">Logging retention</h3>
             <p class="hint" style="margin:0">Centralized log storage across orchestrator and workers.</p>
           </div>
@@ -442,6 +479,11 @@
     const logRetention = document.querySelector("#log-retention");
     const logConfigResult = document.querySelector("#log-config-result");
     const logStats = document.querySelector("#log-stats");
+    const profileNameInput = document.querySelector("#profile-name");
+    const libraryProfiles = document.querySelector("#library-profiles");
+    const entryProfileForm = document.querySelector("#entry-profile-form");
+    const entryProfileSelect = document.querySelector("#entry-profile-select");
+    const entryProfileResult = document.querySelector("#entry-profile-result");
 
     let configCache = null;
 
@@ -460,6 +502,112 @@
         select.appendChild(option);
       }
       select.value = stringValue;
+    }
+
+    function profileList() {
+      if (!configCache) return [];
+      const raw = configCache.profiles || [];
+      if (Array.isArray(raw)) return raw;
+      return Object.entries(raw).map(([name, profile]) => ({ ...profile, name }));
+    }
+
+    function libraryList() {
+      if (!configCache || !configCache.libraries) return [];
+      return Object.entries(configCache.libraries).map(([name, library]) => ({ name, ...library }));
+    }
+
+    function findProfile(name) {
+      return profileList().find((profile) => profile.name === name);
+    }
+
+    function renderProfileSelect() {
+      const profileSelect = document.querySelector("#profile-select");
+      const profiles = profileList();
+      profileSelect.innerHTML = "";
+      if (!profiles.length) {
+        const option = document.createElement("option");
+        option.value = "";
+        option.textContent = "No profiles available";
+        profileSelect.appendChild(option);
+        profileNameInput.value = "";
+        return;
+      }
+      profiles.forEach((profile) => {
+        const option = document.createElement("option");
+        option.value = profile.name;
+        option.textContent = profile.id ? `${profile.name} (#${profile.id})` : profile.name;
+        profileSelect.appendChild(option);
+      });
+      if (!profileSelect.value) {
+        profileSelect.value = profiles[0].name;
+      }
+      profileNameInput.value = profileSelect.value;
+    }
+
+    function renderEntryProfileSelect() {
+      const profiles = profileList();
+      entryProfileSelect.innerHTML = "";
+      profiles.forEach((profile) => {
+        const option = document.createElement("option");
+        option.value = profile.id;
+        option.textContent = profile.name;
+        entryProfileSelect.appendChild(option);
+      });
+    }
+
+    function renderLibraryProfiles() {
+      if (!libraryProfiles) return;
+      const libraries = libraryList();
+      const profiles = profileList();
+      libraryProfiles.innerHTML = "";
+      if (!libraries.length) {
+        const message = document.createElement("p");
+        message.classList.add("hint");
+        message.textContent = "No libraries configured.";
+        libraryProfiles.appendChild(message);
+        return;
+      }
+      libraries.forEach((library) => {
+        const row = document.createElement("div");
+        row.classList.add("grid-two", "library-row");
+        row.dataset.library = library.name;
+
+        const info = document.createElement("div");
+        info.innerHTML = `<strong>${library.name}</strong><p class="hint" style="margin:0">${library.root}</p>`;
+
+        const controls = document.createElement("div");
+        controls.style.display = "flex";
+        controls.style.gap = "0.5rem";
+        controls.style.alignItems = "center";
+
+        const select = document.createElement("select");
+        select.dataset.library = library.name;
+        profiles.forEach((profile) => {
+          const option = document.createElement("option");
+          option.value = profile.id;
+          option.textContent = profile.name;
+          select.appendChild(option);
+        });
+        if (library.profile_id) {
+          select.value = library.profile_id;
+        }
+
+        const button = document.createElement("button");
+        button.type = "button";
+        button.dataset.library = library.name;
+        button.textContent = "Update profile";
+
+        const status = document.createElement("span");
+        status.classList.add("hint", "library-status");
+
+        controls.appendChild(select);
+        controls.appendChild(button);
+        controls.appendChild(status);
+
+        row.appendChild(info);
+        row.appendChild(controls);
+        libraryProfiles.appendChild(row);
+      });
     }
 
     function switchPage(pageName) {
@@ -491,34 +639,39 @@
       const config = await response.json();
       configCache = config;
       logRetention.value = config.logging?.retention_days ?? 7;
+      renderProfileSelect();
       const profileSelect = document.querySelector("#profile-select");
-      profileSelect.innerHTML = "";
-      Object.keys(config.profiles).forEach((name) => {
-        const option = document.createElement("option");
-        option.value = name;
-        option.textContent = name;
-        profileSelect.appendChild(option);
-      });
       if (profileSelect.value) {
         loadProfile(profileSelect.value);
       }
+      renderLibraryProfiles();
+      renderEntryProfileSelect();
     }
 
     function loadProfile(name) {
       if (!configCache) return;
-      const profile = configCache.profiles[name];
+      const profile = findProfile(name);
+      if (!profile) return;
       document.querySelector("#profile-select").value = name;
+      profileNameInput.value = name;
       ensureOption(document.querySelector("#profile-tier"), profile.profile);
       ensureOption(document.querySelector("#profile-level"), profile.level);
-      ensureOption(document.querySelector("#profile-resolution"), profile.resolution);
+      ensureOption(
+        document.querySelector("#profile-resolution"),
+        profile.max_resolution || profile.resolution,
+      );
       ensureOption(document.querySelector("#profile-maxfps"), profile.max_fps ?? 30);
       ensureOption(document.querySelector("#profile-preset"), profile.preset ?? "p5");
       ensureOption(document.querySelector("#profile-rc"), profile.rc ?? "vbr_hq");
       ensureOption(document.querySelector("#profile-cq"), profile.cq ?? 18);
       ensureOption(document.querySelector("#profile-maxrate"), profile.max_bitrate);
       ensureOption(document.querySelector("#profile-bufsize"), profile.bufsize);
-      ensureOption(document.querySelector("#profile-audio-bitrate"), profile.audio.bitrate);
-      ensureOption(document.querySelector("#profile-audio-channels"), profile.audio.channels ?? 2, "Stereo (2)");
+      ensureOption(document.querySelector("#profile-audio-bitrate"), profile.audio?.bitrate);
+      ensureOption(
+        document.querySelector("#profile-audio-channels"),
+        profile.audio?.channels ?? 2,
+        "Stereo (2)",
+      );
     }
 
     async function fetchJobs() {
@@ -664,6 +817,7 @@
 
     document.querySelector("#profile-select").addEventListener("change", (event) => {
       loadProfile(event.target.value);
+      profileNameInput.value = event.target.value;
     });
 
     document.querySelector("#log-config-form").addEventListener("submit", async (event) => {
@@ -694,7 +848,11 @@
 
     document.querySelector("#config-form").addEventListener("submit", async (event) => {
       event.preventDefault();
-      const profileName = document.querySelector("#profile-select").value;
+      const profileName = (profileNameInput.value || document.querySelector("#profile-select").value).trim();
+      if (!profileName) {
+        configResult.textContent = "Profile name is required.";
+        return;
+      }
       const payload = {
         name: profileName,
         codec: "h264",
@@ -721,19 +879,61 @@
       });
       const result = await response.json();
       if (response.ok) {
-        configResult.textContent = `Updated profile ${result.name}`;
-        if (!configCache) {
-          configCache = {};
-        }
-        if (!configCache.profiles) {
-          configCache.profiles = {};
-        }
-        configCache.profiles[result.name] = result.profile;
-        if (result.revision) {
-          configCache.revision = result.revision;
-        }
+        configResult.textContent = `Updated profile ${result.profile?.name || profileName}`;
+        await fetchConfig();
+        loadProfile(profileName);
       } else {
         configResult.textContent = `Save failed: ${result.detail}`;
+      }
+    });
+
+    libraryProfiles.addEventListener("click", async (event) => {
+      const button = event.target.closest("button[data-library]");
+      if (!button) return;
+      const row = button.closest(".library-row");
+      const select = row?.querySelector("select[data-library]");
+      const status = row?.querySelector(".library-status");
+      if (!select) return;
+      const profileId = Number(select.value);
+      if (status) status.textContent = "Saving...";
+      const response = await fetch(`/api/libraries/${button.dataset.library}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ profile_id: profileId }),
+      });
+      const result = await response.json();
+      if (response.ok) {
+        if (status) status.textContent = "Updated";
+        configCache.libraries = configCache.libraries || {};
+        configCache.libraries[button.dataset.library] = {
+          ...(configCache.libraries[button.dataset.library] || {}),
+          profile_id: profileId,
+          profile: result.profile,
+        };
+      } else if (status) {
+        status.textContent = result.detail || "Update failed";
+      }
+    });
+
+    entryProfileForm.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const entryId = Number(document.querySelector("#entry-id").value || "0");
+      const profileId = Number(entryProfileSelect.value || "0");
+      if (!entryId || !profileId) {
+        entryProfileResult.textContent = "Entry ID and profile are required.";
+        return;
+      }
+      entryProfileResult.textContent = "Saving...";
+      const response = await fetch(`/api/library/entries/${entryId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ profile_id: profileId }),
+      });
+      const result = await response.json();
+      if (response.ok) {
+        entryProfileResult.textContent = `Entry ${result.id} now uses profile #${result.profile_id}`;
+      } else {
+        entryProfileResult.textContent = result.detail || "Unable to update entry";
       }
     });
 

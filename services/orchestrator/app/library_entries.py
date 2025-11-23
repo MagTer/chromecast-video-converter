@@ -7,13 +7,13 @@ from pathlib import Path
 from threading import RLock
 from typing import Iterable, List, Optional
 
-from sqlalchemy import Boolean, Column, DateTime, Integer, String, create_engine, select
+from sqlalchemy import Boolean, Column, DateTime, Integer, String, inspect, select, text
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.orm import declarative_base, sessionmaker
+from sqlalchemy.orm import sessionmaker
+
+from .db import Base, create_session_factory
 
 LOGGER = logging.getLogger("orchestrator.library")
-
-Base = declarative_base()
 
 
 class LibraryStatus(str):
@@ -31,6 +31,7 @@ class LibraryEntry(Base):
     path = Column(String, unique=True, nullable=False)
     library = Column(String, nullable=False)
     profile = Column(String, nullable=False)
+    profile_id = Column(Integer, nullable=True)
     status = Column(String, nullable=False, default=LibraryStatus.PENDING)
     output_path = Column(String, nullable=True)
     last_error = Column(String, nullable=True)
@@ -45,6 +46,7 @@ class LibraryEntry(Base):
             "path": self.path,
             "library": self.library,
             "profile": self.profile,
+            "profile_id": self.profile_id,
             "status": self.status,
             "output_path": self.output_path,
             "last_error": self.last_error,
@@ -60,6 +62,7 @@ class EntryUpdate:
     path: str
     library: str
     profile: str
+    profile_id: Optional[int] = None
     status: str
     output_path: Optional[str] = None
     last_error: Optional[str] = None
@@ -68,16 +71,35 @@ class EntryUpdate:
 
 
 class LibraryEntryStore:
-    def __init__(self, db_path: Path) -> None:
+    def __init__(
+        self,
+        db_path: Path,
+        *,
+        session_factory: Optional[sessionmaker] = None,
+        engine=None,
+    ) -> None:
         self._lock = RLock()
-        db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._engine = create_engine(f"sqlite:///{db_path}", future=True)
-        self._Session = sessionmaker(bind=self._engine, expire_on_commit=False, future=True)
+        if session_factory is None:
+            self._Session, self._engine = create_session_factory(db_path)
+        else:
+            self._Session = session_factory
+            self._engine = engine or self._Session.kw.get("bind")
+            if self._engine is None:
+                _, self._engine = create_session_factory(db_path)
         Base.metadata.create_all(self._engine)
+        self._ensure_profile_column()
         LOGGER.info("Library entry store initialized at %s", db_path)
 
     def _session(self):
         return self._Session()
+
+    def _ensure_profile_column(self) -> None:
+        inspector = inspect(self._engine)
+        columns = {column["name"] for column in inspector.get_columns("library_entries")}
+        if "profile_id" not in columns:
+            with self._engine.connect() as conn:
+                conn.execute(text("ALTER TABLE library_entries ADD COLUMN profile_id INTEGER"))
+                conn.commit()
 
     def list_entries(
         self, *, status: Optional[str] = None, library: Optional[str] = None
@@ -101,6 +123,8 @@ class LibraryEntryStore:
             timestamp = datetime.utcnow()
             if existing:
                 for key, value in asdict(payload).items():
+                    if key == "profile_id" and value is None:
+                        continue
                     setattr(existing, key, value)
                 existing.updated_at = timestamp
                 session.add(existing)
@@ -112,6 +136,7 @@ class LibraryEntryStore:
                 path=payload.path,
                 library=payload.library,
                 profile=payload.profile,
+                profile_id=payload.profile_id,
                 status=payload.status,
                 output_path=payload.output_path,
                 last_error=payload.last_error,
@@ -159,6 +184,7 @@ class LibraryEntryStore:
         *,
         library: Optional[str] = None,
         profile: Optional[str] = None,
+        profile_id: Optional[int] = None,
         message: Optional[str] = None,
         job_id: Optional[str] = None,
         output_path: Optional[str] = None,
@@ -174,10 +200,15 @@ class LibraryEntryStore:
                     path=path,
                     library=library,
                     profile=profile,
+                    profile_id=profile_id,
                     status=status,
                     created_at=timestamp,
                 )
             entry.status = status
+            if profile:
+                entry.profile = profile
+            if profile_id is not None:
+                entry.profile_id = profile_id
             entry.output_path = output_path or entry.output_path
             entry.last_error = message if status == LibraryStatus.FAILED else None
             entry.last_job_id = job_id or entry.last_job_id

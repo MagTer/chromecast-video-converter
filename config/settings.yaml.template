@@ -3,10 +3,12 @@ libraries:
     root: /watch/movies
     depth: max
     profile: movies
+    profile_id: 1
   series:
     root: /watch/series
     depth: max
     profile: series
+    profile_id: 2
 
 profiles:
   movies:

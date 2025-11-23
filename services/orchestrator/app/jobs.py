@@ -22,6 +22,7 @@ class Job(BaseModel):
     path: str
     library: str
     profile: str
+    profile_id: Optional[int] = None
     encoding: Optional[Dict[str, Any]] = None
     status: str = JobStatus.PENDING
     created_at: datetime = Field(default_factory=datetime.utcnow)
@@ -85,8 +86,8 @@ class JobManager:
         path: str,
         library: str,
         profile: str,
+        profile_id: Optional[int] = None,
         encoding: Optional[Dict[str, Any]] = None,
-        *,
         force: bool = False,
     ) -> Job:
         source = Path(path)
@@ -103,12 +104,21 @@ class JobManager:
                         job.status = JobStatus.PENDING
                         job.progress = 0
                         job.message = None
+                        job.profile = profile
+                        job.profile_id = profile_id
+                        job.encoding = encoding or job.encoding
                         job.updated_at = datetime.utcnow()
                         self._logger.info("Re-queued existing job %s for %s", job.id[:8], path)
                         return job
                     self._logger.debug("Job already tracked for %s", path)
                     return job
-            job = Job(path=path, library=library, profile=profile, encoding=encoding)
+            job = Job(
+                path=path,
+                library=library,
+                profile=profile,
+                profile_id=profile_id,
+                encoding=encoding,
+            )
             self._jobs[job.id] = job
             self._logger.info(
                 "Queued job %s for %s (library=%s, profile=%s)",
@@ -181,6 +191,8 @@ class JobManager:
         library: str,
         root: str,
         profile: str,
+        *,
+        profile_id: Optional[int] = None,
         encoding: Optional[Dict[str, Any]] = None,
     ) -> List[Job]:
         root_path = Path(root)
@@ -195,7 +207,13 @@ class JobManager:
                 continue
             if self._already_converted(entry):
                 continue
-            job = await self.add_job(str(entry), library, profile, encoding=encoding)
+            job = await self.add_job(
+                str(entry),
+                library,
+                profile,
+                profile_id=profile_id,
+                encoding=encoding,
+            )
             jobs_added.append(job)
         self._logger.info(
             "Scan complete for %s: %s jobs queued (root=%s)",

@@ -15,8 +15,17 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from . import config as config_module
 from . import jellyfin, jobs
+from .db import Base, create_session_factory
 from .library_entries import EntryUpdate, LibraryEntry, LibraryEntryStore, LibraryStatus
 from .logs import LogEntry, LogStore, SQLiteLogHandler
+from .profiles import (
+    EncodingProfile,
+    LibraryConfig,
+    LibraryConfigStore,
+    LibraryData,
+    ProfileData,
+    ProfileStore,
+)
 
 logging.addLevelName(logging.DEBUG, "VERBOSE")
 
@@ -29,7 +38,11 @@ LEGACY_CONFIG_PATH = Path(os.environ.get("CONFIG_PATH", "/app/config/settings.ya
 
 LOG_STORE = LogStore(LOG_DB_PATH)
 LIBRARY_DB_PATH = Path(os.environ.get("LIBRARY_DB_PATH", "/app/logs/library.db")).resolve()
-LIBRARY_STORE = LibraryEntryStore(LIBRARY_DB_PATH)
+SESSION_FACTORY, ENGINE = create_session_factory(LIBRARY_DB_PATH)
+Base.metadata.create_all(ENGINE)
+PROFILE_STORE = ProfileStore(SESSION_FACTORY)
+LIBRARY_CONFIG_STORE = LibraryConfigStore(SESSION_FACTORY)
+LIBRARY_STORE = LibraryEntryStore(LIBRARY_DB_PATH, session_factory=SESSION_FACTORY, engine=ENGINE)
 LIBRARY_STATUSES = {
     LibraryStatus.PENDING,
     LibraryStatus.CONVERTING,
@@ -64,13 +77,6 @@ configure_logging()
 
 LOGGER = logging.getLogger("orchestrator")
 
-config_service = config_module.ConfigService(
-    CONFIG_DB_PATH, CONFIG_TEMPLATE_PATH, LEGACY_CONFIG_PATH
-)
-config_snapshot = config_service.reload()
-LOG_STORE.update_retention(config_snapshot.config.logging.retention_days)
-job_manager = jobs.JobManager()
-
 TEMPLATE_PATH = Path(__file__).parent / "templates" / "index.html"
 INDEX_HTML = TEMPLATE_PATH.read_text()
 
@@ -104,11 +110,24 @@ class QueuePauseRequest(BaseModel):
     reason: Optional[str] = None
 
 
+class ReprocessPayload(BaseModel):
+    profile_id: Optional[int] = None
+
+
+class LibraryProfilePayload(BaseModel):
+    profile_id: int
+
+
+class EntryProfilePayload(BaseModel):
+    profile_id: int
+
+
 class LibraryEntryResponse(BaseModel):
     id: int
     path: str
     library: str
     profile: str
+    profile_id: Optional[int] = None
     status: str
     output_path: Optional[str] = None
     last_error: Optional[str] = None
@@ -159,9 +178,114 @@ def _cache_headers(snapshot: config_module.ConfigSnapshot) -> Dict[str, str]:
     }
 
 
-def encoding_payload(profile_name: str) -> Dict[str, Any]:
-    profile = config_service.snapshot.config.profile_named(profile_name)
-    return profile.model_dump()
+def _seed_profiles_and_libraries(snapshot: config_module.ConfigSnapshot) -> None:
+    name_to_id: Dict[str, int] = {}
+    for name, profile in snapshot.config.profiles.items():
+        record = PROFILE_STORE.upsert(
+            ProfileData(
+                name=name,
+                codec=profile.codec,
+                profile_tier=profile.profile,
+                max_resolution=profile.resolution,
+                max_bitrate=profile.max_bitrate,
+                bufsize=profile.bufsize,
+                preset=profile.preset,
+                cq=profile.cq,
+                rc=profile.rc,
+                level=profile.level,
+                max_fps=profile.max_fps,
+                audio_codec=profile.audio.codec,
+                audio_bitrate=profile.audio.bitrate,
+                audio_channels=profile.audio.channels,
+            )
+        )
+        name_to_id[name] = record.id
+
+    for name, library in snapshot.config.libraries.items():
+        profile_id = library.profile_id
+        if profile_id is None or PROFILE_STORE.get(profile_id) is None:
+            profile_id = name_to_id.get(library.profile)
+        if profile_id is None:
+            LOGGER.warning(
+                "Skipping library %s because profile %s was not seeded", name, library.profile
+            )
+            continue
+        LIBRARY_CONFIG_STORE.upsert(
+            LibraryData(
+                name=name,
+                root=library.root,
+                depth=library.depth,
+                profile_id=profile_id,
+            )
+        )
+
+
+def _profile_data_from_payload(
+    payload: EncodingUpdatePayload,
+) -> tuple[ProfileData, config_module.Profile]:
+    validated = config_module.Profile(
+        codec=payload.codec,
+        profile=payload.profile,
+        level=payload.level,
+        resolution=payload.resolution,
+        max_fps=payload.max_fps,
+        max_bitrate=payload.max_bitrate,
+        bufsize=payload.bufsize,
+        preset=payload.preset,
+        cq=payload.cq,
+        rc=payload.rc,
+        audio=payload.audio,
+    )
+    profile_data = ProfileData(
+        name=payload.name,
+        codec=validated.codec,
+        profile_tier=validated.profile,
+        max_resolution=validated.resolution,
+        max_bitrate=validated.max_bitrate,
+        bufsize=validated.bufsize,
+        preset=validated.preset,
+        cq=validated.cq,
+        rc=validated.rc,
+        level=validated.level,
+        max_fps=validated.max_fps,
+        audio_codec=validated.audio.codec,
+        audio_bitrate=validated.audio.bitrate,
+        audio_channels=validated.audio.channels,
+    )
+    return profile_data, validated
+
+
+config_service = config_module.ConfigService(
+    CONFIG_DB_PATH, CONFIG_TEMPLATE_PATH, LEGACY_CONFIG_PATH
+)
+config_snapshot = config_service.reload()
+_seed_profiles_and_libraries(config_snapshot)
+LOG_STORE.update_retention(config_snapshot.config.logging.retention_days)
+job_manager = jobs.JobManager()
+
+
+def encoding_payload(profile_id: int) -> Dict[str, Any]:
+    profile = PROFILE_STORE.get(profile_id)
+    if profile is None:
+        raise HTTPException(status_code=404, detail="Profile not found")
+    return {
+        "codec": profile.codec,
+        "profile": profile.profile_tier,
+        "resolution": profile.max_resolution,
+        "max_resolution": profile.max_resolution,
+        "max_bitrate": profile.max_bitrate,
+        "bufsize": profile.bufsize,
+        "preset": profile.preset,
+        "cq": profile.cq,
+        "rc": profile.rc,
+        "level": profile.level,
+        "max_fps": profile.max_fps,
+        "audio": {
+            "codec": profile.audio_codec,
+            "bitrate": profile.audio_bitrate,
+            "channels": profile.audio_channels,
+        },
+    }
 
 
 def _resolve_relaxed(path: Path) -> Path:
@@ -197,6 +321,20 @@ def _should_track_file(path: Path) -> bool:
     )
 
 
+def _library_map() -> Dict[str, LibraryConfig]:
+    return {library.name: library for library in LIBRARY_CONFIG_STORE.list_libraries()}
+
+
+def _library_profile(library_name: str) -> tuple[LibraryConfig, EncodingProfile]:
+    library = LIBRARY_CONFIG_STORE.get(library_name)
+    if library is None:
+        raise HTTPException(status_code=404, detail="Library not found")
+    profile = PROFILE_STORE.get(library.profile_id)
+    if profile is None:
+        raise HTTPException(status_code=404, detail="Profile not found for library")
+    return library, profile
+
+
 def _entry_status_for_path(path: Path) -> tuple[str, Path, bool]:
     output_path = job_manager.output_path(path)
     if not path.exists():
@@ -207,7 +345,7 @@ def _entry_status_for_path(path: Path) -> tuple[str, Path, bool]:
 
 
 async def _record_library_entry(
-    library_name: str, path: Path, profile: str
+    library_name: str, path: Path, profile: str, profile_id: int
 ) -> tuple[LibraryEntry, Optional[jobs.Job]]:
     status, output_path, original_exists = _entry_status_for_path(path)
     entry = LIBRARY_STORE.upsert(
@@ -215,6 +353,7 @@ async def _record_library_entry(
             path=str(path),
             library=library_name,
             profile=profile,
+            profile_id=profile_id,
             status=status,
             output_path=str(output_path),
             original_missing=not original_exists,
@@ -222,7 +361,11 @@ async def _record_library_entry(
     )
     if status == LibraryStatus.PENDING:
         job = await job_manager.add_job(
-            str(path), library_name, profile, encoding=encoding_payload(profile)
+            str(path),
+            library_name,
+            profile,
+            profile_id=profile_id,
+            encoding=encoding_payload(profile_id),
         )
         LIBRARY_STORE.attach_job(entry.id, job.id)
         return entry, job
@@ -244,6 +387,7 @@ def _sync_entry_from_job(job: jobs.Job, status: str, message: Optional[str] = No
         final_status,
         library=job.library,
         profile=job.profile,
+        profile_id=job.profile_id,
         message=message,
         job_id=job.id,
         output_path=str(job_manager.output_path(source)),
@@ -258,7 +402,7 @@ def _get_entry_or_404(entry_id: int) -> LibraryEntry:
     return entry
 
 
-async def reconcile_library(library_name: str, root: str, profile: str) -> None:
+async def reconcile_library(library_name: str, root: str, profile: str, profile_id: int) -> None:
     root_path = Path(root)
     if not root_path.exists():
         LOGGER.warning("Library root %s missing; marking entries removed", root_path)
@@ -270,7 +414,7 @@ async def reconcile_library(library_name: str, root: str, profile: str) -> None:
         if not _should_track_file(entry):
             continue
         seen.add(str(entry))
-        await _record_library_entry(library_name, entry, profile)
+        await _record_library_entry(library_name, entry, profile, profile_id)
     removed = LIBRARY_STORE.mark_missing(library_name, seen)
     if removed:
         LOGGER.info("Marked %s missing entries as removed for library %s", removed, library_name)
@@ -281,7 +425,7 @@ def find_library_for_path(path: str) -> Optional[str]:
         normalized = Path(path).resolve()
     except FileNotFoundError:
         normalized = Path(path)
-    for name, library in config_service.snapshot.config.libraries.items():
+    for name, library in _library_map().items():
         library_root = Path(library.root)
         for candidate_root in _candidate_library_roots(library_root):
             if normalized.is_relative_to(candidate_root):
@@ -292,9 +436,13 @@ def find_library_for_path(path: str) -> Optional[str]:
 @app.on_event("startup")
 async def startup_event() -> None:
     LOGGER.info("Starting initial scan of configured libraries.")
-    for name, library in config_service.snapshot.config.libraries.items():
-        LOGGER.info("Scanning library %s at %s", name, library.root)
-        await reconcile_library(name, library.root, library.profile)
+    for library in LIBRARY_CONFIG_STORE.list_libraries():
+        profile = PROFILE_STORE.get(library.profile_id)
+        if profile is None:
+            LOGGER.warning("Library %s has missing profile id %s", library.name, library.profile_id)
+            continue
+        LOGGER.info("Scanning library %s at %s", library.name, library.root)
+        await reconcile_library(library.name, library.root, profile.name, profile.id)
 
     jellyfin_cfg = config_service.snapshot.config.jellyfin
     if jellyfin_cfg:
@@ -316,9 +464,7 @@ async def dashboard() -> HTMLResponse:
 
 @app.get("/api/healthz")
 async def healthz() -> JSONResponse:
-    return JSONResponse(
-        {"status": "ok", "libraries": len(config_service.snapshot.config.libraries)}
-    )
+    return JSONResponse({"status": "ok", "libraries": len(_library_map())})
 
 
 @app.get("/api/readyz")
@@ -338,38 +484,126 @@ async def metrics() -> JSONResponse:
 @app.get("/api/config")
 async def get_config() -> JSONResponse:
     snapshot = config_service.snapshot
-    return JSONResponse(
-        config_module.sanitize_config(snapshot.config, revision=snapshot.revision),
-        headers=_cache_headers(snapshot),
-    )
+    libraries = {
+        library.name: {
+            "root": library.root,
+            "depth": library.depth,
+            "profile_id": library.profile_id,
+        }
+        for library in LIBRARY_CONFIG_STORE.list_libraries()
+    }
+    profiles = [profile.to_payload() for profile in PROFILE_STORE.list_profiles()]
+    payload = config_module.sanitize_config(snapshot.config, revision=snapshot.revision)
+    payload["libraries"] = libraries
+    payload["profiles"] = profiles
+    return JSONResponse(payload, headers=_cache_headers(snapshot))
 
 
 @app.post("/api/config/encoding")
 async def update_encoding(payload: EncodingUpdatePayload) -> JSONResponse:
     try:
-        snapshot = config_service.update_profile(
-            payload.name,
-            {
-                "codec": payload.codec,
-                "profile": payload.profile,
-                "level": payload.level,
-                "resolution": payload.resolution,
-                "max_fps": payload.max_fps,
-                "max_bitrate": payload.max_bitrate,
-                "bufsize": payload.bufsize,
-                "preset": payload.preset,
-                "cq": payload.cq,
-                "rc": payload.rc,
-                "audio": payload.audio.model_dump(),
-            },
-        )
+        profile_data, validated = _profile_data_from_payload(payload)
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=422, detail=str(exc))
-    profile = snapshot.config.profile_named(payload.name)
+    profile = PROFILE_STORE.upsert(profile_data)
+    snapshot = config_service.update_profile(payload.name, validated.model_dump())
     return JSONResponse(
-        {"name": payload.name, "profile": profile.model_dump(), "revision": snapshot.revision},
+        {"profile": profile.to_payload(), "revision": snapshot.revision},
         headers=_cache_headers(snapshot),
     )
+
+
+@app.get("/api/profiles")
+async def list_profiles() -> JSONResponse:
+    profiles = [profile.to_payload() for profile in PROFILE_STORE.list_profiles()]
+    return JSONResponse(profiles)
+
+
+@app.get("/api/profiles/{profile_id}")
+async def get_profile(profile_id: int) -> JSONResponse:
+    profile = PROFILE_STORE.get(profile_id)
+    if profile is None:
+        raise HTTPException(status_code=404, detail="Profile not found")
+    return JSONResponse(profile.to_payload())
+
+
+@app.post("/api/profiles")
+async def create_profile(payload: EncodingUpdatePayload) -> JSONResponse:
+    if PROFILE_STORE.get_by_name(payload.name):
+        raise HTTPException(status_code=409, detail="Profile name already exists")
+    try:
+        profile_data, validated = _profile_data_from_payload(payload)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=422, detail=str(exc))
+    profile = PROFILE_STORE.create(profile_data)
+    snapshot = config_service.update_profile(payload.name, validated.model_dump())
+    return JSONResponse(
+        {"profile": profile.to_payload(), "revision": snapshot.revision},
+        headers=_cache_headers(snapshot),
+        status_code=201,
+    )
+
+
+@app.put("/api/profiles/{profile_id}")
+async def update_profile(profile_id: int, payload: EncodingUpdatePayload) -> JSONResponse:
+    try:
+        profile_data, validated = _profile_data_from_payload(payload)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=422, detail=str(exc))
+    try:
+        profile = PROFILE_STORE.update(profile_id, profile_data)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Profile not found")
+    snapshot = config_service.update_profile(payload.name, validated.model_dump())
+    return JSONResponse(
+        {"profile": profile.to_payload(), "revision": snapshot.revision},
+        headers=_cache_headers(snapshot),
+    )
+
+
+@app.delete("/api/profiles/{profile_id}")
+async def delete_profile(profile_id: int) -> JSONResponse:
+    in_use = [
+        library.name
+        for library in LIBRARY_CONFIG_STORE.list_libraries()
+        if library.profile_id == profile_id
+    ]
+    if in_use:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Profile in use by libraries: {', '.join(in_use)}",
+        )
+    try:
+        PROFILE_STORE.delete(profile_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Profile not found")
+    return JSONResponse(status_code=204, content=None)
+
+
+@app.get("/api/libraries")
+async def list_libraries() -> JSONResponse:
+    payload = []
+    for library in LIBRARY_CONFIG_STORE.list_libraries():
+        profile = PROFILE_STORE.get(library.profile_id)
+        payload.append(
+            {
+                **library.to_payload(),
+                "profile": profile.name if profile else None,
+            }
+        )
+    return JSONResponse(payload)
+
+
+@app.patch("/api/libraries/{library_name}")
+async def update_library_profile(library_name: str, payload: LibraryProfilePayload) -> JSONResponse:
+    profile = PROFILE_STORE.get(payload.profile_id)
+    if profile is None:
+        raise HTTPException(status_code=404, detail="Profile not found")
+    try:
+        library = LIBRARY_CONFIG_STORE.update_profile(library_name, payload.profile_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Library not found")
+    return JSONResponse({**library.to_payload(), "profile": profile.name})
 
 
 @app.get("/api/logs")
@@ -484,8 +718,29 @@ async def list_library_entries(
     return JSONResponse(jsonable_encoder([_entry_to_response(entry) for entry in entries]))
 
 
+@app.patch("/api/library/entries/{entry_id}")
+async def update_entry_profile(entry_id: int, payload: EntryProfilePayload) -> JSONResponse:
+    entry = _get_entry_or_404(entry_id)
+    profile = PROFILE_STORE.get(payload.profile_id)
+    if profile is None:
+        raise HTTPException(status_code=404, detail="Profile not found")
+    updated = LIBRARY_STORE.update_status(
+        entry.path,
+        entry.status,
+        library=entry.library,
+        profile=profile.name,
+        profile_id=payload.profile_id,
+        job_id=entry.last_job_id,
+        output_path=entry.output_path,
+        original_missing=entry.original_missing,
+    )
+    return JSONResponse(jsonable_encoder(_entry_to_response(updated)))
+
+
 @app.post("/api/library/entries/{entry_id}/reprocess")
-async def reprocess_entry(entry_id: int) -> JSONResponse:
+async def reprocess_entry(
+    entry_id: int, payload: Optional[ReprocessPayload] = None
+) -> JSONResponse:
     entry = _get_entry_or_404(entry_id)
     source = Path(entry.path)
     if not source.exists():
@@ -495,13 +750,30 @@ async def reprocess_entry(entry_id: int) -> JSONResponse:
             message="Original missing",
             job_id=None,
             original_missing=True,
+            profile=entry.profile,
+            profile_id=entry.profile_id,
         )
         raise HTTPException(status_code=409, detail=_entry_to_response(updated))
+    profile_id = payload.profile_id if payload else None
+    profile_name = entry.profile
+    if profile_id is None:
+        profile_id = entry.profile_id
+    if profile_id is None:
+        _, profile = _library_profile(entry.library)
+        profile_id = profile.id
+        profile_name = profile.name
+    else:
+        profile = PROFILE_STORE.get(profile_id)
+        if profile:
+            profile_name = profile.name
+    if profile_id is None:
+        raise HTTPException(status_code=404, detail="Profile not available for entry")
     job = await job_manager.add_job(
         entry.path,
         entry.library,
-        entry.profile,
-        encoding=encoding_payload(entry.profile),
+        profile_name,
+        profile_id=profile_id,
+        encoding=encoding_payload(profile_id),
         force=True,
     )
     updated = LIBRARY_STORE.update_status(
@@ -510,6 +782,8 @@ async def reprocess_entry(entry_id: int) -> JSONResponse:
         job_id=job.id,
         output_path=str(job_manager.output_path(source)),
         original_missing=False,
+        profile=profile_name,
+        profile_id=profile_id,
     )
     payload = {"entry": _entry_to_response(updated), "job": job.model_dump()}
     return JSONResponse(jsonable_encoder(payload))
@@ -529,6 +803,8 @@ async def remove_original(entry_id: int) -> JSONResponse:
             LibraryStatus.REMOVED,
             original_missing=True,
             output_path=str(output_path),
+            profile=entry.profile,
+            profile_id=entry.profile_id,
         )
         return JSONResponse(jsonable_encoder({"entry": _entry_to_response(updated)}))
 
@@ -543,28 +819,37 @@ async def remove_original(entry_id: int) -> JSONResponse:
         job_id=entry.last_job_id,
         output_path=str(output_path),
         original_missing=True,
+        profile=entry.profile,
+        profile_id=entry.profile_id,
     )
     return JSONResponse(jsonable_encoder({"entry": _entry_to_response(updated)}))
 
 
 @app.post("/api/scan")
 async def manual_scan(payload: ScanRequest, background_tasks: BackgroundTasks) -> JSONResponse:
-    snapshot = config_service.snapshot
+    libraries = _library_map()
     if payload.library:
-        if payload.library not in snapshot.config.libraries:
+        if payload.library not in libraries:
             raise HTTPException(status_code=404, detail="Library not found")
-        target_libs = {payload.library: snapshot.config.libraries[payload.library]}
+        target_libs = {payload.library: libraries[payload.library]}
     else:
-        target_libs = snapshot.config.libraries
+        target_libs = libraries
 
     scheduled: List[str] = []
     for name, library in target_libs.items():
         root_path = payload.root or library.root
+        profile = PROFILE_STORE.get(library.profile_id)
+        if profile is None:
+            LOGGER.warning(
+                "Skipping manual scan for %s; profile id %s missing", name, library.profile_id
+            )
+            continue
         background_tasks.add_task(
             reconcile_library,
             name,
             root_path,
-            library.profile,
+            profile.name,
+            profile.id,
         )
         scheduled.append(name)
     return JSONResponse({"scheduled": scheduled})
@@ -575,9 +860,11 @@ async def handle_event(payload: EventPayload) -> JSONResponse:
     library_name = payload.library or find_library_for_path(payload.path)
     if not library_name:
         raise HTTPException(status_code=400, detail="Library could not be determined")
-    profile = config_service.snapshot.config.libraries[library_name].profile
+    library, profile = _library_profile(library_name)
     try:
-        entry, job = await _record_library_entry(library_name, Path(payload.path), profile)
+        entry, job = await _record_library_entry(
+            library_name, Path(payload.path), profile.name, profile.id
+        )
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
     response: Dict[str, Any] = {"entry": LibraryEntryResponse.model_validate(entry)}

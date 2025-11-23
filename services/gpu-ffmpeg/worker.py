@@ -122,7 +122,11 @@ REMOVE_ORIGINAL = False
 
 def _hydrate_config(raw: dict) -> None:
     global PROFILES, OPERATIONAL_CONFIG, REMOVE_ORIGINAL
-    PROFILES = raw.get("profiles", {}) or {}
+    profiles_raw = raw.get("profiles", {}) or {}
+    if isinstance(profiles_raw, list):
+        PROFILES = {item.get("name"): item for item in profiles_raw if item.get("name")}
+    else:
+        PROFILES = profiles_raw
     OPERATIONAL_CONFIG = raw.get("operational", {}) or {}
     REMOVE_ORIGINAL = bool(OPERATIONAL_CONFIG.get("remove_original_after_success", False))
 
@@ -197,6 +201,19 @@ def _normalize_language(language: str | None) -> str | None:
     if code in {"eng", "en"}:
         return "eng"
     return code
+
+
+def _scaling_expression(profile: dict) -> str:
+    resolution = profile.get("max_resolution") or profile.get("resolution")
+    if resolution:
+        try:
+            _, height_str = resolution.lower().split("x", 1)
+            height = int(height_str)
+            if height > 0:
+                return f"scale_cuda=-2:{height}:force_original_aspect_ratio=decrease"
+        except (ValueError, AttributeError):
+            LOGGER.debug("Invalid resolution %s; falling back to default scale", resolution)
+    return SCALING_EXPRESSION
 
 
 def _gather_streams(streams: list[dict]) -> tuple[bool, list[dict], list[dict]]:
@@ -291,6 +308,7 @@ def build_ffmpeg_command(  # noqa: C901
     maxrate = profile.get("max_bitrate", "8M")
     bufsize = profile.get("bufsize", "16M")
     level = profile.get("level", "4.1")
+    h264_profile = str(profile.get("profile", "high"))
     max_fps = int(profile.get("max_fps", 30) or 30)
     preset = str(profile.get("preset", "p5"))
     rc_mode = str(profile.get("rc", "vbr_hq")).lower()
@@ -346,7 +364,7 @@ def build_ffmpeg_command(  # noqa: C901
     audio_dispositions = _build_disposition_flags(selected_audio, default_audio_idx, "a")
     subtitle_dispositions = _build_disposition_flags(selected_subtitles, default_sub_idx, "s")
 
-    filters = [SCALING_EXPRESSION]
+    filters = [_scaling_expression(profile)]
     if max_fps > 0:
         filters.append(f"fps={min(max_fps, 30)}")
     video_filter = ",".join(filters)
@@ -362,7 +380,7 @@ def build_ffmpeg_command(  # noqa: C901
             "-preset",
             preset,
             "-profile:v",
-            "high",
+            h264_profile,
             "-level",
             level,
             "-cq",
@@ -480,6 +498,26 @@ def _progress_callback_factory(
     return progress_callback, last_progress, last_update_ts
 
 
+async def fetch_profile_settings(client: httpx.AsyncClient, profile_id: int) -> dict:
+    try:
+        response = await client.get(f"/api/profiles/{profile_id}")
+        response.raise_for_status()
+        return response.json()
+    except httpx.HTTPError as exc:
+        LOGGER.warning("Failed to fetch profile %s: %s", profile_id, exc)
+        return {}
+
+
+async def resolve_encoding_for_job(job: dict, client: httpx.AsyncClient) -> dict:
+    encoding = job.get("encoding")
+    profile_id = job.get("profile_id")
+    if not encoding and profile_id is not None:
+        encoding = await fetch_profile_settings(client, profile_id)
+    if not encoding:
+        encoding = PROFILES.get(job.get("profile"), {})
+    return encoding or {}
+
+
 async def claim_job(client: httpx.AsyncClient) -> dict | None:
     try:
         response = await client.get("/api/jobs/next")
@@ -584,11 +622,11 @@ async def process_job(client: httpx.AsyncClient, job: dict) -> None:
         LOGGER.warning("Duration probe for %s returned 0 seconds", playback_target)
 
     output_path = _build_output_path(playback_target)
-    encoding = job.get("encoding") or PROFILES.get(job["profile"], {})
+    encoding = await resolve_encoding_for_job(job, client)
     if not encoding:
         LOGGER.warning(
             "No encoding settings supplied for profile %s; using defaults.",
-            job["profile"],
+            job.get("profile"),
         )
 
     analysis["encoding"] = encoding
