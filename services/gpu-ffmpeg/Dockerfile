@@ -11,11 +11,13 @@ RUN apt-get update && \
 
 WORKDIR /app
 
-COPY requirements.txt .
+COPY services/gpu-ffmpeg/requirements.txt ./requirements.txt
 RUN python3 -m pip install --no-cache-dir -r requirements.txt
 
-COPY worker.py ./worker.py
-COPY entrypoint.sh ./entrypoint.sh
+COPY services/gpu-ffmpeg/worker.py ./worker.py
+COPY services/gpu-ffmpeg/entrypoint.sh ./entrypoint.sh
+COPY services/orchestrator/alembic.ini ./alembic.ini
+COPY services/orchestrator/alembic ./alembic
 RUN chmod +x ./entrypoint.sh
 
 ENTRYPOINT ["./entrypoint.sh"]
