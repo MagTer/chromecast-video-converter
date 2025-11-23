@@ -19,6 +19,8 @@ services:
     environment:
       - PORT=9000
       - JOB_QUEUE=redis://redis:6379/0
+      - CONFIG_DB_PATH=/app/logs/config.db
+      - CONFIG_TEMPLATE_PATH=/app/config/settings.yaml.template
       - CONFIG_PATH=/app/config/settings.yaml
 
   folder-watcher:

@@ -487,7 +487,7 @@
     });
 
     async function fetchConfig() {
-      const response = await fetch("/api/config");
+      const response = await fetch(`/api/config?ts=${Date.now()}`, { cache: "no-store" });
       const config = await response.json();
       configCache = config;
       logRetention.value = config.logging?.retention_days ?? 7;
@@ -678,6 +678,13 @@
       const result = await response.json();
       if (response.ok) {
         logConfigResult.textContent = `Retention updated to ${result.retention_days} days.`;
+        if (configCache) {
+          configCache.logging = configCache.logging || {};
+          configCache.logging.retention_days = result.retention_days;
+          if (result.revision) {
+            configCache.revision = result.revision;
+          }
+        }
         fetchLogStats();
         fetchLogs();
       } else {
@@ -715,7 +722,16 @@
       const result = await response.json();
       if (response.ok) {
         configResult.textContent = `Updated profile ${result.name}`;
+        if (!configCache) {
+          configCache = {};
+        }
+        if (!configCache.profiles) {
+          configCache.profiles = {};
+        }
         configCache.profiles[result.name] = result.profile;
+        if (result.revision) {
+          configCache.revision = result.revision;
+        }
       } else {
         configResult.textContent = `Save failed: ${result.detail}`;
       }

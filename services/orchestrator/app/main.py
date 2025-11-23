@@ -20,6 +20,12 @@ from .logs import LogEntry, LogStore, SQLiteLogHandler
 logging.addLevelName(logging.DEBUG, "VERBOSE")
 
 LOG_DB_PATH = Path(os.environ.get("LOG_DB_PATH", "/app/logs/events.db")).resolve()
+CONFIG_DB_PATH = Path(os.environ.get("CONFIG_DB_PATH", "/app/logs/config.db")).resolve()
+CONFIG_TEMPLATE_PATH = Path(
+    os.environ.get("CONFIG_TEMPLATE_PATH", "/app/config/settings.yaml.template")
+).resolve()
+LEGACY_CONFIG_PATH = Path(os.environ.get("CONFIG_PATH", "/app/config/settings.yaml")).resolve()
+
 LOG_STORE = LogStore(LOG_DB_PATH)
 LIBRARY_ROOT_PREFIXES = [
     Path(prefix.strip())
@@ -48,9 +54,11 @@ configure_logging()
 
 LOGGER = logging.getLogger("orchestrator")
 
-CONFIG_PATH = Path(os.environ.get("CONFIG_PATH", "/app/config/settings.yaml")).resolve()
-config_source = config_module.load_config(CONFIG_PATH)
-LOG_STORE.update_retention(config_source.config.logging.retention_days)
+config_service = config_module.ConfigService(
+    CONFIG_DB_PATH, CONFIG_TEMPLATE_PATH, LEGACY_CONFIG_PATH
+)
+config_snapshot = config_service.reload()
+LOG_STORE.update_retention(config_snapshot.config.logging.retention_days)
 job_manager = jobs.JobManager()
 
 TEMPLATE_PATH = Path(__file__).parent / "templates" / "index.html"
@@ -116,16 +124,15 @@ class LogIngestBatch(BaseModel):
     entries: List[LogIngestEvent]
 
 
-def sanitize_config(config: config_module.QualityConfig) -> Dict[str, Any]:
-    data = config.model_dump()
-    jellyfin_cfg = data.get("jellyfin")
-    if jellyfin_cfg:
-        jellyfin_cfg["api_key"] = "REDACTED"
-    return data
+def _cache_headers(snapshot: config_module.ConfigSnapshot) -> Dict[str, str]:
+    return {
+        "Cache-Control": "no-store",
+        "X-Config-Revision": str(snapshot.revision),
+    }
 
 
 def encoding_payload(profile_name: str) -> Dict[str, Any]:
-    profile = config_source.config.profile_named(profile_name)
+    profile = config_service.snapshot.config.profile_named(profile_name)
     return profile.model_dump()
 
 
@@ -159,7 +166,7 @@ def find_library_for_path(path: str) -> Optional[str]:
         normalized = Path(path).resolve()
     except FileNotFoundError:
         normalized = Path(path)
-    for name, library in config_source.config.libraries.items():
+    for name, library in config_service.snapshot.config.libraries.items():
         library_root = Path(library.root)
         for candidate_root in _candidate_library_roots(library_root):
             if normalized.is_relative_to(candidate_root):
@@ -170,13 +177,13 @@ def find_library_for_path(path: str) -> Optional[str]:
 @app.on_event("startup")
 async def startup_event() -> None:
     LOGGER.info("Starting initial scan of configured libraries.")
-    for name, library in config_source.config.libraries.items():
+    for name, library in config_service.snapshot.config.libraries.items():
         LOGGER.info("Scanning library %s at %s", name, library.root)
         await job_manager.scan_directory(
             name, library.root, library.profile, encoding=encoding_payload(library.profile)
         )
 
-    jellyfin_cfg = config_source.config.jellyfin
+    jellyfin_cfg = config_service.snapshot.config.jellyfin
     if jellyfin_cfg:
         LOGGER.info("Scheduling Jellyfin scans for configured libraries.")
         asyncio.create_task(_safe_jellyfin_trigger(jellyfin_cfg))
@@ -196,7 +203,9 @@ async def dashboard() -> HTMLResponse:
 
 @app.get("/api/healthz")
 async def healthz() -> JSONResponse:
-    return JSONResponse({"status": "ok", "libraries": len(config_source.config.libraries)})
+    return JSONResponse(
+        {"status": "ok", "libraries": len(config_service.snapshot.config.libraries)}
+    )
 
 
 @app.get("/api/readyz")
@@ -215,14 +224,17 @@ async def metrics() -> JSONResponse:
 
 @app.get("/api/config")
 async def get_config() -> JSONResponse:
-    return JSONResponse(sanitize_config(config_source.config))
+    snapshot = config_service.snapshot
+    return JSONResponse(
+        config_module.sanitize_config(snapshot.config, revision=snapshot.revision),
+        headers=_cache_headers(snapshot),
+    )
 
 
 @app.post("/api/config/encoding")
 async def update_encoding(payload: EncodingUpdatePayload) -> JSONResponse:
     try:
-        profile = config_module.update_profile(
-            config_source,
+        snapshot = config_service.update_profile(
             payload.name,
             {
                 "codec": payload.codec,
@@ -240,7 +252,11 @@ async def update_encoding(payload: EncodingUpdatePayload) -> JSONResponse:
         )
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=422, detail=str(exc))
-    return JSONResponse({"name": payload.name, "profile": profile.model_dump()})
+    profile = snapshot.config.profile_named(payload.name)
+    return JSONResponse(
+        {"name": payload.name, "profile": profile.model_dump(), "revision": snapshot.revision},
+        headers=_cache_headers(snapshot),
+    )
 
 
 @app.get("/api/logs")
@@ -281,11 +297,16 @@ async def ingest_logs(batch: LogIngestBatch) -> JSONResponse:
 
 @app.post("/api/config/logging")
 async def update_logging(payload: LoggingUpdatePayload) -> JSONResponse:
-    config_source.config.logging.retention_days = payload.retention_days
-    config_module.persist_config(config_source)
-    LOG_STORE.update_retention(payload.retention_days)
+    snapshot = config_service.update_logging(payload.retention_days)
+    LOG_STORE.update_retention(snapshot.config.logging.retention_days)
     LOGGER.info("Updated log retention to %s days", payload.retention_days)
-    return JSONResponse({"retention_days": payload.retention_days})
+    return JSONResponse(
+        {
+            "retention_days": snapshot.config.logging.retention_days,
+            "revision": snapshot.revision,
+        },
+        headers=_cache_headers(snapshot),
+    )
 
 
 @app.get("/api/jobs")
@@ -335,12 +356,13 @@ async def resume_queue() -> JSONResponse:
 
 @app.post("/api/scan")
 async def manual_scan(payload: ScanRequest, background_tasks: BackgroundTasks) -> JSONResponse:
+    snapshot = config_service.snapshot
     if payload.library:
-        if payload.library not in config_source.config.libraries:
+        if payload.library not in snapshot.config.libraries:
             raise HTTPException(status_code=404, detail="Library not found")
-        target_libs = {payload.library: config_source.config.libraries[payload.library]}
+        target_libs = {payload.library: snapshot.config.libraries[payload.library]}
     else:
-        target_libs = config_source.config.libraries
+        target_libs = snapshot.config.libraries
 
     scheduled: List[str] = []
     for name, library in target_libs.items():
@@ -361,7 +383,7 @@ async def handle_event(payload: EventPayload) -> JSONResponse:
     library_name = payload.library or find_library_for_path(payload.path)
     if not library_name:
         raise HTTPException(status_code=400, detail="Library could not be determined")
-    profile = config_source.config.libraries[library_name].profile
+    profile = config_service.snapshot.config.libraries[library_name].profile
     try:
         job = await job_manager.add_job(
             payload.path, library_name, profile, encoding=encoding_payload(profile)

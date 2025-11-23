@@ -1,11 +1,13 @@
 from __future__ import annotations
 
-import errno
 import json
 import logging
+import sqlite3
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, Optional
+from threading import RLock
+from typing import Any, Dict, Optional
 
 import yaml
 from pydantic import BaseModel, Field, ValidationError, model_validator
@@ -175,54 +177,140 @@ class QualityConfig(BaseModel):
 
 
 @dataclass
-class ConfigSource:
-    path: Path
+class ConfigSnapshot:
     config: QualityConfig
+    revision: float
 
 
-def update_profile(config_source: ConfigSource, name: str, data: dict) -> Profile:
-    profile = Profile(**data)
-    config_source.config.profiles[name] = profile
-    LOGGER.info("Updated encoding profile '%s' for Chromecast-safe settings.", name)
-    persist_config(config_source)
-    return profile
+class ConfigStore:
+    def __init__(
+        self, db_path: Path, template_path: Path, legacy_path: Optional[Path] = None
+    ) -> None:
+        self.db_path = db_path
+        self.template_path = template_path
+        self.legacy_path = legacy_path
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._lock = RLock()
+        self._conn = sqlite3.connect(self.db_path, check_same_thread=False)
+        self._conn.row_factory = sqlite3.Row
+        self._initialize()
 
-
-def load_config(path: Path) -> ConfigSource:
-    if not path.exists():
-        raise FileNotFoundError(f"Quality config not found at {path}")
-    raw = yaml.safe_load(path.read_text())
-    try:
-        config = QualityConfig(**raw)
-    except ValidationError as exc:
-        LOGGER.error("Failed to validate quality configuration: %s", exc)
-        raise
-
-    LOGGER.info(
-        "Loaded quality config (%s libraries, %s profiles)",
-        len(config.libraries),
-        len(config.profiles),
-    )
-    LOGGER.debug(json.dumps(raw, indent=2))
-    return ConfigSource(path=path, config=config)
-
-
-def persist_config(source: ConfigSource) -> None:
-    payload = source.config.model_dump()
-    try:
-        serialized = yaml.safe_dump(payload, sort_keys=False)
-        source.path.write_text(serialized, encoding="utf-8")
-        LOGGER.info("Persisted settings to %s", source.path)
-    except OSError as exc:
-        if exc.errno == errno.EROFS:
-            LOGGER.warning(
-                "Config path %s is read-only; keeping updates in memory only (%s)",
-                source.path,
-                exc,
+    def _initialize(self) -> None:
+        with self._lock:
+            self._conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS config (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL,
+                    updated_at REAL NOT NULL
+                )
+                """
             )
-            return
-        LOGGER.error("Failed to persist settings to %s: %s", source.path, exc)
-        raise
-    except Exception as exc:  # noqa: BLE001
-        LOGGER.error("Failed to persist settings to %s: %s", source.path, exc)
-        raise
+            self._conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS metadata (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL
+                )
+                """
+            )
+            self._conn.commit()
+
+    def _seed_if_empty(self) -> None:
+        with self._lock:
+            cursor = self._conn.execute("SELECT COUNT(*) FROM config")
+            if cursor.fetchone()[0] > 0:
+                return
+
+        source_path = self.legacy_path if self.legacy_path and self.legacy_path.exists() else None
+        if source_path:
+            LOGGER.info("Seeding configuration database from legacy file %s", source_path)
+        else:
+            source_path = self.template_path
+            LOGGER.info("Seeding configuration database from template %s", source_path)
+
+        if not source_path.exists():
+            raise FileNotFoundError(f"Configuration seed not found at {source_path}")
+
+        raw = yaml.safe_load(source_path.read_text()) or {}
+        snapshot = self.save_config(QualityConfig(**raw), source=str(source_path))
+        LOGGER.info(
+            "Seeded configuration database (revision %s) from %s", snapshot.revision, source_path
+        )
+
+    def load_config(self) -> ConfigSnapshot:
+        self._seed_if_empty()
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT value, updated_at FROM config WHERE key = ?", ("quality",)
+            ).fetchone()
+        if row is None:
+            raise FileNotFoundError("Configuration has not been initialized")
+        raw = json.loads(row["value"])
+        try:
+            config = QualityConfig(**raw)
+        except ValidationError as exc:
+            LOGGER.error("Failed to validate stored configuration: %s", exc)
+            raise
+        return ConfigSnapshot(config=config, revision=row["updated_at"])
+
+    def save_config(self, config: QualityConfig, *, source: Optional[str] = None) -> ConfigSnapshot:
+        validated = QualityConfig(**config.model_dump())
+        payload = json.dumps(validated.model_dump())
+        revision = datetime.now(timezone.utc).timestamp()
+        with self._lock:
+            self._conn.execute(
+                "INSERT OR REPLACE INTO config(key, value, updated_at) VALUES (?, ?, ?)",
+                ("quality", payload, revision),
+            )
+            if source:
+                self._conn.execute(
+                    "INSERT OR REPLACE INTO metadata(key, value) VALUES (?, ?)",
+                    ("config_seed_source", source),
+                )
+            self._conn.commit()
+        LOGGER.debug("Persisted configuration revision %s to %s", revision, self.db_path)
+        return ConfigSnapshot(config=validated, revision=revision)
+
+
+class ConfigService:
+    def __init__(
+        self, db_path: Path, template_path: Path, legacy_path: Optional[Path] = None
+    ) -> None:
+        self.store = ConfigStore(db_path, template_path, legacy_path)
+        self._snapshot: Optional[ConfigSnapshot] = None
+
+    @property
+    def snapshot(self) -> ConfigSnapshot:
+        if self._snapshot is None:
+            self._snapshot = self.store.load_config()
+        return self._snapshot
+
+    def reload(self) -> ConfigSnapshot:
+        self._snapshot = self.store.load_config()
+        return self._snapshot
+
+    def update_profile(self, name: str, data: dict) -> ConfigSnapshot:
+        profile = Profile(**data)
+        config = self.snapshot.config
+        config.profiles[name] = profile
+        LOGGER.info("Updated encoding profile '%s' for Chromecast-safe settings.", name)
+        self._snapshot = self.store.save_config(config)
+        return self._snapshot
+
+    def update_logging(self, retention_days: int) -> ConfigSnapshot:
+        config = self.snapshot.config
+        config.logging.retention_days = retention_days
+        LOGGER.info("Updated log retention to %s days", retention_days)
+        self._snapshot = self.store.save_config(config)
+        return self._snapshot
+
+
+def sanitize_config(config: QualityConfig, *, revision: Optional[float] = None) -> Dict[str, Any]:
+    data = config.model_dump()
+    jellyfin_cfg = data.get("jellyfin")
+    if jellyfin_cfg:
+        jellyfin_cfg["api_key"] = "REDACTED"
+    if revision is not None:
+        data["revision"] = revision
+    return data

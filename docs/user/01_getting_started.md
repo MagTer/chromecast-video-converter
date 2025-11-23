@@ -10,10 +10,9 @@ This guide walks through prerequisites, configuration, and day-one operation of 
 
 ## Initial setup
 
-1. Copy `config/settings.yaml.template` to `config/settings.yaml`. The stack
-   always loads `config/settings.yaml`; keep the template as a copy seed only.
-2. Adjust library roots or profiles if your media lives outside the default `./media/movies` and `./media/series` mounts. Keep the left-hand side of the Compose volume mounts aligned with your host paths and use the corresponding `/watch/...` paths inside the YAML.
-3. Review operational guardrails in the config (GPU temperature cutoff, disk usage limits, and whether originals are deleted after successful verification).
+1. (Optional) Copy `config/settings.yaml.template` to `config/settings.yaml` and adjust library roots or profiles before the first boot. On startup the orchestrator imports `settings.yaml` into the SQLite config store at `./logs/config.db` (falling back to the template when no overrides exist) and validates it before use.
+2. Keep the left-hand side of the Compose volume mounts aligned with your host paths and use the corresponding `/watch/...` or `/media/...` paths inside the YAML seed so the imported defaults match the container mounts.
+3. Review operational guardrails in the seed (GPU temperature cutoff, disk usage limits, and whether originals are deleted after successful verification); after boot, update future changes through the dashboard so they persist in the database.
 4. Build the stack locally:
    ```bash
    docker compose build
