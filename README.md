@@ -87,6 +87,10 @@ Alpine watcher feeds file-system events into the system.
 - Compose also applies cgroup rules (`c 195:* rmw`, `c 508:* rmw`) so the
   container can open `/dev/nvidia*` without hitting permission errors when the
   stack is launched from WSL2 or other constrained environments.
+- Workers hard-require CUDA/NVENC; when the GPU or encoder stack is missing,
+  jobs fail fast with clear log messages and the dashboard highlights GPU
+  readiness (0/X ready) in the queue header instead of silently falling back to
+  CPU encoding.
 
 ### Dependency refresh
 

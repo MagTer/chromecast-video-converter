@@ -279,6 +279,7 @@
             <button id="pause-toggle" type="button">Pause</button>
           </div>
           <span id="queue-metrics" class="status-pill status-idle">Depth: …</span>
+          <span id="gpu-metrics" class="status-pill status-idle">GPU: …</span>
           <span id="queue-status" class="status-pill status-idle">Loading…</span>
         </div>
       </header>
@@ -597,6 +598,7 @@
     const scanResult = document.querySelector("#scan-result");
     const queueStatus = document.querySelector("#queue-status");
     const queueMetrics = document.querySelector("#queue-metrics");
+    const gpuMetrics = document.querySelector("#gpu-metrics");
     const pauseToggle = document.querySelector("#pause-toggle");
     const logList = document.querySelector("#log-list");
     const logSource = document.querySelector("#log-source");
@@ -874,6 +876,16 @@
       const state = await response.json();
       queueMetrics.textContent = `Depth: ${state.depth ?? 0} (pending ${state.pending ?? 0})`;
       queueMetrics.className = "status-pill status-idle";
+      const workerMetrics = state.workers || {};
+      if (gpuMetrics) {
+        const workerCount = workerMetrics.workers ?? 0;
+        const available = workerMetrics.available ?? 0;
+        gpuMetrics.textContent = `GPU: ${available}/${workerCount || 0} ready`;
+        gpuMetrics.className = "status-pill status-idle";
+        if (!workerCount || !available) {
+          gpuMetrics.className = "status-pill status-paused";
+        }
+      }
       if (state.paused) {
         queueStatus.textContent = "Paused";
         queueStatus.className = "status-pill status-paused";
