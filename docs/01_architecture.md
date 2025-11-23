@@ -61,6 +61,7 @@ All persisted entries are validated with Pydantic to reject invalid or Chromecas
 ## Production logging and monitoring
 
 - Every container logs structured JSON with correlation IDs tied to file paths/checksums.
+- Centralized log storage preserves `severity`, `source`, and `category` metadata for each entry, exposed via `/api/logs` with dashboard filters that default to INFO-and-above to keep noisy scans out of sight.
 - Orchestrator exposes `/healthz`, `/readyz`, and `/metrics` endpoints for Docker health checks and Prometheus.
 - Critical ffmpeg metrics (encoding speed, dropped frames) propagate to orchestrator to flag action-heavy titles requiring attention.
 - Audit log tracks config changes and AI-agent commits for traceability.

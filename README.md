@@ -52,7 +52,9 @@ Alpine watcher feeds file-system events into the system.
 - **Orchestrator API & dashboard** – Serves health/ready endpoints, exposes
   queue metrics, persists centralized logs from every container with a
   retention slider and disk-usage stats, and lets operators trigger rescans of
-  configured libraries.
+  configured libraries. Log entries now include `severity`, `source`, and
+  `category` fields, and the dashboard defaults to INFO-and-above filtering to
+  keep verbose chatter out of the main view.
 - **Job queue** – Redis-backed queue with pause/resume controls. GPU workers
   pull the next ready job from `/api/jobs/next`, update status back to the API,
   and honor the current profile configuration.

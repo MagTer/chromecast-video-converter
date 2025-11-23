@@ -63,7 +63,7 @@ class JobManager:
     def _output_path(self, source: Path) -> Path:
         return source.parent / f"{source.stem}-chromecast.mp4"
 
-    def _already_converted(self, source: Path) -> bool:
+    def _already_converted(self, source: Path, *, log: bool = True) -> bool:
         output_path = self._output_path(source)
         if not output_path.exists():
             return False
@@ -75,9 +75,12 @@ class JobManager:
         if output_stat.st_size == 0:
             return False
         if output_stat.st_mtime >= source_mtime:
-            self._logger.info(
-                "Skipping already converted file %s (output: %s)", source, output_path
-            )
+            if log:
+                self._logger.info(
+                    "Skipping already converted file %s (output: %s)",
+                    source,
+                    output_path,
+                )
             return True
         return False
 
@@ -88,8 +91,8 @@ class JobManager:
     def output_path(self, source: Path) -> Path:
         return self._output_path(source)
 
-    def is_converted(self, source: Path) -> bool:
-        return self._already_converted(source)
+    def is_converted(self, source: Path, *, log: bool = False) -> bool:
+        return self._already_converted(source, log=log)
 
     async def initialize(self) -> None:
         async with self._ensure_group_lock:
@@ -174,6 +177,8 @@ class JobManager:
         profile_id: Optional[int] = None,
         encoding: Optional[Dict[str, Any]] = None,
         force: bool = False,
+        *,
+        emit_log: bool = True,
     ) -> Job:
         await self.initialize()
         source = Path(path)
@@ -181,7 +186,7 @@ class JobManager:
             raise ValueError("Unsupported media extension")
         if "-chromecast" in source.stem.lower():
             raise ValueError("Converted outputs are ignored")
-        if self._already_converted(source):
+        if self._already_converted(source, log=emit_log):
             raise ValueError(f"Output already exists for {path}")
 
         existing_job_id = await self._redis.get(self._path_key(path))
@@ -207,13 +212,14 @@ class JobManager:
             self._stream, {"payload": json.dumps(encoded)}, maxlen=10_000, approximate=True
         )
         await self._redis.incr(self._depth_key)
-        self._logger.info(
-            "Queued job %s for %s (library=%s, profile=%s)",
-            job.id[:8],
-            path,
-            library,
-            profile,
-        )
+        if emit_log:
+            self._logger.info(
+                "Queued job %s for %s (library=%s, profile=%s)",
+                job.id[:8],
+                path,
+                library,
+                profile,
+            )
         return job
 
     async def list_jobs(self, limit: int = 200) -> List[Job]:

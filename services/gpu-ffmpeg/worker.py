@@ -27,6 +27,21 @@ JOB_VISIBILITY_TIMEOUT = int(os.environ.get("JOB_VISIBILITY_TIMEOUT", "300"))
 STREAM_READER_LIMIT = int(os.environ.get("GPU_STREAM_READER_LIMIT", "1000000"))
 
 
+def _normalize_level(level: str) -> str:
+    normalized = level.upper()
+    if normalized == "DEBUG":
+        return "VERBOSE"
+    return normalized
+
+
+def _derive_source_category(logger_name: str) -> tuple[str, str]:
+    normalized = logger_name or "gpu-ffmpeg"
+    parts = normalized.split(".")
+    source = parts[0] if parts else normalized
+    category = ".".join(parts[1:]) if len(parts) > 1 else normalized
+    return source, category or source
+
+
 class OrchestratorLogHandler(logging.Handler):
     def __init__(self, base_url: str) -> None:
         super().__init__()
@@ -34,6 +49,8 @@ class OrchestratorLogHandler(logging.Handler):
 
     def emit(self, record: logging.LogRecord) -> None:
         message = self.format(record)
+        severity = _normalize_level(record.levelname)
+        source, category = _derive_source_category(record.name)
         payload = {
             "entries": [
                 {
@@ -41,6 +58,9 @@ class OrchestratorLogHandler(logging.Handler):
                         record.created, tz=timezone.utc
                     ).isoformat(),
                     "level": record.levelname,
+                    "severity": severity,
+                    "source": source,
+                    "category": category,
                     "logger": record.name,
                     "message": message,
                 }

@@ -214,7 +214,15 @@
     }
 
     .log-entry { margin: 0; padding: 0.35rem 0; border-bottom: 1px solid rgba(255,255,255,0.05); }
-    .log-meta { color: var(--muted); font-size: 0.85rem; }
+    .log-meta { color: var(--muted); font-size: 0.85rem; display: flex; flex-wrap: wrap; gap: 0.35rem; align-items: center; }
+    .log-meta .log-timestamp { margin-left: auto; color: #cbd5e1; }
+    .log-pill { padding: 0.15rem 0.6rem; border-radius: 999px; font-weight: 700; border: 1px solid rgba(255,255,255,0.1); background: rgba(255,255,255,0.04); color: #e5e7eb; }
+    .log-pill.pill-muted { color: var(--muted); border-color: #1e293b; }
+    .log-pill.pill-outline { background: transparent; border-color: #1e293b; color: #cbd5e1; }
+    .log-pill.severity-info { border-color: rgba(37, 99, 235, 0.6); color: #bfdbfe; background: rgba(37, 99, 235, 0.12); }
+    .log-pill.severity-warning { border-color: rgba(234, 179, 8, 0.6); color: #fcd34d; background: rgba(234, 179, 8, 0.15); }
+    .log-pill.severity-error { border-color: rgba(248, 113, 113, 0.5); color: #fecdd3; background: rgba(248, 113, 113, 0.18); }
+    .log-pill.severity-verbose { border-color: rgba(148, 163, 184, 0.5); color: #cbd5e1; background: rgba(148, 163, 184, 0.1); }
     .log-message { margin-top: 0.15rem; }
 
     .queue-actions { display: flex; align-items: center; gap: 0.5rem; width: 100%; }
@@ -231,6 +239,7 @@
     .filters { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center; }
     .filters label { display: flex; flex-direction: column; gap: 0.25rem; font-weight: 600; font-size: 0.95rem; }
     .filters .compact { width: 180px; }
+    .filters .wide { flex: 1; min-width: 260px; }
 
     .summary-grid { display: grid; gap: 0.75rem; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); }
     .stat-card { border: 1px solid #1e293b; border-radius: 0.65rem; padding: 0.75rem 0.85rem; background: #0b1220; display: grid; gap: 0.25rem; }
@@ -302,18 +311,33 @@
           <h2>Logs</h2>
           <p class="subtitle">Inspect worker and orchestrator output.</p>
         </div>
-        <div style="display:flex; gap:0.5rem; align-items:center;">
-          <select id="log-category">
-            <option value="">All categories</option>
-          </select>
-          <select id="log-level">
-            <option value="">All levels</option>
-            <option value="INFO" selected>INFO</option>
-            <option value="WARNING">WARNING</option>
-            <option value="ERROR">ERROR</option>
-            <option value="VERBOSE">VERBOSE</option>
-          </select>
-          <input id="log-query" placeholder="Filter by text" />
+        <div class="filters" style="align-items:flex-end;">
+          <label class="compact">
+            Source
+            <select id="log-source">
+              <option value="">All sources</option>
+            </select>
+          </label>
+          <label class="compact">
+            Category
+            <select id="log-category">
+              <option value="">All categories</option>
+            </select>
+          </label>
+          <label class="compact">
+            Severity
+            <select id="log-level">
+              <option value="INFO" selected>Info and above</option>
+              <option value="WARNING">Warnings and errors</option>
+              <option value="ERROR">Errors only</option>
+              <option value="VERBOSE">Include verbose/debug</option>
+              <option value="ALL">All severities</option>
+            </select>
+          </label>
+          <label class="wide">
+            Search
+            <input id="log-query" placeholder="Path, job id, or message text" />
+          </label>
           <button id="refresh-logs" type="button">Filter</button>
         </div>
       </header>
@@ -575,6 +599,7 @@
     const queueMetrics = document.querySelector("#queue-metrics");
     const pauseToggle = document.querySelector("#pause-toggle");
     const logList = document.querySelector("#log-list");
+    const logSource = document.querySelector("#log-source");
     const logCategory = document.querySelector("#log-category");
     const logLevel = document.querySelector("#log-level");
     const logQuery = document.querySelector("#log-query");
@@ -871,10 +896,19 @@
       });
     }
 
+    function severityClass(value) {
+      const normalized = (value || "").toLowerCase();
+      if (normalized === "warning") return "severity-warning";
+      if (normalized === "error" || normalized === "critical") return "severity-error";
+      if (normalized === "verbose" || normalized === "debug") return "severity-verbose";
+      return "severity-info";
+    }
+
     async function fetchLogs() {
       const params = new URLSearchParams();
-      if (logCategory.value) params.set("logger", logCategory.value);
-      if (logLevel.value) params.set("level", logLevel.value);
+      if (logSource.value) params.set("source", logSource.value);
+      if (logCategory.value) params.set("category", logCategory.value);
+      if (logLevel.value) params.set("min_severity", logLevel.value);
       if (logQuery.value) params.set("query", logQuery.value);
       const response = await fetch(`/api/logs?${params.toString()}`);
       const entries = await response.json();
@@ -882,8 +916,14 @@
       entries.forEach((entry) => {
         const container = document.createElement("div");
         container.className = "log-entry";
+        const severity = entry.severity || entry.level;
         container.innerHTML = `
-          <div class="log-meta">${formatLogTimestamp(entry.timestamp)} • ${entry.level} • ${entry.logger}</div>
+          <div class="log-meta">
+            <span class="log-pill ${severityClass(severity)}">${severity}</span>
+            <span class="log-pill pill-muted">${entry.source || entry.logger}</span>
+            <span class="log-pill pill-outline">${entry.category || entry.logger}</span>
+            <span class="log-timestamp log-pill pill-outline">${formatLogTimestamp(entry.timestamp)}</span>
+          </div>
           <div class="log-message">${entry.message}</div>
         `;
         logList.appendChild(container);
@@ -1036,23 +1076,44 @@
       }
     }
 
-    async function fetchLogCategories() {
-      const response = await fetch("/api/logs/categories");
-      const categories = await response.json();
-      const existingSelection = logCategory.value;
+    async function fetchLogFilters() {
+      const [categoriesResponse, sourcesResponse] = await Promise.all([
+        fetch("/api/logs/categories"),
+        fetch("/api/logs/sources"),
+      ]);
+      const categories = await categoriesResponse.json();
+      const sources = await sourcesResponse.json();
+      const existingCategory = logCategory.value;
+      const existingSource = logSource.value;
+
       logCategory.innerHTML = "";
-      const all = document.createElement("option");
-      all.value = "";
-      all.textContent = "All categories";
-      logCategory.appendChild(all);
+      const allCategories = document.createElement("option");
+      allCategories.value = "";
+      allCategories.textContent = "All categories";
+      logCategory.appendChild(allCategories);
       categories.forEach((name) => {
         const option = document.createElement("option");
         option.value = name;
         option.textContent = name;
         logCategory.appendChild(option);
       });
-      if (existingSelection && categories.includes(existingSelection)) {
-        logCategory.value = existingSelection;
+      if (existingCategory && categories.includes(existingCategory)) {
+        logCategory.value = existingCategory;
+      }
+
+      logSource.innerHTML = "";
+      const allSources = document.createElement("option");
+      allSources.value = "";
+      allSources.textContent = "All sources";
+      logSource.appendChild(allSources);
+      sources.forEach((name) => {
+        const option = document.createElement("option");
+        option.value = name;
+        option.textContent = name;
+        logSource.appendChild(option);
+      });
+      if (existingSource && sources.includes(existingSource)) {
+        logSource.value = existingSource;
       }
     }
 
@@ -1099,6 +1160,8 @@
 
     document.querySelector("#refresh-logs").addEventListener("click", fetchLogs);
     logCategory.addEventListener("change", fetchLogs);
+    logSource.addEventListener("change", fetchLogs);
+    logLevel.addEventListener("change", fetchLogs);
 
     document.querySelector("#profile-select").addEventListener("change", (event) => {
       loadProfile(event.target.value);
@@ -1256,7 +1319,7 @@
 
     fetchConfig();
     fetchJobs();
-    fetchLogCategories();
+    fetchLogFilters();
     fetchLogs();
     fetchLogStats();
     refreshLibraryEntries();
@@ -1265,7 +1328,7 @@
     switchPage(initialPage);
     setInterval(fetchJobs, 5000);
     setInterval(fetchLogs, 6000);
-    setInterval(fetchLogCategories, 15000);
+    setInterval(fetchLogFilters, 15000);
     setInterval(fetchLogStats, 20000);
     setInterval(refreshQueueState, 7000);
     setInterval(refreshLibraryEntries, 12000);
