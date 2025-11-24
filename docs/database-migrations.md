@@ -7,11 +7,9 @@ migration assets live under `services/orchestrator/alembic`, and both containers
 ## Database URL
 
 - Configure the database location with `DATABASE_URL`. SQLite URLs are supported out of
-  the box. Defaults:
-  - Orchestrator: `sqlite:////app/data/library.db`
-  - GPU worker: `sqlite:////app/data/gpu-ffmpeg/worker.db`
-- The compose stack mounts `./data` at `/app/data`, so both defaults persist across
-  container rebuilds.
+  the box and default to `sqlite:////app/config/orchestrator.db`.
+- The compose stack mounts `./config` at `/app/config`, so the default path persists
+  across container rebuilds.
 
 ## Creating revisions
 

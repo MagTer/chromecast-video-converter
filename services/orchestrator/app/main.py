@@ -106,8 +106,8 @@ def _ensure_schema_revision(engine) -> None:
     """
 
     required_columns = {
-        "definition",
         "codec",
+        "definition",
         "profile_tier",
         "max_resolution",
         "bitrate",
@@ -157,7 +157,7 @@ def _ensure_schema_revision(engine) -> None:
                 "ALTER TABLE encoding_profiles ADD COLUMN " "codec TEXT NOT NULL DEFAULT 'h264'"
             ),
             "definition": (
-                "ALTER TABLE encoding_profiles ADD COLUMN " "definition JSON NOT NULL DEFAULT '{}'"
+                "ALTER TABLE encoding_profiles ADD COLUMN " "definition TEXT NOT NULL DEFAULT '{}'"
             ),
             "profile_tier": (
                 "ALTER TABLE encoding_profiles ADD COLUMN "
@@ -519,6 +519,7 @@ def _profile_data_from_payload(
     profile_data = ProfileData(
         name=payload.name,
         codec=validated.codec,
+        definition="{}",
         profile_tier=validated.profile,
         max_resolution=validated.resolution,
         bitrate=validated.bitrate,

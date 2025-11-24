@@ -442,7 +442,7 @@ class ConfigStore:
                 return
 
         source_path = self.legacy_path if self.legacy_path and self.legacy_path.exists() else None
-        if source_path and source_path.exists():
+        if source_path:
             LOGGER.info("Seeding configuration database from legacy file %s", source_path)
             raw = yaml.safe_load(source_path.read_text()) or {}
             seed_source = str(source_path)

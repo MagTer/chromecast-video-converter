@@ -4,7 +4,7 @@ set -euo pipefail
 
 echo "gpu-ffmpeg worker starting, pointing at ${ORCHESTRATOR_URL:-http://localhost:9000}"
 
-DATABASE_URL="${DATABASE_URL:-sqlite:////app/data/gpu-ffmpeg/worker.db}"
+DATABASE_URL="${DATABASE_URL:-sqlite:////app/config/orchestrator.db}"
 export DATABASE_URL
 
 if [[ "${DATABASE_URL}" == sqlite:* ]]; then
@@ -26,3 +26,4 @@ fi
 
 alembic -c /app/alembic.ini upgrade head
 exec python3 worker.py
+

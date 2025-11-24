@@ -3,13 +3,15 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from app.config import ConfigService, JellyfinConfig, sanitize_config
+import yaml
+from app.config import DEFAULT_CONFIG, ConfigService, JellyfinConfig, sanitize_config
 
 
 @pytest.fixture()
 def config_paths(tmp_path: Path):
     db_path = tmp_path / "config.db"
-    template_path = Path("config/settings.yaml.template")
+    template_path = tmp_path / "settings.yaml.template"
+    template_path.write_text(yaml.safe_dump(DEFAULT_CONFIG))
     return db_path, template_path
 
 

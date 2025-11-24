@@ -11,7 +11,7 @@ config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-DATABASE_URL = os.environ.get("DATABASE_URL", "sqlite:////app/data/library.db")
+DATABASE_URL = os.environ.get("DATABASE_URL", "sqlite:////app/config/orchestrator.db")
 config.set_main_option("sqlalchemy.url", DATABASE_URL)
 
 target_metadata = None
