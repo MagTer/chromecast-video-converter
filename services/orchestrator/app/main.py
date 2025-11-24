@@ -67,6 +67,22 @@ LIBRARY_ROOT_PREFIXES = [
 WORKER_TELEMETRY: Dict[str, "WorkerTelemetryPayload"] = {}
 
 
+def _detect_wsl2() -> bool:
+    """Detect WSL2 using kernel markers or well-known environment variables."""
+
+    try:
+        version = Path("/proc/version").read_text().lower()
+        if "microsoft" in version or "wsl2" in version:
+            return True
+    except OSError:
+        pass
+
+    return any(os.environ.get(var) for var in ("WSL_DISTRO_NAME", "WSL_INTEROP"))
+
+
+HOST_ENVIRONMENT = {"is_wsl2": _detect_wsl2()}
+
+
 class WebsocketNotifier:
     def __init__(self) -> None:
         self._connections: Set[WebSocket] = set()
@@ -231,12 +247,19 @@ class EncodingUpdatePayload(BaseModel):
     profile: str
     level: str
     resolution: str
-    max_fps: int = Field(default=30, gt=0, le=30)
+    max_fps: int = Field(default=30, gt=0, le=60)
+    bitrate: str = Field(default="8M")
     max_bitrate: str
     bufsize: str
     preset: str
     cq: int = Field(ge=0, le=30)
     rc: str
+    bframes: int = Field(default=2, ge=0, le=3)
+    lookahead: int = Field(default=24, ge=0, le=32)
+    adaptive_b_frames: bool = Field(default=True)
+    aq: bool = Field(default=True)
+    spatial_aq: bool = Field(default=True)
+    temporal_aq: bool = Field(default=True)
     audio: config_module.AudioProfile
 
 
@@ -274,6 +297,7 @@ def _seed_profiles_and_libraries(snapshot: config_module.ConfigSnapshot) -> None
                 codec=profile.codec,
                 profile_tier=profile.profile,
                 max_resolution=profile.resolution,
+                bitrate=profile.bitrate,
                 max_bitrate=profile.max_bitrate,
                 bufsize=profile.bufsize,
                 preset=profile.preset,
@@ -281,6 +305,12 @@ def _seed_profiles_and_libraries(snapshot: config_module.ConfigSnapshot) -> None
                 rc=profile.rc,
                 level=profile.level,
                 max_fps=profile.max_fps,
+                bframes=profile.bframes,
+                lookahead=profile.lookahead,
+                adaptive_b_frames=profile.adaptive_b_frames,
+                aq=profile.aq,
+                spatial_aq=profile.spatial_aq,
+                temporal_aq=profile.temporal_aq,
                 audio_codec=profile.audio.codec,
                 audio_bitrate=profile.audio.bitrate,
                 audio_channels=profile.audio.channels,
@@ -316,11 +346,18 @@ def _profile_data_from_payload(
         level=payload.level,
         resolution=payload.resolution,
         max_fps=payload.max_fps,
+        bitrate=payload.bitrate,
         max_bitrate=payload.max_bitrate,
         bufsize=payload.bufsize,
         preset=payload.preset,
         cq=payload.cq,
         rc=payload.rc,
+        bframes=payload.bframes,
+        lookahead=payload.lookahead,
+        adaptive_b_frames=payload.adaptive_b_frames,
+        aq=payload.aq,
+        spatial_aq=payload.spatial_aq,
+        temporal_aq=payload.temporal_aq,
         audio=payload.audio,
     )
     profile_data = ProfileData(
@@ -328,6 +365,7 @@ def _profile_data_from_payload(
         codec=validated.codec,
         profile_tier=validated.profile,
         max_resolution=validated.resolution,
+        bitrate=validated.bitrate,
         max_bitrate=validated.max_bitrate,
         bufsize=validated.bufsize,
         preset=validated.preset,
@@ -335,6 +373,12 @@ def _profile_data_from_payload(
         rc=validated.rc,
         level=validated.level,
         max_fps=validated.max_fps,
+        bframes=validated.bframes,
+        lookahead=validated.lookahead,
+        adaptive_b_frames=validated.adaptive_b_frames,
+        aq=validated.aq,
+        spatial_aq=validated.spatial_aq,
+        temporal_aq=validated.temporal_aq,
         audio_codec=validated.audio.codec,
         audio_bitrate=validated.audio.bitrate,
         audio_channels=validated.audio.channels,
@@ -362,6 +406,7 @@ def encoding_payload(profile_id: int) -> Dict[str, Any]:
         "profile": profile.profile_tier,
         "resolution": profile.max_resolution,
         "max_resolution": profile.max_resolution,
+        "bitrate": profile.bitrate,
         "max_bitrate": profile.max_bitrate,
         "bufsize": profile.bufsize,
         "preset": profile.preset,
@@ -369,6 +414,12 @@ def encoding_payload(profile_id: int) -> Dict[str, Any]:
         "rc": profile.rc,
         "level": profile.level,
         "max_fps": profile.max_fps,
+        "bframes": profile.bframes,
+        "lookahead": profile.lookahead,
+        "adaptive_b_frames": profile.adaptive_b_frames,
+        "aq": profile.aq,
+        "spatial_aq": profile.spatial_aq,
+        "temporal_aq": profile.temporal_aq,
         "audio": {
             "codec": profile.audio_codec,
             "bitrate": profile.audio_bitrate,
@@ -695,6 +746,7 @@ async def get_config() -> JSONResponse:
     payload = config_module.sanitize_config(snapshot.config, revision=snapshot.revision)
     payload["libraries"] = libraries
     payload["profiles"] = profiles
+    payload["environment"] = {"is_wsl2": HOST_ENVIRONMENT.get("is_wsl2", False)}
     return JSONResponse(payload, headers=_cache_headers(snapshot))
 
 

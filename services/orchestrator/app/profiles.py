@@ -6,7 +6,7 @@ from datetime import datetime
 from threading import RLock
 from typing import List, Optional
 
-from sqlalchemy import Column, DateTime, ForeignKey, Integer, String, select
+from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Integer, String, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from .db import Base
@@ -22,6 +22,7 @@ class EncodingProfile(Base):
     codec = Column(String, nullable=False)
     profile_tier = Column(String, nullable=False, default="high")
     max_resolution = Column(String, nullable=False)
+    bitrate = Column(String, nullable=False, default="8M")
     max_bitrate = Column(String, nullable=False)
     bufsize = Column(String, nullable=False)
     preset = Column(String, nullable=False)
@@ -29,6 +30,12 @@ class EncodingProfile(Base):
     rc = Column(String, nullable=False, default="vbr_hq")
     level = Column(String, nullable=False, default="4.1")
     max_fps = Column(Integer, nullable=False, default=30)
+    bframes = Column(Integer, nullable=False, default=2)
+    lookahead = Column(Integer, nullable=False, default=24)
+    adaptive_b_frames = Column(Boolean, nullable=False, default=True)
+    aq = Column(Boolean, nullable=False, default=True)
+    spatial_aq = Column(Boolean, nullable=False, default=True)
+    temporal_aq = Column(Boolean, nullable=False, default=True)
     audio_codec = Column(String, nullable=False, default="aac")
     audio_bitrate = Column(String, nullable=False, default="192k")
     audio_channels = Column(Integer, nullable=False, default=2)
@@ -42,6 +49,7 @@ class EncodingProfile(Base):
             "codec": self.codec,
             "profile": self.profile_tier,
             "max_resolution": self.max_resolution,
+            "bitrate": self.bitrate,
             "max_bitrate": self.max_bitrate,
             "bufsize": self.bufsize,
             "preset": self.preset,
@@ -49,6 +57,12 @@ class EncodingProfile(Base):
             "rc": self.rc,
             "level": self.level,
             "max_fps": self.max_fps,
+            "bframes": self.bframes,
+            "lookahead": self.lookahead,
+            "adaptive_b_frames": bool(self.adaptive_b_frames),
+            "aq": bool(self.aq),
+            "spatial_aq": bool(self.spatial_aq),
+            "temporal_aq": bool(self.temporal_aq),
             "audio": {
                 "codec": self.audio_codec,
                 "bitrate": self.audio_bitrate,
@@ -88,6 +102,7 @@ class ProfileData:
     codec: str
     profile_tier: str
     max_resolution: str
+    bitrate: str
     max_bitrate: str
     bufsize: str
     preset: str
@@ -95,6 +110,12 @@ class ProfileData:
     rc: str
     level: str
     max_fps: int
+    bframes: int
+    lookahead: int
+    adaptive_b_frames: bool
+    aq: bool
+    spatial_aq: bool
+    temporal_aq: bool
     audio_codec: str
     audio_bitrate: str
     audio_channels: int
@@ -138,6 +159,7 @@ class ProfileStore:
                 codec=data.codec,
                 profile_tier=data.profile_tier,
                 max_resolution=data.max_resolution,
+                bitrate=data.bitrate,
                 max_bitrate=data.max_bitrate,
                 bufsize=data.bufsize,
                 preset=data.preset,
@@ -145,6 +167,12 @@ class ProfileStore:
                 rc=data.rc,
                 level=data.level,
                 max_fps=data.max_fps,
+                bframes=data.bframes,
+                lookahead=data.lookahead,
+                adaptive_b_frames=data.adaptive_b_frames,
+                aq=data.aq,
+                spatial_aq=data.spatial_aq,
+                temporal_aq=data.temporal_aq,
                 audio_codec=data.audio_codec,
                 audio_bitrate=data.audio_bitrate,
                 audio_channels=data.audio_channels,

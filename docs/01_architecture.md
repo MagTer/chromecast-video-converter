@@ -6,7 +6,7 @@
 - Keep every asset streamable on Chromecast Gen 2/3 without server-side transcoding.
 - Guarantee GPU-only encoding on an NVIDIA RTX 3060 and cap resolution at 720p.
 - Prioritize perceptual quality and smooth action playback while targeting 1.8-3.2 GB movies.
-- Enforce H.264 (High, L4.1) video / AAC 192 kbps stereo audio (2 channels), yuv420p pixel format, nvenc preset `p5`, `-cq 18`, `-maxrate 8M`, `-bufsize 16M`, `-movflags +faststart`, and downscale-only filtering (`scale=-2:720:force_original_aspect_ratio=decrease`).
+- Enforce H.264 (High, auto-level up to 4.2) video / AAC 192 kbps stereo audio (2 channels), yuv420p pixel format, NVENC preset `p6` (P4–P7 allowed), rate control limited to CQ or VBR/VBR HQ (CQ uses `-rc constqp -qp <cq>`; VBR/VBR HQ use `-b:v/-maxrate/-bufsize` with optional full-res multipass), `-bf 0–3` gated by profile, lookahead 0–32 with adaptive B-frames only when lookahead>0, AQ on by default (`-spatial_aq 1 -temporal_aq 1`), `-movflags +faststart`, and downscale-only filtering (`scale=-2:720:force_original_aspect_ratio=decrease`, fps capped per profile).
 - Deliver production-grade logging, guardrails for invalid configs, and fault tolerance.
 
 ## Container topology

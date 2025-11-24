@@ -32,6 +32,7 @@ def test_build_ffmpeg_command_maps_streams(worker_module, tmp_path):
     worker.PROFILES.update(
         {
             "mobile": {
+                "bitrate": "5M",
                 "max_bitrate": "6M",
                 "bufsize": "12M",
                 "level": "4.1",
@@ -40,6 +41,10 @@ def test_build_ffmpeg_command_maps_streams(worker_module, tmp_path):
                 "preset": "p4",
                 "rc": "vbr_hq",
                 "cq": 19,
+                "bframes": 2,
+                "lookahead": 10,
+                "adaptive_b_frames": True,
+                "aq": True,
                 "audio": {"codec": "aac", "bitrate": "160k", "channels": 2},
                 "resolution": "1280x720",
             }
@@ -65,6 +70,9 @@ def test_build_ffmpeg_command_maps_streams(worker_module, tmp_path):
     assert command[:2] == ["ffmpeg", "-y"]
     assert "-c:v" in command and "h264_nvenc" in command
     assert "-rc" in command and "vbr" in command  # falls back when vbr_hq unavailable
+    assert "-b:v" in command and "5M" in command
+    assert "-bf" in command
+    assert "-look_ahead_depth" in command
     assert "-map" in command and "0:v" in command
     assert "-map" in command and "0:a:0" in command and "0:a:1" in command
     assert "-c:a" in command and "aac" in command
@@ -88,6 +96,7 @@ def test_build_ffmpeg_command_respects_frame_limits(worker_module, tmp_path):
                 "preset": "p7",
                 "rc": "vbr_hq",
                 "cq": 17,
+                "lookahead": 24,
                 "audio": {"codec": "aac", "bitrate": "192k", "channels": 2},
                 "resolution": "1920x1080",
             }
@@ -105,3 +114,4 @@ def test_build_ffmpeg_command_respects_frame_limits(worker_module, tmp_path):
     assert "fps=24" in command[vf_index + 1]
     assert "scale_cuda=-2:1080" in command[vf_index + 1]
     assert "-multipass" in command
+    assert "-rc" in command and "vbr_hq" in command
