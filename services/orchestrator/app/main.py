@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
-from fastapi import BackgroundTasks, FastAPI, HTTPException
+from fastapi import BackgroundTasks, FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.encoders import jsonable_encoder
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -15,7 +15,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from . import config as config_module
 from . import jellyfin, jobs
-from .db import create_session_factory
+from .db import Base, create_session_factory
 from .job_history import JobHistoryEntry, JobHistoryStatus, JobHistoryStore
 from .library_entries import EntryUpdate, LibraryEntry, LibraryEntryStore, LibraryStatus
 from .logs import (
@@ -51,6 +51,7 @@ PROFILE_STORE = ProfileStore(SESSION_FACTORY)
 LIBRARY_CONFIG_STORE = LibraryConfigStore(SESSION_FACTORY)
 LIBRARY_STORE = LibraryEntryStore(LIBRARY_DB_PATH, session_factory=SESSION_FACTORY, engine=ENGINE)
 JOB_HISTORY_STORE = JobHistoryStore(SESSION_FACTORY)
+Base.metadata.create_all(ENGINE)
 LIBRARY_STATUSES = {
     LibraryStatus.PENDING,
     LibraryStatus.CONVERTING,
@@ -64,6 +65,36 @@ LIBRARY_ROOT_PREFIXES = [
     if prefix.strip()
 ]
 WORKER_TELEMETRY: Dict[str, "WorkerTelemetryPayload"] = {}
+
+
+class WebsocketNotifier:
+    def __init__(self) -> None:
+        self._connections: Set[WebSocket] = set()
+        self._lock = asyncio.Lock()
+
+    async def connect(self, websocket: WebSocket) -> None:
+        await websocket.accept()
+        async with self._lock:
+            self._connections.add(websocket)
+
+    async def disconnect(self, websocket: WebSocket) -> None:
+        async with self._lock:
+            self._connections.discard(websocket)
+
+    async def broadcast(self, message: Dict[str, Any]) -> None:
+        payload = jsonable_encoder(message)
+        async with self._lock:
+            targets = list(self._connections)
+        if not targets:
+            return
+
+        async def _send(ws: WebSocket) -> None:
+            try:
+                await ws.send_json(payload)
+            except Exception:
+                await self.disconnect(ws)
+
+        await asyncio.gather(*(_send(ws) for ws in targets), return_exceptions=True)
 
 
 def configure_logging() -> None:
@@ -89,6 +120,7 @@ def configure_logging() -> None:
 configure_logging()
 
 LOGGER = logging.getLogger("orchestrator")
+NOTIFIER = WebsocketNotifier()
 
 TEMPLATE_PATH = Path(__file__).parent / "templates" / "index.html"
 INDEX_HTML = TEMPLATE_PATH.read_text()
@@ -168,6 +200,10 @@ def _worker_metrics_summary() -> Dict[str, Any]:
     telemetry = [jsonable_encoder(item) for item in payloads]
     available = sum(1 for item in payloads if item.gpu_available)
     return {"workers": len(payloads), "available": available, "telemetry": telemetry}
+
+
+async def _emit_library_update(action: str, payload: Dict[str, Any]) -> None:
+    await NOTIFIER.broadcast({"type": "library-update", "action": action, "library": payload})
 
 
 class LibraryEntryResponse(BaseModel):
@@ -616,6 +652,18 @@ async def readyz() -> JSONResponse:
     return JSONResponse({"status": "ready"})
 
 
+@app.websocket("/ws")
+async def websocket_updates(websocket: WebSocket) -> None:
+    await NOTIFIER.connect(websocket)
+    try:
+        while True:
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        pass
+    finally:
+        await NOTIFIER.disconnect(websocket)
+
+
 @app.post("/api/workers/telemetry")
 async def ingest_worker_telemetry(payload: WorkerTelemetryPayload) -> JSONResponse:
     WORKER_TELEMETRY[payload.worker_id] = payload
@@ -771,9 +819,9 @@ async def create_library(
     background_tasks.add_task(
         reconcile_library, library.name, library.root, profile.name, profile.id
     )
-    return JSONResponse(
-        {**library.to_payload(), "profile": profile.name}, headers=_cache_headers(snapshot)
-    )
+    payload = {**library.to_payload(), "profile": profile.name}
+    await _emit_library_update("created", payload)
+    return JSONResponse(payload, headers=_cache_headers(snapshot), status_code=201)
 
 
 @app.patch("/api/libraries/{library_name}")
@@ -796,6 +844,9 @@ async def delete_library(library_name: str) -> JSONResponse:
     LIBRARY_CONFIG_STORE.delete(library_name)
     snapshot = config_service.delete_library(library_name)
     removed_entries = LIBRARY_STORE.mark_missing(library_name, set())
+    await _emit_library_update(
+        "deleted", {"name": library_name, "entries_marked": removed_entries}
+    )
     return JSONResponse(
         {"deleted": library_name, "entries_marked": removed_entries},
         headers=_cache_headers(snapshot),
