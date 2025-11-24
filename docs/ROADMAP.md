@@ -10,40 +10,36 @@ touch points, minimize moving parts, and keep operational work predictable.
 
 - **Orchestrator API and dashboard** – FastAPI service exposes health/ready
   endpoints, queue listings, log streaming, manual scans, job claims/updates,
-  and an HTML dashboard that drives those APIs.
+  runtime library add/remove (`/api/libraries`), websocket push channel (`/ws`),
+  and an HTML dashboard with live updates.
 - **Config-driven profiles** – Profiles are persisted in the SQLite config
   store (seeded from `config/settings.yaml` or the template) and validated for
   Chromecast-safe codec, profile, level, resolution, and bitrate limits before
   use.
 - **Job ingestion and scans** – The orchestrator loads configured libraries at
-  startup, runs a recursive scan to queue eligible files, and can rescan on
-  demand via the API or a watcher-triggered event stream.
+  startup, runs recursive scans, ingests watcher events, and supports on-demand
+  rescans. Library entries and job history are persisted for auditability.
 - **GPU worker** – A polling worker claims jobs, builds FFmpeg commands for
   NVENC, streams progress back to the orchestrator, validates the resulting
   output, and optionally deletes the source after success.
 - **Folder watcher** – An Alpine-based inotify loop streams create/modify/delete
-  events (plus metadata) for each configured root so new or changed media is
-  enqueued without manual action, buffering events locally when the
-  orchestrator API is temporarily unavailable.
+  events (plus metadata) for each configured root; if the API is unreachable it
+  spools batches to disk and replays them on restart.
 
 ## Gaps and risks
 
-- **Configuration durability** – The SQLite config store lacks migration/
-  backup tooling. Operators still need a straightforward export/import path when
-  upgrading or moving hosts.
-- **Queue durability and scaling** – Jobs are stored in an in-memory manager;
-  Redis is deployed but unused. Orchestrator restarts wipe the queue, and
-  multiple GPU workers cannot safely coordinate job claims.
-- **Watcher durability** – Event buffering is in-memory only; if the watcher
-  container restarts mid-outage, unsent events are lost. There is no dedupe
-  layer when multiple watchers cover the same path.
-- **Operational guardrails** – There is no enforcement of GPU temperature,
-  disk-space thresholds, or concurrency limits beyond the static FFmpeg
-  invocation. Metrics and alerting are absent.
-- **Catalog state and auditability** – Job metadata lives only in memory; there
-  is no persistent catalog of what was processed, why failures occurred, or
-  what changes operators applied. Log retention is bounded to a small in-memory
-  buffer.
+- **Configuration durability** – The SQLite config store lacks migration /
+  backup tooling or export/import paths for upgrades or host moves.
+- **Queue durability and scaling** – Redis-backed queue exists, but HA/backup
+  guidance, visibility-timeout monitoring, and multi-worker fairness under load
+  are not validated. No metrics on queue latency/retries yet.
+- **Watcher dedupe** – Spool-to-disk prevents loss, but no dedupe layer exists
+  when multiple watchers cover the same path; replay could enqueue duplicates.
+- **Operational guardrails** – No enforcement of GPU temperature, disk-space
+  thresholds, or dynamic concurrency throttling; metrics/alerting remain minimal.
+- **Backups and auditability** – Library/catalog and job history are persisted
+  but lack backup/retention guidance and user-facing export/audit tools. Jellyfin
+  triggers still lack retry/confirmation hardening.
 - **Jellyfin integration** – Triggering Jellyfin library refreshes requires the
   optional config block; there is no transport hardening, retry policy, or
   handshake to confirm the media server accepted the request.
@@ -71,9 +67,9 @@ touch points, minimize moving parts, and keep operational work predictable.
 1. **Persist configuration and job state**
     - Harden the SQLite configuration store with export/import paths and
       migrations so upgrades remain repeatable without manual edits.
-   - Back the job queue with Redis (already provisioned) and store job history
-     in SQLite/PostgreSQL to survive orchestrator restarts and enable
-     multi-worker coordination without operator intervention.
+    - Add backup/restore guidance for config, catalog, logs, and job history DBs.
+   - Validate Redis durability/HA and visibility-timeout handling; add metrics
+     for queue latency and retries to support multi-worker coordination.
 
 2. **Honor profile inputs in FFmpeg commands**
    - Propagate profile tier and resolution into the FFmpeg builder, adjust the
@@ -82,10 +78,8 @@ touch points, minimize moving parts, and keep operational work predictable.
      required.
 
 3. **Improve change detection and ingestion**
-   - Replace the timed full-scan watcher with an inotify-based event stream
-     that sends create/modify/delete signals to the orchestrator. Add minimal
-     backoff/retry behavior when the orchestrator is unavailable so resyncs are
-     automatic.
+   - Add cross-watcher dedupe/idempotency for replayed events (checksums or
+     per-path sequence numbers) and document spool sizing/rotation guidance.
 
 ### Operational readiness
 

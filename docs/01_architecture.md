@@ -13,8 +13,8 @@
 
 | Container | Base | Role |
 | --- | --- | --- |
-| `orchestrator` | Ubuntu LTS | Coordinates workers, applies policy, exposes API/logging, persists state in SQLite/Postgres. Primary configuration entrypoint and status dashboard. |
-| `folder-watcher` | Alpine + `inotify-tools` | Watches bind-mounted `movies` and `series` folders, emits events to orchestrator via HTTP/WebSocket or message bus. Stateless and horizontally scalable. |
+| `orchestrator` | Ubuntu LTS | Coordinates workers, applies policy, exposes API/logging, persists state in SQLite/Postgres. Primary configuration entrypoint and status dashboard. Supports runtime library add/remove, websocket broadcasts, paginated entry queries. |
+| `folder-watcher` | Alpine + `inotify-tools` | Watches bind-mounted `movies` and `series` folders, emits events to orchestrator via HTTP. If API is unavailable, spools undelivered batches to disk and replays them on restart. |
 | `gpu-ffmpeg` | Ubuntu + FFmpeg + CUDA/NVIDIA runtime | Executes validation and transcode jobs using NVENC. Launches via orchestrator with bind-mounted file chunks and temp workspace. |
 | `queue` (optional) | Redis | Buffers work to smooth spikes. |
 
@@ -22,13 +22,12 @@ All containers join a private Docker network. Bind mounts provide the Windows-ho
 
 ## Data flow
 
-1. **Change detection** - Each `folder-watcher` instance monitors a root directory and reports file creates/modifies/deletes plus metadata (path, size, modified time) to the orchestrator with optional buffering and retry backoff.
-2. **Policy evaluation** - Orchestrator loads quality profiles (per movies/series) from the SQLite-backed config store (seeded from `config/settings.yaml` or the template). It validates config shape and warns about unsupported codecs/levels before persisting any change.
-3. **Compliance check** - Orchestrator inspects new or updated files by invoking `gpu-ffmpeg` in probe mode to extract codecs, resolution, bitrate, and HDR flags. Files already compliant are flagged `ready`.
-4. **Transcode scheduling** - Non-compliant files become jobs in a durable queue. Orchestrator throttles concurrent ffmpeg invocations to respect GPU memory and disk IO.
-5. **Encoding** - `gpu-ffmpeg` receives a manifest (input path, target profile) and runs ffmpeg with pinned parameters: `-hwaccel cuda -hwaccel_output_format cuda -i <src> -vf "scale=-2:720:force_original_aspect_ratio=decrease" -c:v h264_nvenc -profile:v high -level 4.1 -preset p5 -cq 18 -maxrate 8M -bufsize 16M -pix_fmt yuv420p -movflags +faststart -c:a aac -b:a 192k -ac 2`. Audio/video map decisions come from the manifest.
-6. **Verification** - Upon success, orchestrator triggers another probe to confirm specs, updates catalog metadata (JSON/SQLite), and rotates files (e.g., move original to `archive/` if configured).
-7. **Observability** - Structured logs (JSON) flow to stdout for container log drivers and are centralized by the orchestrator in a SQLite-backed log store exposed via `/api/logs`. Metrics cover queue length, GPU utilization snapshots, and success ratios; alerts fire when policy violations or repeated job failures occur.
+1. **Change detection** – `folder-watcher` monitors roots and posts create/modify/delete events to `/api/events`; if the API is down, events are written to the spool file and replayed on next start.
+2. **Runtime config** – Libraries and profiles seed from the config DB; operators can **add/remove libraries at runtime** via `/api/libraries` or the dashboard, which triggers background scans and marks removed libraries’ entries as `removed`.
+3. **Policy evaluation** – Orchestrator validates profiles/libraries from the SQLite config store (seeded from `config/settings.yaml` or the template). Config changes remain Chromecast-safe (H.264 High 4.1, AAC stereo, GPU-only).
+4. **Job lifecycle** – Events and scans upsert library entries and enqueue jobs in Redis when needed. Workers pull `/api/jobs/next`, report progress via `/api/jobs/{id}/status`, and acknowledgements update catalog status/history.
+5. **Live updates** – Orchestrator broadcasts `job-update`, `entry-update`, and `library-update` over `/ws`; the dashboard and any clients can subscribe instead of polling. Library entries are fetched with paginated `/api/library/entries` (`limit/offset/include_total`) and appended in the UI via “Load more.”
+6. **Observability** – Structured logs persist in SQLite and expose `/api/logs`; metrics include queue depth and worker GPU availability. Telemetry and job history stay aligned with websocket pushes.
 
 ## User interface and manual controls
 

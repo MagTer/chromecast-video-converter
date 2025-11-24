@@ -22,10 +22,22 @@ The Compose stack still mounts `./config` into both the orchestrator and GPU wor
 
 - The orchestrator dashboard & API accept JSON/YAML that controls library names, profiles, bitrates, and Jellyfin integration. Those fields are surfaced through the GUI so operators can tune quality and automation; they do not change the host path mappings.
 - Encoding controls are provided as dropdowns tuned for Chromecast Gen 2/3: NVENC presets (p1–p7), rate control modes (VBR HQ, VBR, CBR), CQ targets, max bitrates/buffers, and the 24–30 fps cap. Audio is always transcoded to AAC stereo (2 channels) with selectable bitrates, and all source tracks are preserved.
-- When a GUI change adds a new library, ensure its `root` matches one of the existing mount points (e.g., `root: /media/movies`), otherwise the files will not be reachable.
+- The Configuration page includes an **Add library** form. Provide a unique name, a mounted path such as `/watch/movies` or `/media/series`, an optional depth (number or `max`), and an existing encoding profile. On save, the orchestrator persists the definition, kicks off a background scan, and the new path becomes available immediately without restarting containers.
+- Library removal is supported directly from the dashboard or via `DELETE /api/libraries/{name}`. Removing a library marks its existing entries as `removed` in the catalog (for auditability) but leaves the historical rows intact.
+- When adding libraries, ensure the `root` matches a mounted path; otherwise files will not be reachable.
 - Jellyfin integration is optional; omit the `jellyfin` section from the seed (as shown in `config/settings.yaml.template`) whenever no server is reachable, and the orchestrator will quietly skip those refresh tasks.
 - Log retention is also editable in the GUI. The `logging.retention_days` field is stored in the config database (default: `7`) and controls how long centralized logs from every container stay on disk. The Configuration page displays current disk usage for the log database mounted at `./logs`.
 - Log records include `severity`, `source`, and `category` metadata in the `/api/logs` payloads, and the dashboard filters default to `INFO` and above to suppress verbose chatter. Keep orchestrator, watcher, and worker containers at `LOG_LEVEL=INFO` during normal operation; only switch to `VERBOSE` temporarily when debugging and rely on the UI filters to surface warnings and errors quickly.
+
+## Live updates and pagination
+
+- The dashboard subscribes to the orchestrator WebSocket at `/ws` for job status, library entry, and library add/remove events. No manual refresh is required to see queue/entry changes; connections will auto-retry if interrupted.
+- The **Library entries** view loads results in pages (`limit`/`offset`) with a “Load more” control. The API supports `include_total=true` on `/api/library/entries` to return `{items, total, limit, offset}` so clients can decide when to stop fetching.
+- Example paginated request:
+
+  ```bash
+  curl "http://localhost:9000/api/library/entries?limit=50&offset=0&include_total=true&status=pending"
+  ```
 
 ## Keeping configs aligned
 
