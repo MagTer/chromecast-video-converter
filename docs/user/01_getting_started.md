@@ -32,14 +32,17 @@ This guide walks through prerequisites, configuration, and day-one operation of 
   back to CPU encoding.
 - Queue controls: `/api/queue/pause` and `/api/queue/resume` allow operators to throttle work when storage or thermal limits are reached.
 - Logging: `/api/logs` returns recent log entries across the orchestrator, GPU workers, and folder watcher. Configure the retention window (default 7 days) and review log disk usage from the Configuration page.
+- Library management: add libraries at runtime with `POST /api/libraries` (fields: `name`, `root`, `depth`, `profile_id`) or the Configuration page form. Remove them with `DELETE /api/libraries/{name}`; the orchestrator marks existing entries from that library as `removed` for traceability.
+- Live updates: the dashboard keeps a WebSocket open to `/ws` so job and entry updates land in real time. Connections auto-retry if the API restarts.
 - Job lifecycle:
   - `/api/scan` triggers a (re)scan of configured libraries to enqueue work.
   - `/api/jobs/next` supplies the next job to GPU workers.
   - `/api/jobs/{id}/status` records progress and completion updates from workers.
+  - `/api/library/entries` now accepts `limit`, `offset`, and `include_total` for paginated browsing; the dashboard uses a “Load more” control instead of refetching the entire catalog on every refresh.
 
 ## Media watcher behavior
 
-The `folder-watcher` container uses `inotifywait` to stream create/modify/delete events from the mounted `movies` and `series` directories. Events include the library name, full path, basic metadata, and whether the entry is a directory. The watcher backs off and retries when the orchestrator API is temporarily unavailable and can optionally buffer events for batch delivery. Set `EVENT_BUFFER_SECONDS` to a non-zero value in `docker-compose.yml` to group events into timed batches; adjust `EVENT_RETRY_ATTEMPTS` and `EVENT_RETRY_BACKOFF_SECONDS` to control the retry window if the API is down.
+The `folder-watcher` container uses `inotifywait` to stream create/modify/delete events from the mounted `movies` and `series` directories. Events include the library name, full path, basic metadata, and whether the entry is a directory. The watcher backs off and retries when the orchestrator API is temporarily unavailable and can optionally buffer events for batch delivery. Set `EVENT_BUFFER_SECONDS` to a non-zero value in `docker-compose.yml` to group events into timed batches; adjust `EVENT_RETRY_ATTEMPTS` and `EVENT_RETRY_BACKOFF_SECONDS` to control the retry window if the API is down. If the API remains unreachable, undelivered batches are spooled to `EVENT_SPOOL_FILE` (default `/tmp/folder-watcher-spool.jsonl`) and replayed automatically on the next start.
 
 ## Cleanup and troubleshooting
 

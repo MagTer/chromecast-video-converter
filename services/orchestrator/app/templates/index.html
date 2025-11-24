@@ -403,9 +403,9 @@
           </thead>
           <tbody id="entry-rows"></tbody>
         </table>
-        <div style="display:flex; align-items:center; gap:0.5rem;">
-          <button id="entry-prev" type="button" class="secondary">Prev</button>
-          <button id="entry-next" type="button" class="secondary">Next</button>
+        <div style="display:flex; align-items:center; gap:0.5rem; flex-wrap:wrap;">
+          <button id="entry-load-more" type="button" class="secondary">Load more</button>
+          <span id="entry-loading" class="hint"></span>
           <span id="entry-page-indicator" class="hint"></span>
         </div>
       </div>
@@ -544,6 +544,38 @@
       <div class="panel">
         <header>
           <div>
+            <h3 style="margin:0">Add library</h3>
+            <p class="hint" style="margin:0">Mount paths like /watch/... or /media/... inside the orchestrator container.</p>
+          </div>
+        </header>
+        <form id="library-create-form" class="stacked" style="gap:0.75rem;">
+          <div class="grid-two">
+            <label>
+              Library name
+              <input id="library-name" placeholder="movies" required />
+            </label>
+            <label>
+              Path (mounted)
+              <input id="library-path" placeholder="/watch/movies" required />
+            </label>
+            <label>
+              Depth (number or max)
+              <input id="library-depth" placeholder="max" value="max" />
+            </label>
+            <label>
+              Encoding profile
+              <select id="library-profile"></select>
+            </label>
+          </div>
+          <div style="display:flex; gap:0.5rem; align-items:center;">
+            <button type="submit">Add library</button>
+            <span id="library-create-result" class="hint"></span>
+          </div>
+        </form>
+      </div>
+      <div class="panel">
+        <header>
+          <div>
             <h3 style="margin:0">Entry profile override</h3>
             <p class="hint" style="margin:0">Update a single entry before reprocessing.</p>
           </div>
@@ -622,13 +654,24 @@
     const entryPageSize = document.querySelector("#entry-page-size");
     const entryPageIndicator = document.querySelector("#entry-page-indicator");
     const refreshEntriesBtn = document.querySelector("#refresh-entries");
-    const entryPrev = document.querySelector("#entry-prev");
-    const entryNext = document.querySelector("#entry-next");
+    const entryLoadMore = document.querySelector("#entry-load-more");
+    const entryLoading = document.querySelector("#entry-loading");
     const libraryStatus = document.querySelector("#library-status");
+    const libraryCreateForm = document.querySelector("#library-create-form");
+    const libraryNameInput = document.querySelector("#library-name");
+    const libraryPathInput = document.querySelector("#library-path");
+    const libraryDepthInput = document.querySelector("#library-depth");
+    const libraryProfileSelect = document.querySelector("#library-profile");
+    const libraryCreateResult = document.querySelector("#library-create-result");
 
     let configCache = null;
     let libraryEntries = [];
-    let entryPage = 1;
+    let entryOffset = 0;
+    let entryTotal = null;
+    let entryLoadingState = false;
+    let entryHasMore = true;
+    let jobCache = [];
+    let liveSocket = null;
 
     if (!logLevel.value) {
       logLevel.value = "INFO";
@@ -685,6 +728,19 @@
         profileSelect.value = profiles[0].name;
       }
       profileNameInput.value = profileSelect.value;
+
+      if (libraryProfileSelect) {
+        libraryProfileSelect.innerHTML = "";
+        profiles.forEach((profile) => {
+          const option = document.createElement("option");
+          option.value = profile.id ?? profile.name;
+          option.textContent = profile.name;
+          libraryProfileSelect.appendChild(option);
+        });
+        if (!libraryProfileSelect.value && profiles.length) {
+          libraryProfileSelect.value = profiles[0].id;
+        }
+      }
     }
 
     function renderEntryProfileSelect() {
@@ -716,7 +772,7 @@
         row.dataset.library = library.name;
 
         const info = document.createElement("div");
-        info.innerHTML = `<strong>${library.name}</strong><p class="hint" style="margin:0">${library.root}</p>`;
+        info.innerHTML = `<strong>${library.name}</strong><p class="hint" style="margin:0">${library.root} (depth ${library.depth || "max"})</p>`;
 
         const controls = document.createElement("div");
         controls.style.display = "flex";
@@ -738,13 +794,22 @@
         const button = document.createElement("button");
         button.type = "button";
         button.dataset.library = library.name;
+        button.dataset.action = "update";
         button.textContent = "Update profile";
+
+        const remove = document.createElement("button");
+        remove.type = "button";
+        remove.dataset.library = library.name;
+        remove.dataset.action = "remove";
+        remove.classList.add("secondary");
+        remove.textContent = "Remove";
 
         const status = document.createElement("span");
         status.classList.add("hint", "library-status");
 
         controls.appendChild(select);
         controls.appendChild(button);
+        controls.appendChild(remove);
         controls.appendChild(status);
 
         row.appendChild(info);
@@ -838,22 +903,40 @@
       );
     }
 
-    async function fetchJobs() {
-      const response = await fetch("/api/jobs");
-      const jobs = await response.json();
+    function renderJobTable() {
+      const sorted = [...(jobCache || [])].sort((a, b) =>
+        a.created_at > b.created_at ? -1 : 1,
+      );
       jobRows.innerHTML = "";
-      jobs.sort((a, b) => (a.created_at > b.created_at ? -1 : 1));
-      jobs.forEach((job) => {
+      sorted.forEach((job) => {
         const tr = document.createElement("tr");
+        const progress = job.progress ?? 0;
         tr.innerHTML = `
           <td>${job.id.slice(0, 8)}</td>
           <td class="status-${job.status}">${job.status}</td>
           <td class="path-cell" title="${job.path}">${job.path}</td>
           <td>${job.profile}</td>
-          <td>${job.progress}%</td>
+          <td>${progress}%</td>
         `;
         jobRows.appendChild(tr);
       });
+    }
+
+    function upsertJob(job) {
+      if (!job) return;
+      const existingIndex = jobCache.findIndex((item) => item.id === job.id);
+      if (existingIndex >= 0) {
+        jobCache[existingIndex] = { ...jobCache[existingIndex], ...job };
+      } else {
+        jobCache.unshift(job);
+      }
+      renderJobTable();
+    }
+
+    async function fetchJobs() {
+      const response = await fetch("/api/jobs");
+      jobCache = await response.json();
+      renderJobTable();
     }
 
     async function enqueueLibraryScan(library) {
@@ -957,6 +1040,21 @@
       return summary;
     }
 
+    function upsertLibraryEntry(update) {
+      if (!update) return;
+      const existing = libraryEntries.find((entry) => entry.id === update.id);
+      const map = new Map(libraryEntries.map((entry) => [entry.id, entry]));
+      map.set(update.id, update);
+      libraryEntries = Array.from(map.values()).sort((a, b) =>
+        new Date(b.updated_at || 0) - new Date(a.updated_at || 0),
+      );
+      if (!existing && entryTotal !== null) {
+        entryTotal += 1;
+      }
+      renderEntrySummary();
+      renderEntryTable();
+    }
+
     function formatStatusChip(status) {
       const normalized = status || "unknown";
       return `<span class="status-chip status-${normalized}">${normalized}</span>`;
@@ -1012,13 +1110,8 @@
 
     function renderEntryTable() {
       const entries = filteredEntries();
-      const pageSize = Number(entryPageSize.value || "10");
-      const totalPages = Math.max(1, Math.ceil(entries.length / pageSize));
-      if (entryPage > totalPages) entryPage = totalPages;
-      const start = (entryPage - 1) * pageSize;
-      const slice = entries.slice(start, start + pageSize);
       entryRows.innerHTML = "";
-      slice.forEach((entry) => {
+      entries.forEach((entry) => {
         const tr = document.createElement("tr");
         tr.innerHTML = `
           <td>${entry.id}</td>
@@ -1040,21 +1133,72 @@
         tr.dataset.path = entry.path;
         entryRows.appendChild(tr);
       });
-      entryPrev.disabled = entryPage <= 1;
-      entryNext.disabled = entryPage >= totalPages;
-      entryPageIndicator.textContent = `Page ${entryPage} of ${totalPages} (${entries.length} entr${
-        entries.length === 1 ? "y" : "ies"
-      })`;
+      const loaded = libraryEntries.length;
+      const totalText = entryTotal !== null ? `${loaded}/${entryTotal}` : `${loaded}`;
+      const moreNote = entryHasMore ? " (more available)" : "";
+      entryPageIndicator.textContent = `Showing ${entries.length} entries (loaded ${totalText})${moreNote}`;
+      if (entryLoadMore) {
+        entryLoadMore.disabled = entryLoadingState || !entryHasMore;
+      }
+      if (entryLoading) {
+        entryLoading.textContent = entryLoadingState ? "Loading entries…" : "";
+      }
+    }
+
+    async function loadLibraryEntries({ reset = false } = {}) {
+      if (entryLoadingState) return;
+      entryLoadingState = true;
+      if (entryLoading) entryLoading.textContent = "Loading entries…";
+      if (reset) {
+        entryOffset = 0;
+        entryTotal = null;
+        entryHasMore = true;
+        libraryEntries = [];
+      }
+
+      const limit = Number(entryPageSize.value || "20");
+      const params = new URLSearchParams({
+        limit: String(limit),
+        offset: String(entryOffset),
+        include_total: "true",
+      });
+      if (entryStatusFilter.value) params.set("status", entryStatusFilter.value);
+      if (entryLibraryFilter.value) params.set("library", entryLibraryFilter.value);
+
+      try {
+        const response = await fetch(`/api/library/entries?${params.toString()}`);
+        const result = await response.json();
+        const items = Array.isArray(result) ? result : result.items || [];
+        if (result.total !== undefined && result.total !== null) {
+          entryTotal = result.total;
+        }
+        const received = items.length;
+        const map = new Map(libraryEntries.map((entry) => [entry.id, entry]));
+        items.forEach((item) => map.set(item.id, item));
+        libraryEntries = Array.from(map.values()).sort((a, b) =>
+          new Date(b.updated_at || 0) - new Date(a.updated_at || 0),
+        );
+        entryOffset += result.limit ?? limit;
+        if (entryTotal !== null) {
+          entryHasMore = entryOffset < entryTotal;
+        } else {
+          entryHasMore = received === limit;
+        }
+        renderEntrySummary();
+        renderEntryTable();
+        libraryStatus.textContent = `Loaded ${libraryEntries.length} entr${
+          libraryEntries.length === 1 ? "y" : "ies"
+        }`;
+      } catch (error) {
+        libraryStatus.textContent = "Failed to load entries";
+      } finally {
+        entryLoadingState = false;
+        if (entryLoading) entryLoading.textContent = "";
+      }
     }
 
     async function refreshLibraryEntries() {
-      libraryStatus.textContent = "Loading entries...";
-      const response = await fetch("/api/library/entries");
-      const entries = await response.json();
-      libraryEntries = Array.isArray(entries) ? entries : [];
-      renderEntrySummary();
-      renderEntryTable();
-      libraryStatus.textContent = `Loaded ${libraryEntries.length} entries`;
+      await loadLibraryEntries({ reset: true });
     }
 
     async function handleEntryAction(action, entryId, button) {
@@ -1146,6 +1290,43 @@
       if (!logRetention.value) {
         logRetention.value = stats.retention_days;
       }
+    }
+
+    function connectLiveUpdates() {
+      const protocol = window.location.protocol === "https:" ? "wss" : "ws";
+      const socket = new WebSocket(`${protocol}://${window.location.host}/ws`);
+      liveSocket = socket;
+
+      socket.onopen = () => {
+        libraryStatus.textContent = "Live updates connected";
+      };
+
+      socket.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data || "{}");
+          if (data.type === "entry-update" && data.entry) {
+            upsertLibraryEntry(data.entry);
+          } else if (data.type === "job-update" && data.job) {
+            upsertJob(data.job);
+          } else if (data.type === "library-update") {
+            fetchConfig();
+            refreshLibraryEntries();
+          }
+        } catch (error) {
+          console.error("Failed to process websocket message", error);
+        }
+      };
+
+      socket.onclose = () => {
+        libraryStatus.textContent = "Live updates disconnected; retrying...";
+        setTimeout(() => {
+          connectLiveUpdates();
+        }, 2000);
+      };
+
+      socket.onerror = () => {
+        socket.close();
+      };
     }
 
     document
@@ -1247,16 +1428,75 @@
       }
     });
 
+    libraryCreateForm.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const name = (libraryNameInput.value || "").trim();
+      const path = (libraryPathInput.value || "").trim();
+      const depth = (libraryDepthInput.value || "max").trim() || "max";
+      const profileId = Number(libraryProfileSelect.value || "0");
+      if (!name || !path || !Number.isFinite(profileId) || profileId <= 0) {
+        libraryCreateResult.textContent = "Name, path, and profile are required.";
+        return;
+      }
+      libraryCreateResult.textContent = "Adding library...";
+      const response = await fetch("/api/libraries", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name, root: path, depth, profile_id: profileId }),
+      });
+      const result = await response.json();
+      if (response.ok) {
+        libraryCreateResult.textContent = `Added ${result.name}`;
+        libraryNameInput.value = "";
+        libraryPathInput.value = "";
+        libraryDepthInput.value = "max";
+        configCache = configCache || {};
+        configCache.libraries = configCache.libraries || {};
+        configCache.libraries[result.name] = {
+          root: result.root,
+          depth: result.depth,
+          profile_id: result.profile_id,
+          profile: result.profile,
+        };
+        renderLibraryProfiles();
+        renderLibraryFilters();
+        refreshLibraryEntries();
+      } else {
+        libraryCreateResult.textContent = result.detail || "Unable to add library";
+      }
+    });
+
     libraryProfiles.addEventListener("click", async (event) => {
       const button = event.target.closest("button[data-library]");
       if (!button) return;
       const row = button.closest(".library-row");
       const select = row?.querySelector("select[data-library]");
       const status = row?.querySelector(".library-status");
+      const action = button.dataset.action || "update";
+      const libraryName = button.dataset.library;
+      if (action === "remove") {
+        if (!window.confirm(`Remove library ${libraryName}? Existing entries will be marked removed.`)) return;
+        if (status) status.textContent = "Removing...";
+        const response = await fetch(`/api/libraries/${libraryName}`, { method: "DELETE" });
+        const result = await response.json().catch(() => ({}));
+        if (response.ok) {
+          if (status) status.textContent = "Removed";
+          if (configCache?.libraries) {
+            delete configCache.libraries[libraryName];
+          }
+          renderLibraryProfiles();
+          renderLibraryFilters();
+          refreshLibraryEntries();
+        } else if (status) {
+          status.textContent = result.detail || "Remove failed";
+        }
+        return;
+      }
+
       if (!select) return;
       const profileId = Number(select.value);
       if (status) status.textContent = "Saving...";
-      const response = await fetch(`/api/libraries/${button.dataset.library}`, {
+      const response = await fetch(`/api/libraries/${libraryName}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ profile_id: profileId }),
@@ -1265,8 +1505,8 @@
       if (response.ok) {
         if (status) status.textContent = "Updated";
         configCache.libraries = configCache.libraries || {};
-        configCache.libraries[button.dataset.library] = {
-          ...(configCache.libraries[button.dataset.library] || {}),
+        configCache.libraries[libraryName] = {
+          ...(configCache.libraries[libraryName] || {}),
           profile_id: profileId,
           profile: result.profile,
         };
@@ -1299,27 +1539,18 @@
 
     refreshEntriesBtn.addEventListener("click", refreshLibraryEntries);
 
-    [entrySearch, entryLibraryFilter, entryStatusFilter, entryPageSize].forEach((control) => {
-      control.addEventListener("input", () => {
-        entryPage = 1;
-        renderEntryTable();
-      });
-      control.addEventListener("change", () => {
-        entryPage = 1;
-        renderEntryTable();
-      });
-    });
-
-    entryPrev.addEventListener("click", () => {
-      if (entryPage > 1) {
-        entryPage -= 1;
-        renderEntryTable();
-      }
-    });
-
-    entryNext.addEventListener("click", () => {
-      entryPage += 1;
+    entrySearch.addEventListener("input", () => {
       renderEntryTable();
+    });
+
+    [entryLibraryFilter, entryStatusFilter, entryPageSize].forEach((control) => {
+      control.addEventListener("change", () => {
+        refreshLibraryEntries();
+      });
+    });
+
+    entryLoadMore.addEventListener("click", () => {
+      loadLibraryEntries();
     });
 
     entryRows.addEventListener("click", (event) => {
@@ -1336,6 +1567,7 @@
     fetchLogStats();
     refreshLibraryEntries();
     refreshQueueState();
+    connectLiveUpdates();
     const initialPage = window.location.hash.replace("#", "") || "queue";
     switchPage(initialPage);
     setInterval(fetchJobs, 5000);
@@ -1343,7 +1575,7 @@
     setInterval(fetchLogFilters, 15000);
     setInterval(fetchLogStats, 20000);
     setInterval(refreshQueueState, 7000);
-    setInterval(refreshLibraryEntries, 12000);
+    setInterval(refreshLibraryEntries, 30000);
   </script>
 </body>
 </html>
