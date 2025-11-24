@@ -146,6 +146,13 @@ class EntryProfilePayload(BaseModel):
     profile_id: int
 
 
+class LibraryCreatePayload(BaseModel):
+    name: str = Field(min_length=1)
+    root: str = Field(min_length=1, description="Absolute path to the library root")
+    depth: str = Field(default="max")
+    profile_id: int
+
+
 class WorkerTelemetryPayload(BaseModel):
     worker_id: str
     gpu_available: bool
@@ -730,6 +737,45 @@ async def list_libraries() -> JSONResponse:
     return JSONResponse(payload)
 
 
+@app.post("/api/libraries", status_code=201)
+async def create_library(
+    payload: LibraryCreatePayload, background_tasks: BackgroundTasks
+) -> JSONResponse:
+    normalized_name = payload.name.strip()
+    if not normalized_name:
+        raise HTTPException(status_code=400, detail="Library name cannot be empty")
+    if LIBRARY_CONFIG_STORE.get(normalized_name):
+        raise HTTPException(status_code=409, detail="Library name already exists")
+    profile = PROFILE_STORE.get(payload.profile_id)
+    if profile is None:
+        raise HTTPException(status_code=404, detail="Profile not found")
+    root = payload.root.strip()
+    if not root:
+        raise HTTPException(status_code=400, detail="Library root is required")
+
+    library = LIBRARY_CONFIG_STORE.upsert(
+        LibraryData(
+            name=normalized_name,
+            root=root,
+            depth=payload.depth or "max",
+            profile_id=payload.profile_id,
+        )
+    )
+    snapshot = config_service.upsert_library(
+        normalized_name,
+        root=library.root,
+        depth=library.depth,
+        profile=profile.name,
+        profile_id=profile.id,
+    )
+    background_tasks.add_task(
+        reconcile_library, library.name, library.root, profile.name, profile.id
+    )
+    return JSONResponse(
+        {**library.to_payload(), "profile": profile.name}, headers=_cache_headers(snapshot)
+    )
+
+
 @app.patch("/api/libraries/{library_name}")
 async def update_library_profile(library_name: str, payload: LibraryProfilePayload) -> JSONResponse:
     profile = PROFILE_STORE.get(payload.profile_id)
@@ -740,6 +786,20 @@ async def update_library_profile(library_name: str, payload: LibraryProfilePaylo
     except KeyError:
         raise HTTPException(status_code=404, detail="Library not found")
     return JSONResponse({**library.to_payload(), "profile": profile.name})
+
+
+@app.delete("/api/libraries/{library_name}")
+async def delete_library(library_name: str) -> JSONResponse:
+    library = LIBRARY_CONFIG_STORE.get(library_name)
+    if library is None:
+        raise HTTPException(status_code=404, detail="Library not found")
+    LIBRARY_CONFIG_STORE.delete(library_name)
+    snapshot = config_service.delete_library(library_name)
+    removed_entries = LIBRARY_STORE.mark_missing(library_name, set())
+    return JSONResponse(
+        {"deleted": library_name, "entries_marked": removed_entries},
+        headers=_cache_headers(snapshot),
+    )
 
 
 @app.get("/api/logs")

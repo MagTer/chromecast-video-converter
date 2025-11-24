@@ -306,6 +306,30 @@ class ConfigService:
         self._snapshot = self.store.save_config(config)
         return self._snapshot
 
+    def upsert_library(
+        self, name: str, *, root: str, depth: str, profile: str, profile_id: int
+    ) -> ConfigSnapshot:
+        config = self.snapshot.config
+        config.libraries[name] = LibraryConfig(
+            root=root,
+            depth=depth,
+            profile=profile,
+            profile_id=profile_id,
+        )
+        LOGGER.info(
+            "Updated library '%s' (root=%s, depth=%s, profile=%s)", name, root, depth, profile
+        )
+        self._snapshot = self.store.save_config(config)
+        return self._snapshot
+
+    def delete_library(self, name: str) -> ConfigSnapshot:
+        config = self.snapshot.config
+        if name in config.libraries:
+            del config.libraries[name]
+            LOGGER.info("Removed library '%s' from configuration store", name)
+        self._snapshot = self.store.save_config(config)
+        return self._snapshot
+
 
 def sanitize_config(config: QualityConfig, *, revision: Optional[float] = None) -> Dict[str, Any]:
     data = config.model_dump()
