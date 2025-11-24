@@ -120,6 +120,9 @@ def _probe_nvenc_capabilities() -> dict[str, bool]:
             capture_output=True,
             text=True,
         )
+    except FileNotFoundError as exc:
+        LOGGER.warning("ffmpeg not found while probing NVENC capabilities: %s", exc)
+        return capabilities
     except subprocess.SubprocessError as exc:
         LOGGER.warning("Unable to probe NVENC encoder capabilities: %s", exc)
         return capabilities
@@ -341,6 +344,7 @@ def _gather_streams(streams: list[dict]) -> tuple[bool, list[dict], list[dict]]:
                     "input_index": audio_pos,
                     "language": _normalize_language(stream.get("tags", {}).get("language")),
                     "disposition": stream.get("disposition", {}),
+                    "title": stream.get("tags", {}).get("title"),
                 }
             )
             audio_pos += 1
@@ -350,32 +354,49 @@ def _gather_streams(streams: list[dict]) -> tuple[bool, list[dict], list[dict]]:
                     "input_index": subtitle_pos,
                     "language": _normalize_language(stream.get("tags", {}).get("language")),
                     "disposition": stream.get("disposition", {}),
+                    "title": stream.get("tags", {}).get("title"),
                 }
             )
             subtitle_pos += 1
     return video_present, audio_streams, subtitle_streams
 
 
+def _is_commentary(stream: dict) -> bool:
+    disposition = stream.get("disposition", {}) or {}
+    title = (stream.get("title") or "").lower()
+    return bool(disposition.get("comment") or "commentary" in title)
+
+
+def _pick_best_stream(candidates: list[dict]) -> dict | None:
+    if not candidates:
+        return None
+    original = next((s for s in candidates if s.get("disposition", {}).get("original")), None)
+    if original:
+        return original
+    default = next((s for s in candidates if s.get("disposition", {}).get("default")), None)
+    if default:
+        return default
+    return candidates[0]
+
+
 def _select_priority_streams(stream_list: list[dict]) -> tuple[list[dict], int | None]:
     mapped: list[dict] = []
     seen_inputs: set[int] = set()
 
-    swedish = [s for s in stream_list if s.get("language") == "swe"]
-    english = [s for s in stream_list if s.get("language") == "eng"]
+    def _pick_for_language(language: str) -> dict | None:
+        language_matches = [s for s in stream_list if s.get("language") == language]
+        if not language_matches:
+            return None
+        preferred = [s for s in language_matches if not _is_commentary(s)]
+        return _pick_best_stream(preferred or language_matches)
 
-    original = next(
-        (s for s in stream_list if s.get("disposition", {}).get("original")),
-        None,
-    )
-    if original is None:
-        original = next(
-            (s for s in stream_list if s.get("disposition", {}).get("default")),
-            None,
-        )
-    if original is None and stream_list:
-        original = stream_list[0]
+    swedish = _pick_for_language("swe")
+    english = _pick_for_language("eng")
 
-    for candidate in [*swedish, *english, original]:
+    non_commentary = [s for s in stream_list if not _is_commentary(s)]
+    original_fallback = _pick_best_stream(non_commentary or stream_list)
+
+    for candidate in [swedish, english, original_fallback]:
         if candidate is None:
             continue
         idx = candidate["input_index"]
@@ -385,11 +406,10 @@ def _select_priority_streams(stream_list: list[dict]) -> tuple[list[dict], int |
         seen_inputs.add(idx)
 
     default_idx: int | None = None
-    if swedish:
-        for i, stream in enumerate(mapped):
-            if stream in swedish:
-                default_idx = i
-                break
+    if swedish is not None and swedish in mapped:
+        default_idx = mapped.index(swedish)
+    elif english is not None and english in mapped:
+        default_idx = mapped.index(english)
     elif mapped:
         default_idx = 0
     return mapped, default_idx
