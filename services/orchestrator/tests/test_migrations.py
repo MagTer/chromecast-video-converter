@@ -22,7 +22,23 @@ def test_migrations_apply_and_revert(tmp_path, monkeypatch):
     engine = create_engine(db_url)
     inspector = inspect(engine)
     table_names = set(inspector.get_table_names())
-    assert {"config", "encoding_profiles", "library_entries", "job_history"}.issubset(table_names)
+    assert {
+        "config",
+        "encoding_profiles",
+        "library_entries",
+        "job_history",
+        "libraries",
+    }.issubset(table_names)
+
+    library_columns = {column["name"] for column in inspector.get_columns("library_entries")}
+    assert {
+        "profile_id",
+        "output_path",
+        "last_error",
+        "last_job_id",
+        "original_missing",
+        "created_at",
+    }.issubset(library_columns)
 
     command.downgrade(alembic_cfg, "base")
     inspector = inspect(engine)
