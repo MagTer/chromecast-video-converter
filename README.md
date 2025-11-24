@@ -85,7 +85,8 @@ Alpine watcher feeds file-system events into the system.
   `series` roots. Streams create/modify/delete events (with file metadata) to
   the orchestrator with optional buffering and retry backoff so newly added or
   replaced files are queued immediately and removals are reflected in the
-  library catalog.
+  library catalog. When the API is unreachable, undelivered batches are written
+  to a local spool file and replayed on the next start to prevent event loss.
 - **Encoding profiles** – Centralized in a SQLite config store seeded from
   `config/settings.yaml.template` (or an existing `settings.yaml`) and editable
   via `/api/config/encoding`. Profiles target Chromecast Gen 2/3 constraints
@@ -99,6 +100,14 @@ Alpine watcher feeds file-system events into the system.
   statuses for pending, converting, converted, failed, and removed items.
   Operators can list entries, trigger reprocessing, or request removal of
   originals (after confirming converted outputs exist) via the API.
+- **Runtime library management** – Add or remove libraries on the fly through
+  the dashboard or the `/api/libraries` endpoints. New paths trigger background
+  scans immediately; removed libraries leave their historical entries marked as
+  `removed` for traceability.
+- **Real-time dashboard updates** – The web UI opens a WebSocket to `/ws` so
+  job and entry status changes stream live without manual refreshes. Library
+  entry browsing uses paginated “Load more” requests instead of reloading the
+  entire catalog.
 
 ### GPU access inside Docker Compose
 

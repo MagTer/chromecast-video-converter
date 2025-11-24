@@ -13,6 +13,7 @@
 - `EVENT_BUFFER_SECONDS` controls optional batching of inotify events before they are posted to the orchestrator. Set to `0` to send immediately or a positive integer to flush on that cadence.
 - `EVENT_RETRY_ATTEMPTS` and `EVENT_RETRY_BACKOFF_SECONDS` define the retry window when the orchestrator API is temporarily unavailable. Retries use exponential backoff based on the provided delay.
 - `ROOT_RETRY_SECONDS` governs how frequently the watcher waits for a missing mount to appear before starting the inotify loop.
+- `EVENT_SPOOL_FILE` (default: `/tmp/folder-watcher-spool.jsonl`) persists undelivered batches when the orchestrator is offline; buffered payloads are replayed on the next start before new inotify events are processed. `EVENT_SPOOL_MAX_BYTES` caps the retained backlog (defaults to 10 MB) to prevent unbounded growth.
 
 `config/settings.yaml.template` is solely a starter copy that seeds the SQLite config store (`./logs/config.db`). If `config/settings.yaml` exists on first boot, the orchestrator imports it once, validates it, and ignores the YAML copies afterward. The GPU worker now pulls settings from the orchestrator API, so ongoing edits should happen through the dashboard/API rather than direct file edits.
 
