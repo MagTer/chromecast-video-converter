@@ -17,6 +17,7 @@ dist/
 
 # Runtime directories
 logs/
+data/
 
 # Media
 media/
