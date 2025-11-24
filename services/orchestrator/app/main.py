@@ -17,6 +17,8 @@ from . import config as config_module
 from . import jellyfin, jobs
 from .db import Base, create_session_factory
 from .job_history import JobHistoryEntry, JobHistoryStatus, JobHistoryStore
+import sqlalchemy
+
 from .library_entries import EntryUpdate, LibraryEntry, LibraryEntryStore, LibraryStatus
 from .logs import (
     LogEntry,
@@ -81,6 +83,35 @@ def _detect_wsl2() -> bool:
 
 
 HOST_ENVIRONMENT = {"is_wsl2": _detect_wsl2()}
+
+
+def _require_schema_revision(engine) -> None:
+    """Fail fast when the database schema is older than the application models."""
+
+    required_columns = {
+        "bitrate",
+        "bframes",
+        "lookahead",
+        "adaptive_b_frames",
+        "aq",
+        "spatial_aq",
+        "temporal_aq",
+    }
+    with engine.connect() as conn:
+        rows = conn.execute(sqlalchemy.text("PRAGMA table_info('encoding_profiles')")).fetchall()
+    if not rows:
+        return
+    present = {row[1] for row in rows}
+    missing = required_columns - present
+    if missing:
+        details = ", ".join(sorted(missing))
+        raise RuntimeError(
+            "Config DB schema is outdated (missing columns: "
+            f"{details}). Run 'alembic upgrade head' inside the orchestrator container."
+        )
+
+
+_require_schema_revision(ENGINE)
 
 
 class WebsocketNotifier:
