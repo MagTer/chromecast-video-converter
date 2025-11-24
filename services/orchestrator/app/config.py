@@ -16,13 +16,52 @@ LOGGER = logging.getLogger("orchestrator.config")
 
 
 def _validate_codecs(codec: str, audio_codec: str) -> None:
+    """Enforce GPU-friendly H.264 + AAC outputs only."""
+
     if codec.lower() != "h264":
         raise ValueError("Only H.264 is supported to keep Chromecast compatibility.")
     if audio_codec.lower() != "aac":
         raise ValueError("Audio codec must be AAC for Chromecast.")
 
 
-def _validate_profile(profile: str, level: str) -> None:
+def _parse_resolution(resolution: str) -> tuple[int, int]:
+    try:
+        width_str, height_str = resolution.lower().split("x", 1)
+        width, height = int(width_str), int(height_str)
+    except ValueError as exc:  # noqa: BLE001
+        raise ValueError("Resolution must be formatted as WIDTHxHEIGHT.") from exc
+    return width, height
+
+
+def _minimum_level_for_resolution(resolution: str, fps: int) -> float:
+    """Return the lowest H.264 level that can carry the selected resolution/FPS.
+
+    The mapping follows common decoder limits (FFmpeg 7.7 + NVENC constraints):
+    - 720p30 => 3.1
+    - 720p60 => 4.0
+    - 1080p30 => 4.1
+    - 1080p60 => 4.2
+    Anything beyond 1080p60 is rejected upstream.
+    """
+
+    width, height = _parse_resolution(resolution)
+    if width > 1920 or height > 1080:
+        raise ValueError("Resolution must not exceed 1920x1080 for Chromecast targets.")
+
+    if width <= 1280 and height <= 720:
+        if fps <= 30:
+            return 3.1
+        if fps <= 60:
+            return 4.0
+    if width <= 1920 and height <= 1080:
+        if fps <= 30:
+            return 4.1
+        if fps <= 60:
+            return 4.2
+    raise ValueError("Unsupported resolution/FPS combination.")
+
+
+def _validate_profile(profile: str, level: str, resolution: str, fps: int) -> None:
     allowed_profiles = {"baseline", "main", "high"}
     if profile.lower() not in allowed_profiles:
         raise ValueError("Chromecast Gen 2 only supports H.264 baseline, main, or high profiles.")
@@ -31,16 +70,17 @@ def _validate_profile(profile: str, level: str) -> None:
         level_value = float(level)
     except ValueError as exc:  # noqa: BLE001
         raise ValueError("Video level must be numeric (e.g. 4.1).") from exc
-    if level_value > 4.1:
-        raise ValueError("Chromecast Gen 2 supports up to level 4.1 for H.264.")
+
+    minimum_level = _minimum_level_for_resolution(resolution, fps)
+    if level_value < minimum_level:
+        raise ValueError(
+            f"Level {level} is too low for {resolution} at {fps} fps; "
+            f"minimum is {minimum_level:.1f}."
+        )
 
 
 def _validate_resolution(resolution: str) -> None:
-    try:
-        width_str, height_str = resolution.lower().split("x", 1)
-        width, height = int(width_str), int(height_str)
-    except ValueError as exc:  # noqa: BLE001
-        raise ValueError("Resolution must be formatted as WIDTHxHEIGHT.") from exc
+    width, height = _parse_resolution(resolution)
     if width > 1920 or height > 1080:
         raise ValueError("Resolution must not exceed 1920x1080 for Chromecast Gen 2.")
 
@@ -54,13 +94,17 @@ def _bitrate_to_int(value: str) -> int:
     return int(float(normalized))
 
 
-def _validate_bitrates(max_bitrate: str, bufsize: str, audio_bitrate: str) -> None:
+def _validate_bitrates(bitrate: str, max_bitrate: str, bufsize: str, audio_bitrate: str) -> None:
     try:
+        target_rate = _bitrate_to_int(bitrate)
         maxrate = _bitrate_to_int(max_bitrate)
         bufsize_value = _bitrate_to_int(bufsize)
         audio_rate = _bitrate_to_int(audio_bitrate)
     except ValueError as exc:  # noqa: BLE001
         raise ValueError("Bitrate values must be numeric and end with 'k' or 'M'.") from exc
+
+    if target_rate <= 0:
+        raise ValueError("Bitrate must be greater than zero for VBR modes.")
 
     if maxrate > 12_000_000:
         raise ValueError("Chromecast Gen 2 cannot exceed ~12 Mbps video bitrate.")
@@ -69,30 +113,66 @@ def _validate_bitrates(max_bitrate: str, bufsize: str, audio_bitrate: str) -> No
     if audio_rate > 512_000:
         raise ValueError("Audio bitrate must remain below 512 kbps for Chromecast Gen 2.")
 
+    if target_rate > maxrate:
+        raise ValueError("Target bitrate must not exceed the configured maxrate.")
+
+
+def _validate_bframe_chain(
+    profile: str, bframes: int, lookahead: int, adaptive_b_frames: bool
+) -> None:
+    if bframes < 0 or bframes > 3:
+        raise ValueError("B-frames must be between 0 and 3 for Chromecast-friendly streams.")
+
+    if profile.lower() == "baseline" and bframes != 0:
+        raise ValueError("Baseline profile forbids B-frames; expected 0.")
+
+    if lookahead < 0 or lookahead > 32:
+        raise ValueError("Lookahead depth must be between 0 and 32 frames.")
+
+    if adaptive_b_frames and (lookahead <= 0 or bframes == 0):
+        raise ValueError("Adaptive B-frames require lookahead > 0 and at least 1 B-frame.")
+
+
+def _validate_aq_flags(aq: bool, spatial_aq: bool, temporal_aq: bool) -> None:
+    if not aq and (spatial_aq or temporal_aq):
+        raise ValueError("When AQ is disabled, spatial_aq and temporal_aq must also be disabled.")
+
 
 def _validate_encoding_options(
-    preset: str, cq: int, rc_mode: str, max_fps: int, audio_channels: int
+    preset: str,
+    cq: int,
+    rc_mode: str,
+    max_fps: int,
+    audio_channels: int,
+    bframes: int,
+    lookahead: int,
+    adaptive_b_frames: bool,
+    aq: bool,
+    spatial_aq: bool,
+    temporal_aq: bool,
+    profile: str,
 ) -> None:
-    allowed_presets = {"p1", "p2", "p3", "p4", "p5", "p6", "p7"}
+    allowed_presets = {"p4", "p5", "p6", "p7"}
     if preset.lower() not in allowed_presets:
-        raise ValueError("NVENC preset must be one of p1–p7 for Chromecast-safe outputs.")
+        raise ValueError("NVENC preset must be one of p4–p7 for Chromecast-safe outputs.")
 
     if cq < 0 or cq > 30:
         raise ValueError(
             "NVENC CQ must be between 0 and 30 for stable quality on Gen 2 Chromecasts."
         )
 
-    allowed_rc_modes = {"vbr_hq", "vbr", "cbr"}
+    allowed_rc_modes = {"cq", "vbr", "vbr_hq"}
     if rc_mode.lower() not in allowed_rc_modes:
-        raise ValueError(
-            "Rate control must be one of vbr_hq, vbr, or cbr for Chromecast-safe outputs."
-        )
+        raise ValueError("Rate control must be cq, vbr, or vbr_hq for Chromecast-safe outputs.")
 
-    if max_fps <= 0 or max_fps > 30:
-        raise ValueError("Frame rate must not exceed 30 fps for Chromecast Gen 2 compatibility.")
+    if max_fps <= 0 or max_fps > 60:
+        raise ValueError("Frame rate must be between 1 and 60 fps.")
 
     if audio_channels != 2:
         raise ValueError("Audio must remain stereo (2 channels) for Chromecast Gen 2.")
+
+    _validate_bframe_chain(profile, bframes, lookahead, adaptive_b_frames)
+    _validate_aq_flags(aq, spatial_aq, temporal_aq)
 
 
 class AudioProfile(BaseModel):
@@ -112,23 +192,46 @@ class Profile(BaseModel):
     profile: str
     level: str
     resolution: str
-    max_fps: int = Field(default=30, gt=0, le=30)
+    max_fps: int = Field(default=30, gt=0, le=60)
+    bitrate: str = Field(default="8M")
     max_bitrate: str
     bufsize: str
-    preset: str = Field(default="p5")
+    preset: str = Field(default="p6")
     cq: int = Field(default=18, ge=0, le=30)
     rc: str = Field(default="vbr_hq")
+    bframes: int = Field(default=2, ge=0, le=3)
+    lookahead: int = Field(default=24, ge=0, le=32)
+    adaptive_b_frames: bool = Field(default=True)
+    aq: bool = Field(default=True)
+    spatial_aq: bool = Field(default=True)
+    temporal_aq: bool = Field(default=True)
     audio: AudioProfile
 
     @model_validator(mode="after")
     def validate_codecs(cls, values):
         _validate_codecs(values.codec, values.audio.codec)
-        _validate_profile(values.profile, values.level)
+        _validate_profile(values.profile, values.level, values.resolution, values.max_fps)
         _validate_resolution(values.resolution)
-        _validate_bitrates(values.max_bitrate, values.bufsize, values.audio.bitrate)
+        _validate_bitrates(values.bitrate, values.max_bitrate, values.bufsize, values.audio.bitrate)
         _validate_encoding_options(
-            values.preset, values.cq, values.rc, values.max_fps, values.audio.channels
+            values.preset,
+            values.cq,
+            values.rc,
+            values.max_fps,
+            values.audio.channels,
+            values.bframes,
+            values.lookahead,
+            values.adaptive_b_frames,
+            values.aq,
+            values.spatial_aq,
+            values.temporal_aq,
+            values.profile,
         )
+
+        if not values.aq:
+            values.spatial_aq = False
+            values.temporal_aq = False
+
         return values
 
 

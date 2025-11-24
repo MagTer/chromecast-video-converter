@@ -2,7 +2,6 @@ import asyncio
 import json
 import logging
 import os
-import platform
 import shlex
 import subprocess
 import time
@@ -98,10 +97,17 @@ SCALING_EXPRESSION = "scale_cuda=-2:720:force_original_aspect_ratio=decrease"
 
 
 def _detect_host_environment() -> dict[str, bool]:
-    uname = platform.uname()
-    release = uname.release.lower()
-    version = uname.version.lower()
-    return {"is_wsl": "microsoft" in release or "microsoft" in version}
+    """Detect whether we're running under WSL2 (for NVENC quirks)."""
+
+    try:
+        version = Path("/proc/version").read_text().lower()
+        if "microsoft" in version or "wsl2" in version:
+            return {"is_wsl2": True}
+    except OSError:
+        pass
+
+    is_wsl2 = any(os.environ.get(var) for var in ("WSL_DISTRO_NAME", "WSL_INTEROP"))
+    return {"is_wsl2": is_wsl2}
 
 
 def _probe_nvenc_capabilities() -> dict[str, bool]:
@@ -142,8 +148,10 @@ def _probe_nvenc_capabilities() -> dict[str, bool]:
 HOST_ENVIRONMENT = _detect_host_environment()
 NVENC_CAPABILITIES = _probe_nvenc_capabilities()
 
-if HOST_ENVIRONMENT["is_wsl"]:
-    LOGGER.warning("Detected WSL kernel; NVENC rate-control and multipass support may be limited")
+if HOST_ENVIRONMENT.get("is_wsl2"):
+    LOGGER.warning(
+        "Detected WSL2 environment; NVENC rate-control and multipass support may be limited"
+    )
 
 CONFIG_PATH = Path(os.environ.get("CONFIG_PATH", "/app/config/settings.yaml"))
 PROFILES: dict = {}
@@ -447,22 +455,34 @@ def build_ffmpeg_command(  # noqa: C901
     )
 
     profile = profile or {}
-    maxrate = profile.get("max_bitrate", "8M")
+    bitrate = profile.get("bitrate") or profile.get("max_bitrate", "8M")
+    maxrate = profile.get("max_bitrate", bitrate)
     bufsize = profile.get("bufsize", "16M")
     level = profile.get("level", "4.1")
     h264_profile = str(profile.get("profile", "high"))
-    max_fps = int(profile.get("max_fps", 30) or 30)
-    preset = str(profile.get("preset", "p5"))
-    rc_mode = str(profile.get("rc", "vbr_hq")).lower()
+    max_fps = max(1, int(profile.get("max_fps", 30) or 30))
+    preset = str(profile.get("preset", "p6"))
+    rc_mode = str(profile.get("rc", "vbr_hq") or "vbr_hq").lower()
+    if rc_mode == "cbr":
+        rc_mode = "vbr"
     cq = str(profile.get("cq", 18))
+    bframes = int(profile.get("bframes", 2) or 0)
+    if h264_profile.lower() == "baseline":
+        bframes = 0
+    lookahead = int(profile.get("lookahead", 24) or 0)
+    adaptive_b_frames = bool(profile.get("adaptive_b_frames", True))
+    adaptive_b_frames = adaptive_b_frames and lookahead > 0 and bframes > 0
+    aq_enabled = bool(profile.get("aq", True))
+    spatial_aq = aq_enabled and bool(profile.get("spatial_aq", True))
+    temporal_aq = aq_enabled and bool(profile.get("temporal_aq", True))
     multipass_mode: str | None = None
     if rc_mode == "vbr_hq":
         multipass_mode = "fullres"
 
     if rc_mode == "vbr_hq" and not NVENC_CAPABILITIES.get("rc_vbr_hq", True):
         LOGGER.warning(
-            "Requested rc mode vbr_hq is unavailable; falling back to vbr (WSL=%s)",
-            HOST_ENVIRONMENT["is_wsl"],
+            "Requested rc mode vbr_hq is unavailable; falling back to vbr (WSL2=%s)",
+            HOST_ENVIRONMENT.get("is_wsl2"),
         )
         rc_mode = "vbr"
         multipass_mode = None
@@ -475,7 +495,7 @@ def build_ffmpeg_command(  # noqa: C901
     audio_cfg = profile.get("audio", {})
     audio_codec = audio_cfg.get("codec", "aac")
     audio_bitrate = audio_cfg.get("bitrate", "192k")
-    audio_channels = int(audio_cfg.get("channels", 2) or 2)
+    audio_channels = 2  # Chromecast-safe stereo only
 
     streams = analysis_json.get("streams", [])
     video_present, audio_streams, subtitle_streams = _gather_streams(streams)
@@ -499,7 +519,7 @@ def build_ffmpeg_command(  # noqa: C901
 
     filters = [_scaling_expression(profile)]
     if max_fps > 0:
-        filters.append(f"fps={min(max_fps, 30)}")
+        filters.append(f"fps={max_fps}")
     video_filter = ",".join(filters)
 
     command.extend(
@@ -508,27 +528,40 @@ def build_ffmpeg_command(  # noqa: C901
             video_filter,
             "-c:v",
             "h264_nvenc",
-            "-rc",
-            rc_mode,
             "-preset",
             preset,
             "-profile:v",
             h264_profile,
             "-level",
             level,
-            "-cq",
-            cq,
-            "-maxrate",
-            maxrate,
-            "-bufsize",
-            bufsize,
+        ]
+    )
+
+    if rc_mode == "cq":
+        command.extend(["-rc", "constqp", "-qp", cq])
+    else:
+        command.extend(["-rc", rc_mode, "-b:v", bitrate, "-maxrate", maxrate, "-bufsize", bufsize])
+        if multipass_mode:
+            command.extend(["-multipass", multipass_mode])
+
+    command.extend(["-bf", str(bframes)])
+
+    if lookahead > 0:
+        command.extend(["-look_ahead", "1", "-look_ahead_depth", str(lookahead)])
+    else:
+        command.extend(["-look_ahead", "0"])
+
+    command.extend(["-b_adapt", "1" if adaptive_b_frames else "0"])
+    command.extend(
+        [
+            "-spatial_aq",
+            "1" if spatial_aq else "0",
+            "-temporal_aq",
+            "1" if temporal_aq else "0",
             "-movflags",
             "+faststart",
         ]
     )
-
-    if multipass_mode:
-        command.extend(["-multipass", multipass_mode])
 
     if selected_audio:
         command.extend(
