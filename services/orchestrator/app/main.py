@@ -106,13 +106,26 @@ def _ensure_schema_revision(engine) -> None:
     """
 
     required_columns = {
+        "codec",
+        "profile_tier",
+        "max_resolution",
         "bitrate",
+        "max_bitrate",
+        "bufsize",
+        "preset",
+        "cq",
+        "rc",
+        "level",
+        "max_fps",
         "bframes",
         "lookahead",
         "adaptive_b_frames",
         "aq",
         "spatial_aq",
         "temporal_aq",
+        "audio_codec",
+        "audio_bitrate",
+        "audio_channels",
     }
     with engine.connect() as conn:
         rows = conn.execute(sqlalchemy.text("PRAGMA table_info('encoding_profiles')")).fetchall()
@@ -139,8 +152,36 @@ def _ensure_schema_revision(engine) -> None:
     if missing:
         # Manual patch for stale DBs that report head but lack columns
         alter_statements = {
+            "codec": (
+                "ALTER TABLE encoding_profiles ADD COLUMN "
+                "codec TEXT NOT NULL DEFAULT 'h264'"
+            ),
+            "profile_tier": (
+                "ALTER TABLE encoding_profiles ADD COLUMN "
+                "profile_tier TEXT NOT NULL DEFAULT 'high'"
+            ),
+            "max_resolution": (
+                "ALTER TABLE encoding_profiles ADD COLUMN "
+                "max_resolution TEXT NOT NULL DEFAULT '1280x720'"
+            ),
             "bitrate": (
                 "ALTER TABLE encoding_profiles ADD COLUMN " "bitrate TEXT NOT NULL DEFAULT '8M'"
+            ),
+            "max_bitrate": (
+                "ALTER TABLE encoding_profiles ADD COLUMN " "max_bitrate TEXT NOT NULL DEFAULT '8M'"
+            ),
+            "bufsize": (
+                "ALTER TABLE encoding_profiles ADD COLUMN " "bufsize TEXT NOT NULL DEFAULT '16M'"
+            ),
+            "preset": (
+                "ALTER TABLE encoding_profiles ADD COLUMN " "preset TEXT NOT NULL DEFAULT 'p6'"
+            ),
+            "cq": "ALTER TABLE encoding_profiles ADD COLUMN cq INTEGER NOT NULL DEFAULT 18",
+            "rc": "ALTER TABLE encoding_profiles ADD COLUMN rc TEXT NOT NULL DEFAULT 'vbr_hq'",
+            "level": "ALTER TABLE encoding_profiles ADD COLUMN level TEXT NOT NULL DEFAULT '4.1'",
+            "max_fps": (
+                "ALTER TABLE encoding_profiles ADD COLUMN "
+                "max_fps INTEGER NOT NULL DEFAULT 30"
             ),
             "bframes": (
                 "ALTER TABLE encoding_profiles ADD COLUMN " "bframes INTEGER NOT NULL DEFAULT 2"
@@ -158,6 +199,18 @@ def _ensure_schema_revision(engine) -> None:
             ),
             "temporal_aq": (
                 "ALTER TABLE encoding_profiles ADD COLUMN " "temporal_aq BOOLEAN NOT NULL DEFAULT 1"
+            ),
+            "audio_codec": (
+                "ALTER TABLE encoding_profiles ADD COLUMN "
+                "audio_codec TEXT NOT NULL DEFAULT 'aac'"
+            ),
+            "audio_bitrate": (
+                "ALTER TABLE encoding_profiles ADD COLUMN "
+                "audio_bitrate TEXT NOT NULL DEFAULT '192k'"
+            ),
+            "audio_channels": (
+                "ALTER TABLE encoding_profiles ADD COLUMN "
+                "audio_channels INTEGER NOT NULL DEFAULT 2"
             ),
         }
         with engine.begin() as conn:
