@@ -50,25 +50,19 @@ Alpine watcher feeds file-system events into the system.
    the repository root (for example, `./media/movies`), while absolute paths
    work for mounted drives such as `/mnt/storage/Movies` or `D:\\Media\\Movies`
    on Windows.
-3. To preconfigure profiles before first boot, copy
-   `config/settings.yaml.template` to `config/settings.yaml` and adjust library
-   profiles or operational limits. On startup, the orchestrator will import an
-   existing `settings.yaml` (or fall back to the template) into a SQLite config
-   store at `./logs/config.db`, validate it, and ignore the YAML files after the
-   initial seed.
-4. Run `docker compose build` to create the orchestrator, watcher, and
+3. Run `docker compose build` to create the orchestrator, watcher, and
    `gpu-ffmpeg` images locally.
-5. Start the stack with `docker compose up`. The orchestrator mounts
+4. Start the stack with `docker compose up`. The orchestrator mounts
    `./services/orchestrator/app`, so HTML/API updates are picked up on refresh
    without rebuilding.
-6. Visit `http://localhost:9000` for the dashboard and JSON API. Health checks
+5. Visit `http://localhost:9000` for the dashboard and JSON API. Health checks
    live at `/api/healthz` and `/api/readyz`; logs from every container are
    centralized behind `/api/logs` with retention controls on the Configuration
    page (defaults to seven days).
 
-   The orchestrator now persists GUI/API configuration updates to the
-   SQLite-backed config store (`./logs/config.db`) so dashboard edits survive
-   restarts without writing YAML on disk.
+  The orchestrator seeds a SQLite-backed config store from built-in defaults and
+  persists GUI/API edits there (`./data/orchestrator/config.db`) so dashboard
+  changes survive restarts without any YAML files.
 
 ### MVP feature set
 
@@ -88,8 +82,8 @@ Alpine watcher feeds file-system events into the system.
   library catalog. When the API is unreachable, undelivered batches are written
   to a local spool file and replayed on the next start to prevent event loss.
 - **Encoding profiles** – Centralized in a SQLite config store seeded from
-  `config/settings.yaml.template` (or an existing `settings.yaml`) and editable
-  via `/api/config/encoding`. Profiles target Chromecast Gen 2/3 constraints
+  built-in defaults and editable via `/api/config/encoding`. Profiles target
+  Chromecast Gen 2/3 constraints
   (H.264 High, level 4.1, 720p, capped bitrate) with AAC stereo audio and
   dropdowns for NVENC presets, CQ targets, and a 30 fps ceiling that keeps
   every audio track mapped as stereo AAC.
