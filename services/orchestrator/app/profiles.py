@@ -6,7 +6,7 @@ from datetime import datetime
 from threading import RLock
 from typing import List, Optional
 
-from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Integer, String, select
+from sqlalchemy import JSON, Boolean, Column, DateTime, ForeignKey, Integer, String, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from .db import Base
@@ -19,6 +19,7 @@ class EncodingProfile(Base):
 
     id = Column(Integer, primary_key=True)
     name = Column(String, unique=True, nullable=False)
+    definition = Column(JSON, nullable=False, default=dict)
     codec = Column(String, nullable=False)
     definition = Column(String, nullable=False, default="{}")
     profile_tier = Column(String, nullable=False, default="high")
@@ -100,6 +101,8 @@ class LibraryConfig(Base):
 @dataclass
 class ProfileData:
     name: str
+    # Denormalized JSON definition kept in sync for backward-compatible reads
+    # and for schema versions that still require the column.
     codec: str
     profile_tier: str
     max_resolution: str
@@ -139,6 +142,33 @@ class ProfileStore:
     def _session(self) -> Session:
         return self._session_factory()
 
+    @staticmethod
+    def _definition_from(data: ProfileData) -> dict:
+        return {
+            "codec": data.codec,
+            "profile": data.profile_tier,
+            "level": data.level,
+            "resolution": data.max_resolution,
+            "max_fps": data.max_fps,
+            "bitrate": data.bitrate,
+            "max_bitrate": data.max_bitrate,
+            "bufsize": data.bufsize,
+            "preset": data.preset,
+            "cq": data.cq,
+            "rc": data.rc,
+            "bframes": data.bframes,
+            "lookahead": data.lookahead,
+            "adaptive_b_frames": data.adaptive_b_frames,
+            "aq": data.aq,
+            "spatial_aq": data.spatial_aq,
+            "temporal_aq": data.temporal_aq,
+            "audio": {
+                "codec": data.audio_codec,
+                "bitrate": data.audio_bitrate,
+                "channels": data.audio_channels,
+            },
+        }
+
     def list_profiles(self) -> List[EncodingProfile]:
         stmt = select(EncodingProfile).order_by(EncodingProfile.name.asc())
         with self._lock, self._session() as session:
@@ -158,6 +188,7 @@ class ProfileStore:
             now = datetime.utcnow()
             profile = EncodingProfile(
                 name=data.name,
+                definition=self._definition_from(data),
                 codec=data.codec,
                 profile_tier=data.profile_tier,
                 max_resolution=data.max_resolution,
@@ -194,6 +225,7 @@ class ProfileStore:
                 raise KeyError(profile_id)
             for key, value in data.__dict__.items():
                 setattr(profile, key, value)
+            profile.definition = self._definition_from(data)
             profile.updated_at = datetime.utcnow()
             session.add(profile)
             session.commit()

@@ -54,13 +54,14 @@ services:
       - ${PATH_MOVIES}:/watch/movies
       - ${PATH_SERIES}:/watch/series
       - ./config:/app/config
+      - ./data:/app/data
     environment:
       - FFMPEG_LOG_LEVEL=info
       - ORCHESTRATOR_URL=http://orchestrator:9000
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=compute,video,utility
       - GPU_STREAM_READER_LIMIT=${GPU_STREAM_READER_LIMIT:-1000000}
-      - DATABASE_URL=sqlite:////app/config/orchestrator.db
+      - DATABASE_URL=sqlite:////app/data/gpu-ffmpeg/worker.db
 
   redis:
     image: redis:7
