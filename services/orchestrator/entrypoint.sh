@@ -4,16 +4,16 @@ set -euo pipefail
 
 PORT="${PORT:-9000}"
 
-# Align alembic target with the orchestrator's CONFIG_DB_PATH default (/app/logs/config.db)
-# unless explicitly overridden. If CONFIG_DB_PATH is set, prefer it.
-if [[ -n "${CONFIG_DB_PATH:-}" ]]; then
-  DB_PATH="${CONFIG_DB_PATH}"
+# Align alembic target with the orchestrator's library/config database where
+# encoding profiles live (LIBRARY_DB_PATH). This must match app.main Engine.
+if [[ -n "${LIBRARY_DB_PATH:-}" ]]; then
+  DB_PATH="${LIBRARY_DB_PATH}"
 else
-  DB_PATH="/app/logs/config.db"
+  DB_PATH="/app/logs/library.db"
 fi
 
 DATABASE_URL="${DATABASE_URL:-sqlite:////${DB_PATH#'/'}}"
-export DATABASE_URL CONFIG_DB_PATH
+export DATABASE_URL LIBRARY_DB_PATH
 
 if [[ "${DATABASE_URL}" == sqlite:* ]]; then
   python3 - <<'PY'
