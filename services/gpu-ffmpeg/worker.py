@@ -656,7 +656,7 @@ def _normalize_job(payload: dict) -> dict:
 
 
 async def _claim_stalled(redis_client: redis.Redis, consumer: str) -> tuple[str, dict] | None:
-    message_id, messages = await redis_client.xautoclaim(
+    resp = await redis_client.xautoclaim(
         JOB_QUEUE_STREAM,
         JOB_QUEUE_GROUP,
         consumer,
@@ -664,6 +664,20 @@ async def _claim_stalled(redis_client: redis.Redis, consumer: str) -> tuple[str,
         start_id="0-0",
         count=1,
     )
+    # redis-py returns (next_id, messages); some RESP3/older variants return
+    # (next_id, messages, deleted)
+    if isinstance(resp, tuple):
+        if len(resp) == 2:
+            _next_id, messages = resp
+        elif len(resp) >= 3:
+            _next_id, messages, _deleted = resp[0], resp[1], resp[2]
+        else:
+            messages = []
+    else:  # fallback: treat as sequence
+        try:
+            _next_id, messages = resp[0], resp[1]
+        except Exception:  # noqa: BLE001
+            messages = []
     if not messages:
         return None
     entry_id, fields = messages[0]
