@@ -36,6 +36,8 @@ This guide standardizes how AI coding agents contribute to the Chromecast Video 
 - [ ] Error handling is fault tolerant (retries, fallbacks) and surfaces actionable messages.
 - [ ] Tests run locally (or within CI) and results recorded in the PR.
 - [ ] Security review completed when touching networking, credentials, or bind mounts.
+- [ ] For API/UI changes: keep `/api/libraries` runtime add/remove, websocket message schemas (`entry-update`, `job-update`, `library-update`), pagination (`limit/offset/include_total`), and watcher spool behavior in sync with docs and frontend.
+- [ ] Add/extend tests when altering endpoints, websocket pushes, pagination, or watcher buffering (see `services/orchestrator/tests/test_api_endpoints.py`).
 
 ## Collaboration expectations
 

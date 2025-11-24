@@ -5,6 +5,28 @@ through GPU-only transcoding. The MVP is operational: the orchestrator exposes a
 dashboard and JSON API, a Redis-backed job queue coordinates GPU workers, and an
 Alpine watcher feeds file-system events into the system.
 
+## Quick tasks
+
+- **Add a library at runtime**
+
+  ```bash
+  curl -X POST http://localhost:9000/api/libraries \
+    -H 'Content-Type: application/json' \
+    -d '{"name":"movies","root":"/watch/movies","depth":"max","profile_id":1}'
+  ```
+
+- **Subscribe to live updates** (jobs/entries/libraries)
+
+  ```bash
+  wscat -c ws://localhost:9000/ws
+  ```
+
+- **List library entries with pagination**
+
+  ```bash
+  curl "http://localhost:9000/api/library/entries?limit=50&offset=0&include_total=true"
+  ```
+
 ## Documentation map
 
 - [`docs/01_architecture.md`](docs/01_architecture.md) - Component model, data
@@ -12,7 +34,8 @@ Alpine watcher feeds file-system events into the system.
 - [`docs/user/01_getting_started.md`](docs/user/01_getting_started.md) - Stack
   prerequisites, configuration, and day-one operation.
 - [`docs/user/02_configuration.md`](docs/user/02_configuration.md) - Details on
-  aligning Compose mounts and orchestrator library definitions.
+  aligning Compose mounts and orchestrator library definitions (includes runtime add/remove, live updates, pagination, watcher spool).
+- [`docs/user/03_api_reference.md`](docs/user/03_api_reference.md) - Endpoint cheat sheet (libraries, entries, events, websocket, queue, logs).
 - [`docs/02_ai_agent_process.md`](docs/02_ai_agent_process.md) - Expectations
   for AI coding agents. See `AGENTS.md` for the quick-start rules and quality
   gates.

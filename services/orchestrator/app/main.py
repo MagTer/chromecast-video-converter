@@ -68,8 +68,6 @@ WORKER_TELEMETRY: Dict[str, "WorkerTelemetryPayload"] = {}
 
 
 class WebsocketNotifier:
-    """Tracks websocket connections and pushes structured events to clients."""
-
     def __init__(self) -> None:
         self._connections: Set[WebSocket] = set()
         self._lock = asyncio.Lock()
@@ -90,13 +88,13 @@ class WebsocketNotifier:
         if not targets:
             return
 
-        async def _send(target: WebSocket) -> None:
+        async def _send(ws: WebSocket) -> None:
             try:
-                await target.send_json(payload)
+                await ws.send_json(payload)
             except Exception:
-                await self.disconnect(target)
+                await self.disconnect(ws)
 
-        await asyncio.gather(*(_send(target) for target in targets), return_exceptions=True)
+        await asyncio.gather(*(_send(ws) for ws in targets), return_exceptions=True)
 
 
 def configure_logging() -> None:
@@ -182,11 +180,9 @@ class EntryProfilePayload(BaseModel):
 
 class LibraryCreatePayload(BaseModel):
     name: str = Field(min_length=1)
-    root: str = Field(min_length=1, description="Absolute path to the library root", alias="path")
+    root: str = Field(min_length=1, description="Absolute path to the library root")
     depth: str = Field(default="max")
     profile_id: int
-
-    model_config = ConfigDict(populate_by_name=True)
 
 
 class WorkerTelemetryPayload(BaseModel):
@@ -204,16 +200,6 @@ def _worker_metrics_summary() -> Dict[str, Any]:
     telemetry = [jsonable_encoder(item) for item in payloads]
     available = sum(1 for item in payloads if item.gpu_available)
     return {"workers": len(payloads), "available": available, "telemetry": telemetry}
-
-
-async def _emit_entry_update(entry: LibraryEntry, *, event: Optional[str] = None) -> None:
-    await NOTIFIER.broadcast(
-        {"type": "entry-update", "entry": _entry_to_response(entry), "event": event}
-    )
-
-
-async def _emit_job_update(job: jobs.Job, *, event: Optional[str] = None) -> None:
-    await NOTIFIER.broadcast({"type": "job-update", "job": job.model_dump(), "event": event})
 
 
 async def _emit_library_update(action: str, payload: Dict[str, Any]) -> None:
@@ -454,7 +440,6 @@ async def _record_library_entry(
     profile_id: int,
     *,
     emit_log: bool = True,
-    notify: bool = True,
 ) -> tuple[LibraryEntry, Optional[jobs.Job]]:
     status, output_path, original_exists = _entry_status_for_path(path)
     entry = LIBRARY_STORE.upsert(
@@ -479,12 +464,7 @@ async def _record_library_entry(
         )
         LIBRARY_STORE.attach_job(entry.id, job.id)
         _record_job_history(job, JobHistoryStatus.PENDING)
-        if notify:
-            await _emit_job_update(job, event="queued")
-            await _emit_entry_update(entry, event="queued")
         return entry, job
-    if notify:
-        await _emit_entry_update(entry, event="tracked")
     return entry, None
 
 
@@ -492,13 +472,13 @@ def _entry_to_response(entry: LibraryEntry) -> Dict[str, Any]:
     return LibraryEntryResponse.model_validate(entry).model_dump()
 
 
-async def _sync_entry_from_job(job: jobs.Job, status: str, message: Optional[str] = None) -> None:
+def _sync_entry_from_job(job: jobs.Job, status: str, message: Optional[str] = None) -> None:
     source = Path(job.path)
     original_missing = not source.exists()
     final_status = status
     if status == LibraryStatus.CONVERTED and original_missing:
         final_status = LibraryStatus.REMOVED
-    entry = LIBRARY_STORE.safe_update_status(
+    LIBRARY_STORE.safe_update_status(
         job.path,
         final_status,
         library=job.library,
@@ -509,8 +489,6 @@ async def _sync_entry_from_job(job: jobs.Job, status: str, message: Optional[str
         output_path=str(job_manager.output_path(source)),
         original_missing=original_missing,
     )
-    if entry:
-        await _emit_entry_update(entry, event="job-status")
 
 
 def _record_job_history(
@@ -565,7 +543,6 @@ async def _process_event_payload(payload: EventPayload) -> Optional[Dict[str, An
             output_path=str(job_manager.output_path(path)),
             original_missing=True,
         )
-        await _emit_entry_update(entry, event=event_type)
         return {"entry": _entry_to_response(entry), "event": event_type}
 
     if not _should_track_file(path):
@@ -599,7 +576,7 @@ async def reconcile_library(library_name: str, root: str, profile: str, profile_
             continue
         seen.add(str(entry))
         library_entry, job = await _record_library_entry(
-            library_name, entry, profile, profile_id, emit_log=False, notify=False
+            library_name, entry, profile, profile_id, emit_log=False
         )
         if job:
             queued += 1
@@ -820,13 +797,14 @@ async def create_library(
     profile = PROFILE_STORE.get(payload.profile_id)
     if profile is None:
         raise HTTPException(status_code=404, detail="Profile not found")
-    if not payload.root.strip():
-        raise HTTPException(status_code=400, detail="Library path is required")
+    root = payload.root.strip()
+    if not root:
+        raise HTTPException(status_code=400, detail="Library root is required")
 
     library = LIBRARY_CONFIG_STORE.upsert(
         LibraryData(
             name=normalized_name,
-            root=payload.root.strip(),
+            root=root,
             depth=payload.depth or "max",
             profile_id=payload.profile_id,
         )
@@ -841,12 +819,9 @@ async def create_library(
     background_tasks.add_task(
         reconcile_library, library.name, library.root, profile.name, profile.id
     )
-    await _emit_library_update("created", {**library.to_payload(), "profile": profile.name})
-    return JSONResponse(
-        {**library.to_payload(), "profile": profile.name},
-        status_code=201,
-        headers=_cache_headers(snapshot),
-    )
+    payload = {**library.to_payload(), "profile": profile.name}
+    await _emit_library_update("created", payload)
+    return JSONResponse(payload, headers=_cache_headers(snapshot), status_code=201)
 
 
 @app.patch("/api/libraries/{library_name}")
@@ -869,9 +844,7 @@ async def delete_library(library_name: str) -> JSONResponse:
     LIBRARY_CONFIG_STORE.delete(library_name)
     snapshot = config_service.delete_library(library_name)
     removed_entries = LIBRARY_STORE.mark_missing(library_name, set())
-    await _emit_library_update(
-        "deleted", {"name": library_name, "removed_entries": removed_entries}
-    )
+    await _emit_library_update("deleted", {"name": library_name, "entries_marked": removed_entries})
     return JSONResponse(
         {"deleted": library_name, "entries_marked": removed_entries},
         headers=_cache_headers(snapshot),
@@ -971,9 +944,8 @@ async def next_job() -> JSONResponse:
     if claimed is None:
         raise HTTPException(status_code=204, detail="No jobs available")
     delivery_id, job = claimed
-    await _sync_entry_from_job(job, LibraryStatus.CONVERTING)
+    _sync_entry_from_job(job, LibraryStatus.CONVERTING)
     _record_job_history(job, JobHistoryStatus.RUNNING)
-    await _emit_job_update(job, event="acquired")
     return JSONResponse(jsonable_encoder(job.model_dump() | {"delivery_id": delivery_id}))
 
 
@@ -985,13 +957,12 @@ async def update_job_status(job_id: str, payload: JobStatusPayload) -> JSONRespo
         raise HTTPException(status_code=404, detail="Job not found")
     completed = payload.status in {jobs.JobStatus.COMPLETED, jobs.JobStatus.FAILED}
     if payload.status == jobs.JobStatus.RUNNING:
-        await _sync_entry_from_job(job, LibraryStatus.CONVERTING, payload.message)
+        _sync_entry_from_job(job, LibraryStatus.CONVERTING, payload.message)
     elif payload.status == jobs.JobStatus.COMPLETED:
-        await _sync_entry_from_job(job, LibraryStatus.CONVERTED, payload.message)
+        _sync_entry_from_job(job, LibraryStatus.CONVERTED, payload.message)
     elif payload.status == jobs.JobStatus.FAILED:
-        await _sync_entry_from_job(job, LibraryStatus.FAILED, payload.message)
+        _sync_entry_from_job(job, LibraryStatus.FAILED, payload.message)
     _record_job_history(job, payload.status, payload.message, completed=completed)
-    await _emit_job_update(job, event="status")
     return JSONResponse(jsonable_encoder(job.model_dump()))
 
 
@@ -1028,7 +999,6 @@ async def list_library_entries(
     library: Optional[str] = None,
     limit: int = 100,
     offset: int = 0,
-    include_total: bool = False,
 ) -> JSONResponse:
     if status and status not in LIBRARY_STATUSES:
         raise HTTPException(status_code=400, detail="Invalid status filter")
@@ -1038,11 +1008,7 @@ async def list_library_entries(
         raise HTTPException(status_code=400, detail="Offset cannot be negative")
 
     entries = LIBRARY_STORE.list_entries(status=status, library=library, limit=limit, offset=offset)
-    payload = jsonable_encoder([_entry_to_response(entry) for entry in entries])
-    if include_total:
-        total = LIBRARY_STORE.count_entries(status=status, library=library)
-        return JSONResponse({"items": payload, "total": total, "limit": limit, "offset": offset})
-    return JSONResponse(payload)
+    return JSONResponse(jsonable_encoder([_entry_to_response(entry) for entry in entries]))
 
 
 @app.patch("/api/library/entries/{entry_id}")
@@ -1061,7 +1027,6 @@ async def update_entry_profile(entry_id: int, payload: EntryProfilePayload) -> J
         output_path=entry.output_path,
         original_missing=entry.original_missing,
     )
-    await _emit_entry_update(updated, event="profile-updated")
     return JSONResponse(jsonable_encoder(_entry_to_response(updated)))
 
 
@@ -1114,8 +1079,6 @@ async def reprocess_entry(
         profile_id=profile_id,
     )
     payload = {"entry": _entry_to_response(updated), "job": job.model_dump()}
-    await _emit_entry_update(updated, event="reprocess")
-    await _emit_job_update(job, event="reprocess")
     return JSONResponse(jsonable_encoder(payload))
 
 
@@ -1152,7 +1115,6 @@ async def remove_original(entry_id: int) -> JSONResponse:
         profile=entry.profile,
         profile_id=entry.profile_id,
     )
-    await _emit_entry_update(updated, event="remove-original")
     return JSONResponse(jsonable_encoder({"entry": _entry_to_response(updated)}))
 
 
