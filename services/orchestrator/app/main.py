@@ -15,7 +15,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from . import config as config_module
 from . import jellyfin, jobs
-from .db import Base, create_session_factory
+from .db import create_session_factory
 from .job_history import JobHistoryEntry, JobHistoryStatus, JobHistoryStore
 from .library_entries import EntryUpdate, LibraryEntry, LibraryEntryStore, LibraryStatus
 from .logs import (
@@ -47,7 +47,6 @@ LEGACY_CONFIG_PATH = Path(os.environ.get("CONFIG_PATH", "/app/config/settings.ya
 LOG_STORE = LogStore(LOG_DB_PATH)
 LIBRARY_DB_PATH = Path(os.environ.get("LIBRARY_DB_PATH", "/app/logs/library.db")).resolve()
 SESSION_FACTORY, ENGINE = create_session_factory(LIBRARY_DB_PATH)
-Base.metadata.create_all(ENGINE)
 PROFILE_STORE = ProfileStore(SESSION_FACTORY)
 LIBRARY_CONFIG_STORE = LibraryConfigStore(SESSION_FACTORY)
 LIBRARY_STORE = LibraryEntryStore(LIBRARY_DB_PATH, session_factory=SESSION_FACTORY, engine=ENGINE)
@@ -708,20 +707,12 @@ async def update_profile(profile_id: int, payload: EncodingUpdatePayload) -> JSO
 
 @app.delete("/api/profiles/{profile_id}")
 async def delete_profile(profile_id: int) -> JSONResponse:
-    in_use = [
-        library.name
-        for library in LIBRARY_CONFIG_STORE.list_libraries()
-        if library.profile_id == profile_id
-    ]
-    if in_use:
-        raise HTTPException(
-            status_code=409,
-            detail=f"Profile in use by libraries: {', '.join(in_use)}",
-        )
     try:
         PROFILE_STORE.delete(profile_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="Profile not found")
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
     return JSONResponse(status_code=204, content=None)
 
 
@@ -895,11 +886,19 @@ async def resume_queue() -> JSONResponse:
 
 @app.get("/api/library/entries")
 async def list_library_entries(
-    status: Optional[str] = None, library: Optional[str] = None
+    status: Optional[str] = None,
+    library: Optional[str] = None,
+    limit: int = 100,
+    offset: int = 0,
 ) -> JSONResponse:
     if status and status not in LIBRARY_STATUSES:
         raise HTTPException(status_code=400, detail="Invalid status filter")
-    entries = LIBRARY_STORE.list_entries(status=status, library=library)
+    if limit <= 0:
+        raise HTTPException(status_code=400, detail="Limit must be greater than zero")
+    if offset < 0:
+        raise HTTPException(status_code=400, detail="Offset cannot be negative")
+
+    entries = LIBRARY_STORE.list_entries(status=status, library=library, limit=limit, offset=offset)
     return JSONResponse(jsonable_encoder([_entry_to_response(entry) for entry in entries]))
 
 

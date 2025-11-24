@@ -7,7 +7,7 @@ from pathlib import Path
 from threading import RLock
 from typing import Iterable, List, Optional
 
-from sqlalchemy import Boolean, Column, DateTime, Integer, String, inspect, select, text
+from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Integer, String, select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import sessionmaker
 
@@ -31,7 +31,7 @@ class LibraryEntry(Base):
     path = Column(String, unique=True, nullable=False)
     library = Column(String, nullable=False)
     profile = Column(String, nullable=False)
-    profile_id = Column(Integer, nullable=True)
+    profile_id = Column(Integer, ForeignKey("encoding_profiles.id"), nullable=True, index=True)
     status = Column(String, nullable=False, default=LibraryStatus.PENDING)
     output_path = Column(String, nullable=True)
     last_error = Column(String, nullable=True)
@@ -86,23 +86,18 @@ class LibraryEntryStore:
             self._engine = engine or self._Session.kw.get("bind")
             if self._engine is None:
                 _, self._engine = create_session_factory(db_path)
-        Base.metadata.create_all(self._engine)
-        self._ensure_profile_column()
         LOGGER.info("Library entry store initialized at %s", db_path)
 
     def _session(self):
         return self._Session()
 
-    def _ensure_profile_column(self) -> None:
-        inspector = inspect(self._engine)
-        columns = {column["name"] for column in inspector.get_columns("library_entries")}
-        if "profile_id" not in columns:
-            with self._engine.connect() as conn:
-                conn.execute(text("ALTER TABLE library_entries ADD COLUMN profile_id INTEGER"))
-                conn.commit()
-
     def list_entries(
-        self, *, status: Optional[str] = None, library: Optional[str] = None
+        self,
+        *,
+        status: Optional[str] = None,
+        library: Optional[str] = None,
+        limit: Optional[int] = None,
+        offset: Optional[int] = None,
     ) -> List[LibraryEntry]:
         stmt = select(LibraryEntry)
         if status:
@@ -110,6 +105,10 @@ class LibraryEntryStore:
         if library:
             stmt = stmt.where(LibraryEntry.library == library)
         stmt = stmt.order_by(LibraryEntry.updated_at.desc())
+        if limit is not None:
+            stmt = stmt.limit(limit)
+        if offset is not None:
+            stmt = stmt.offset(offset)
         with self._lock, self._session() as session:
             return list(session.scalars(stmt).all())
 

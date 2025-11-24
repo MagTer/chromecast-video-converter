@@ -176,6 +176,22 @@ class ProfileStore:
             profile = session.get(EncodingProfile, profile_id)
             if profile is None:
                 raise KeyError(profile_id)
+
+            libraries = session.scalars(
+                select(LibraryConfig.name).where(LibraryConfig.profile_id == profile_id)
+            ).all()
+            if libraries:
+                joined = ", ".join(libraries)
+                raise ValueError(f"Profile in use by libraries: {joined}")
+
+            from .library_entries import LibraryEntry  # Imported lazily to avoid cycle
+
+            linked_entry = session.scalar(
+                select(LibraryEntry.id).where(LibraryEntry.profile_id == profile_id).limit(1)
+            )
+            if linked_entry is not None:
+                raise ValueError("Profile in use by library entries")
+
             session.delete(profile)
             session.commit()
 
