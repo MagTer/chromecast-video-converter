@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
+import sqlalchemy
 from fastapi import BackgroundTasks, FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.encoders import jsonable_encoder
 from fastapi.middleware.cors import CORSMiddleware
@@ -17,8 +18,6 @@ from . import config as config_module
 from . import jellyfin, jobs
 from .db import Base, create_session_factory
 from .job_history import JobHistoryEntry, JobHistoryStatus, JobHistoryStore
-import sqlalchemy
-
 from .library_entries import EntryUpdate, LibraryEntry, LibraryEntryStore, LibraryStatus
 from .logs import (
     LogEntry,
@@ -39,15 +38,29 @@ from .profiles import (
 
 logging.addLevelName(logging.DEBUG, "VERBOSE")
 
-LOG_DB_PATH = Path(os.environ.get("LOG_DB_PATH", "/app/data/events.db")).resolve()
-CONFIG_DB_PATH = Path(os.environ.get("CONFIG_DB_PATH", "/app/data/config.db")).resolve()
+
+def _resolve_data_dir() -> Path:
+    default = Path(os.environ.get("DATA_DIR", "/app/data")).resolve()
+    try:
+        default.mkdir(parents=True, exist_ok=True)
+        return default
+    except OSError:
+        fallback = Path("./data").resolve()
+        fallback.mkdir(parents=True, exist_ok=True)
+        return fallback
+
+
+DATA_DIR = _resolve_data_dir()
+
+LOG_DB_PATH = Path(os.environ.get("LOG_DB_PATH", DATA_DIR / "events.db")).resolve()
+CONFIG_DB_PATH = Path(os.environ.get("CONFIG_DB_PATH", DATA_DIR / "config.db")).resolve()
 CONFIG_TEMPLATE_PATH = Path(
     os.environ.get("CONFIG_TEMPLATE_PATH", "/app/config/settings.yaml.template")
 ).resolve()
 LEGACY_CONFIG_PATH = Path(os.environ.get("CONFIG_PATH", "/app/config/settings.yaml")).resolve()
 
 LOG_STORE = LogStore(LOG_DB_PATH)
-LIBRARY_DB_PATH = Path(os.environ.get("LIBRARY_DB_PATH", "/app/data/library.db")).resolve()
+LIBRARY_DB_PATH = Path(os.environ.get("LIBRARY_DB_PATH", DATA_DIR / "library.db")).resolve()
 SESSION_FACTORY, ENGINE = create_session_factory(LIBRARY_DB_PATH)
 PROFILE_STORE = ProfileStore(SESSION_FACTORY)
 LIBRARY_CONFIG_STORE = LibraryConfigStore(SESSION_FACTORY)
@@ -126,13 +139,26 @@ def _ensure_schema_revision(engine) -> None:
     if missing:
         # Manual patch for stale DBs that report head but lack columns
         alter_statements = {
-            "bitrate": "ALTER TABLE encoding_profiles ADD COLUMN bitrate TEXT NOT NULL DEFAULT '8M'",
-            "bframes": "ALTER TABLE encoding_profiles ADD COLUMN bframes INTEGER NOT NULL DEFAULT 2",
-            "lookahead": "ALTER TABLE encoding_profiles ADD COLUMN lookahead INTEGER NOT NULL DEFAULT 24",
-            "adaptive_b_frames": "ALTER TABLE encoding_profiles ADD COLUMN adaptive_b_frames BOOLEAN NOT NULL DEFAULT 1",
-            "aq": "ALTER TABLE encoding_profiles ADD COLUMN aq BOOLEAN NOT NULL DEFAULT 1",
-            "spatial_aq": "ALTER TABLE encoding_profiles ADD COLUMN spatial_aq BOOLEAN NOT NULL DEFAULT 1",
-            "temporal_aq": "ALTER TABLE encoding_profiles ADD COLUMN temporal_aq BOOLEAN NOT NULL DEFAULT 1",
+            "bitrate": (
+                "ALTER TABLE encoding_profiles ADD COLUMN " "bitrate TEXT NOT NULL DEFAULT '8M'"
+            ),
+            "bframes": (
+                "ALTER TABLE encoding_profiles ADD COLUMN " "bframes INTEGER NOT NULL DEFAULT 2"
+            ),
+            "lookahead": (
+                "ALTER TABLE encoding_profiles ADD COLUMN " "lookahead INTEGER NOT NULL DEFAULT 24"
+            ),
+            "adaptive_b_frames": (
+                "ALTER TABLE encoding_profiles ADD COLUMN "
+                "adaptive_b_frames BOOLEAN NOT NULL DEFAULT 1"
+            ),
+            "aq": ("ALTER TABLE encoding_profiles ADD COLUMN aq BOOLEAN NOT NULL DEFAULT 1"),
+            "spatial_aq": (
+                "ALTER TABLE encoding_profiles ADD COLUMN " "spatial_aq BOOLEAN NOT NULL DEFAULT 1"
+            ),
+            "temporal_aq": (
+                "ALTER TABLE encoding_profiles ADD COLUMN " "temporal_aq BOOLEAN NOT NULL DEFAULT 1"
+            ),
         }
         with engine.begin() as conn:
             for column in missing:
@@ -142,7 +168,9 @@ def _ensure_schema_revision(engine) -> None:
 
         # Final check
         with engine.connect() as conn:
-            rows = conn.execute(sqlalchemy.text("PRAGMA table_info('encoding_profiles')")).fetchall()
+            rows = conn.execute(
+                sqlalchemy.text("PRAGMA table_info('encoding_profiles')")
+            ).fetchall()
         present = {row[1] for row in rows}
         remaining = required_columns - present
         if remaining:

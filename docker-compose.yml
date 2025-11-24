@@ -9,20 +9,20 @@ services:
     volumes:
       - ./services/orchestrator/app:/app/app:ro
       - ./config:/app/config
+      - ./data:/app/data
       - ${PATH_MOVIES}:/watch/movies:ro
       - ${PATH_SERIES}:/watch/series:ro
       - ${PATH_MOVIES}:/media/movies:ro
       - ${PATH_SERIES}:/media/series:ro
-      - ./logs:/app/logs
     depends_on:
       - redis
     environment:
       - PORT=9000
       - JOB_QUEUE=redis://redis:6379/0
+      - DATA_DIR=/app/data
       - CONFIG_DB_PATH=/app/data/config.db
       - CONFIG_TEMPLATE_PATH=/app/config/settings.yaml.template
       - CONFIG_PATH=/app/config/settings.yaml
-      - DATABASE_URL=sqlite:////app/config/orchestrator.db
 
   folder-watcher:
     build:
