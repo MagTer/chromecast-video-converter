@@ -85,8 +85,12 @@ def _detect_wsl2() -> bool:
 HOST_ENVIRONMENT = {"is_wsl2": _detect_wsl2()}
 
 
-def _require_schema_revision(engine) -> None:
-    """Fail fast when the database schema is older than the application models."""
+def _ensure_schema_revision(engine) -> None:
+    """Auto-upgrade schema if critical NVENC columns are missing.
+
+    This makes the container self-healing when a mounted DB predates the
+    latest migration; it runs alembic against the same URL the ORM uses.
+    """
 
     required_columns = {
         "bitrate",
@@ -99,19 +103,40 @@ def _require_schema_revision(engine) -> None:
     }
     with engine.connect() as conn:
         rows = conn.execute(sqlalchemy.text("PRAGMA table_info('encoding_profiles')")).fetchall()
-    if not rows:
+    present = {row[1] for row in rows}
+    missing = required_columns - present
+    if not missing:
         return
+
+    try:
+        from alembic import command
+        from alembic.config import Config
+
+        cfg = Config(str((Path(__file__).parent / ".." / "alembic.ini").resolve()))
+        cfg.set_main_option("sqlalchemy.url", str(engine.url))
+        command.upgrade(cfg, "head")
+    except Exception as exc:  # noqa: BLE001
+        details = ", ".join(sorted(missing))
+        raise RuntimeError(
+            "Config DB schema is outdated (missing columns: "
+            f"{details}). Auto-migration failed: {exc}. "
+            "Run 'alembic upgrade head' inside the orchestrator container."
+        ) from exc
+
+    # Re-check after migration
+    with engine.connect() as conn:
+        rows = conn.execute(sqlalchemy.text("PRAGMA table_info('encoding_profiles')")).fetchall()
     present = {row[1] for row in rows}
     missing = required_columns - present
     if missing:
         details = ", ".join(sorted(missing))
         raise RuntimeError(
-            "Config DB schema is outdated (missing columns: "
-            f"{details}). Run 'alembic upgrade head' inside the orchestrator container."
+            "Config DB schema is still missing columns after migration: "
+            f"{details}. Check alembic configuration."
         )
 
 
-_require_schema_revision(ENGINE)
+_ensure_schema_revision(ENGINE)
 
 
 class WebsocketNotifier:
