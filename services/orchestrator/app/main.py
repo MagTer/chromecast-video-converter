@@ -107,6 +107,7 @@ def _ensure_schema_revision(engine) -> None:
 
     required_columns = {
         "codec",
+        "definition",
         "profile_tier",
         "max_resolution",
         "bitrate",
@@ -153,8 +154,10 @@ def _ensure_schema_revision(engine) -> None:
         # Manual patch for stale DBs that report head but lack columns
         alter_statements = {
             "codec": (
-                "ALTER TABLE encoding_profiles ADD COLUMN "
-                "codec TEXT NOT NULL DEFAULT 'h264'"
+                "ALTER TABLE encoding_profiles ADD COLUMN " "codec TEXT NOT NULL DEFAULT 'h264'"
+            ),
+            "definition": (
+                "ALTER TABLE encoding_profiles ADD COLUMN " "definition TEXT NOT NULL DEFAULT '{}'"
             ),
             "profile_tier": (
                 "ALTER TABLE encoding_profiles ADD COLUMN "
@@ -180,8 +183,7 @@ def _ensure_schema_revision(engine) -> None:
             "rc": "ALTER TABLE encoding_profiles ADD COLUMN rc TEXT NOT NULL DEFAULT 'vbr_hq'",
             "level": "ALTER TABLE encoding_profiles ADD COLUMN level TEXT NOT NULL DEFAULT '4.1'",
             "max_fps": (
-                "ALTER TABLE encoding_profiles ADD COLUMN "
-                "max_fps INTEGER NOT NULL DEFAULT 30"
+                "ALTER TABLE encoding_profiles ADD COLUMN " "max_fps INTEGER NOT NULL DEFAULT 30"
             ),
             "bframes": (
                 "ALTER TABLE encoding_profiles ADD COLUMN " "bframes INTEGER NOT NULL DEFAULT 2"
@@ -517,6 +519,7 @@ def _profile_data_from_payload(
     profile_data = ProfileData(
         name=payload.name,
         codec=validated.codec,
+        definition="{}",
         profile_tier=validated.profile,
         max_resolution=validated.resolution,
         bitrate=validated.bitrate,

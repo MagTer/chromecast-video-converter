@@ -20,6 +20,7 @@ class EncodingProfile(Base):
     id = Column(Integer, primary_key=True)
     name = Column(String, unique=True, nullable=False)
     codec = Column(String, nullable=False)
+    definition = Column(String, nullable=False, default="{}")
     profile_tier = Column(String, nullable=False, default="high")
     max_resolution = Column(String, nullable=False)
     bitrate = Column(String, nullable=False, default="8M")
@@ -119,6 +120,7 @@ class ProfileData:
     audio_codec: str
     audio_bitrate: str
     audio_channels: int
+    definition: str = "{}"
 
 
 @dataclass

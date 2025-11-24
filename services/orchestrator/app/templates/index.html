@@ -166,6 +166,39 @@
       width: 100%;
     }
 
+    label {
+      display: flex;
+      flex-direction: column;
+      gap: 0.25rem;
+    }
+
+    .label-title {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.35rem;
+      font-weight: 700;
+    }
+
+    .info-icon {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 18px;
+      height: 18px;
+      border-radius: 999px;
+      border: 1px solid #334155;
+      color: var(--muted);
+      cursor: help;
+      font-size: 0.75rem;
+      line-height: 1;
+    }
+
+    .info-icon:hover {
+      color: var(--text);
+      border-color: var(--accent);
+      background: rgba(37, 99, 235, 0.08);
+    }
+
     .grid-two {
       display: grid;
       gap: 0.75rem;
@@ -460,7 +493,14 @@
               <input id="profile-name" placeholder="movies" />
             </label>
             <label>
-              Rate control
+              <div class="label-title">
+                Rate control
+                <span
+                  class="info-icon"
+                  title="Constant Quality keeps a fixed quality (lower CQ = better). VBR targets an average bitrate; VBR HQ uses two-pass for steadier results."
+                  aria-label="Rate control help"
+                >ⓘ</span>
+              </div>
               <select id="profile-rc">
                 <option value="cq">CQ (Constant Quality)</option>
                 <option value="vbr">VBR (1-pass)</option>
@@ -468,7 +508,7 @@
               </select>
             </label>
             <div id="rc-warning" class="warn" style="display:none;">
-              VBR HQ may not be fully supported under WSL2. Multipass may silently fall back to single-pass.
+              VBR HQ may not be fully supported under WSL2. The worker will fall back to single-pass VBR and disable multipass automatically.
             </div>
             <label data-rc-field="cq">
               Constant quality (CQ)
@@ -510,7 +550,14 @@
               </select>
             </label>
             <label>
-              NVENC preset (GPU-only)
+              <div class="label-title">
+                NVENC preset (GPU-only)
+                <span
+                  class="info-icon"
+                  title="Controls encode speed vs quality. P4 is fastest; P7 is highest quality."
+                  aria-label="NVENC preset help"
+                >ⓘ</span>
+              </div>
               <select id="profile-preset">
                 <option value="p4">P4 (fastest)</option>
                 <option value="p5">P5</option>
@@ -519,7 +566,14 @@
               </select>
             </label>
             <label>
-              H.264 profile
+              <div class="label-title">
+                H.264 profile
+                <span
+                  class="info-icon"
+                  title="Baseline works on older devices (no B-frames). High gives best quality and is Chromecast-safe."
+                  aria-label="H.264 profile help"
+                >ⓘ</span>
+              </div>
               <select id="profile-tier">
                 <option value="baseline">Baseline</option>
                 <option value="main">Main</option>
@@ -527,7 +581,14 @@
               </select>
             </label>
             <label>
-              Level
+              <div class="label-title">
+                Level
+                <span
+                  class="info-icon"
+                  title="Sets the max resolution and frame rate allowed. Example: 4.2 supports 1080p at 60 fps."
+                  aria-label="Level help"
+                >ⓘ</span>
+              </div>
               <select id="profile-level">
                 <option value="3.1">3.1</option>
                 <option value="4.0">4.0</option>
@@ -536,14 +597,28 @@
               </select>
             </label>
             <label>
-              Resolution
+              <div class="label-title">
+                Resolution
+                <span
+                  class="info-icon"
+                  title="Output size. Higher resolutions may need a higher H.264 level."
+                  aria-label="Resolution help"
+                >ⓘ</span>
+              </div>
               <select id="profile-resolution">
                 <option value="1280x720">1280x720</option>
                 <option value="1920x1080">1920x1080</option>
               </select>
             </label>
             <label>
-              Max FPS
+              <div class="label-title">
+                Max FPS
+                <span
+                  class="info-icon"
+                  title="Caps motion smoothness. 60 fps needs a higher level than 30 fps."
+                  aria-label="FPS help"
+                >ⓘ</span>
+              </div>
               <select id="profile-maxfps">
                 <option value="24">24</option>
                 <option value="30">30</option>
@@ -551,7 +626,14 @@
               </select>
             </label>
             <label>
-              B-frames (0–3)
+              <div class="label-title">
+                B-frames (0–3)
+                <span
+                  class="info-icon"
+                  title="Extra reference frames that boost compression but can add latency."
+                  aria-label="B-frames help"
+                >ⓘ</span>
+              </div>
               <select id="profile-bframes">
                 <option value="0">0</option>
                 <option value="1">1</option>
@@ -560,35 +642,70 @@
               </select>
             </label>
             <label>
-              Lookahead (0–32)
+              <div class="label-title">
+                Lookahead (0–32)
+                <span
+                  class="info-icon"
+                  title="How many upcoming frames the encoder peeks at to make smarter decisions."
+                  aria-label="Lookahead help"
+                >ⓘ</span>
+              </div>
               <div class="slider-row">
                 <input id="profile-lookahead" type="range" min="0" max="32" value="24" />
                 <span id="lookahead-value" class="hint">24</span>
               </div>
             </label>
             <label>
-              Adaptive B-frames
+              <div class="label-title">
+                Adaptive B-frames
+                <span
+                  class="info-icon"
+                  title="Let the encoder pick how many B-frames to use per scene. Needs lookahead and at least 1 B-frame."
+                  aria-label="Adaptive B-frames help"
+                >ⓘ</span>
+              </div>
               <select id="profile-adaptive-bframes">
                 <option value="1" selected>On</option>
                 <option value="0">Off</option>
               </select>
             </label>
             <label>
-              Adaptive Quantization (AQ)
+              <div class="label-title">
+                Adaptive Quantization (AQ)
+                <span
+                  class="info-icon"
+                  title="Automatically shifts bits to detailed or complex areas so they stay sharp."
+                  aria-label="AQ help"
+                >ⓘ</span>
+              </div>
               <select id="profile-aq">
                 <option value="1" selected>On</option>
                 <option value="0">Off</option>
               </select>
             </label>
             <label>
-              Spatial AQ
+              <div class="label-title">
+                Spatial AQ
+                <span
+                  class="info-icon"
+                  title="Prioritizes texture and detail within each frame when AQ is on."
+                  aria-label="Spatial AQ help"
+                >ⓘ</span>
+              </div>
               <select id="profile-spatial-aq">
                 <option value="1" selected>On</option>
                 <option value="0">Off</option>
               </select>
             </label>
             <label>
-              Temporal AQ
+              <div class="label-title">
+                Temporal AQ
+                <span
+                  class="info-icon"
+                  title="Focuses quality on motion over time to reduce flicker when AQ is on."
+                  aria-label="Temporal AQ help"
+                >ⓘ</span>
+              </div>
               <select id="profile-temporal-aq">
                 <option value="1" selected>On</option>
                 <option value="0">Off</option>
@@ -812,17 +929,106 @@
       return 4.2;
     }
 
-    function enforceLevelConstraints() {
-      const minLevel = minimumLevelFor(profileResolutionSelect.value, profileFpsSelect.value);
-      profileLevelSelect.querySelectorAll("option").forEach((option) => {
-        option.disabled = parseFloat(option.value) < minLevel;
+    function resolutionPixels(resolution) {
+      const [w, h] = String(resolution || "0x0")
+        .split("x")
+        .map((part) => Number(part) || 0);
+      return w * h;
+    }
+
+    function pickClosestFps(allowedValues, preferred) {
+      if (!allowedValues.length) return null;
+      const sorted = [...allowedValues].sort((a, b) => a - b);
+      const notAbovePreferred = sorted.filter((value) => value <= preferred);
+      return (notAbovePreferred.pop() ?? sorted[sorted.length - 1]) || sorted[0];
+    }
+
+    function enforceLevelConstraints(trigger = "load") {
+      const preferredResolution = profileResolutionSelect.value;
+      const preferredFps = Number(profileFpsSelect.value || "30");
+      const selectedLevel = parseFloat(profileLevelSelect.value || "0") || 0;
+      const requiredLevel = minimumLevelFor(preferredResolution, preferredFps);
+
+      let targetLevel = selectedLevel || requiredLevel;
+      if (trigger !== "level" && targetLevel < requiredLevel) {
+        targetLevel = requiredLevel;
+        const levelOption = Array.from(profileLevelSelect.options).find(
+          (option) => parseFloat(option.value) >= requiredLevel,
+        );
+        if (levelOption) {
+          profileLevelSelect.value = levelOption.value;
+        }
+      }
+
+      const fpsOptions = Array.from(profileFpsSelect.options).map((option) => ({
+        value: Number(option.value),
+        option,
+      }));
+      const resolutionOptions = Array.from(profileResolutionSelect.options);
+
+      const allowedResolutions = resolutionOptions.filter((option) =>
+        fpsOptions.some(({ value: fps }) => minimumLevelFor(option.value, fps) <= targetLevel),
+      );
+
+      resolutionOptions.forEach((option) => {
+        option.disabled = !allowedResolutions.includes(option);
       });
-      const chosen =
-        Array.from(profileLevelSelect.options).find(
-          (option) => parseFloat(option.value) >= minLevel,
-        )?.value || profileLevelSelect.options[profileLevelSelect.options.length - 1]?.value;
-      if (chosen) {
-        profileLevelSelect.value = chosen;
+
+      let resolution = preferredResolution;
+      if (!allowedResolutions.some((opt) => opt.value === resolution)) {
+        resolution =
+          allowedResolutions
+            .sort((a, b) => resolutionPixels(b.value) - resolutionPixels(a.value))
+            .find(Boolean)?.value || resolution;
+        if (resolution) {
+          profileResolutionSelect.value = resolution;
+        }
+      }
+
+      const allowedFpsValues = fpsOptions
+        .filter(({ value }) => minimumLevelFor(resolution, value) <= targetLevel)
+        .map(({ value }) => value);
+
+      fpsOptions.forEach(({ option, value }) => {
+        option.disabled = !allowedFpsValues.includes(value);
+      });
+
+      let fps = preferredFps;
+      if (!allowedFpsValues.includes(fps)) {
+        const fallbackFps = pickClosestFps(allowedFpsValues, preferredFps);
+        if (fallbackFps !== null && fallbackFps !== undefined) {
+          fps = fallbackFps;
+          profileFpsSelect.value = String(fps);
+        }
+      }
+
+      const minimumLevel = minimumLevelFor(resolution, fps);
+      profileLevelSelect.querySelectorAll("option").forEach((option) => {
+        option.disabled = parseFloat(option.value) < minimumLevel;
+      });
+      if (parseFloat(profileLevelSelect.value) < minimumLevel) {
+        const bumpedLevel =
+          Array.from(profileLevelSelect.options).find(
+            (option) => parseFloat(option.value) >= minimumLevel,
+          )?.value || profileLevelSelect.value;
+        profileLevelSelect.value = bumpedLevel;
+        targetLevel = parseFloat(bumpedLevel) || targetLevel;
+      }
+
+      // If the user explicitly lowered the level, keep resolution/FPS within that cap.
+      if (trigger === "level") {
+        const stillTooHigh =
+          minimumLevelFor(profileResolutionSelect.value, Number(profileFpsSelect.value || "0")) >
+          targetLevel;
+        if (stillTooHigh) {
+          const fallback = pickClosestFps(
+            allowedFpsValues,
+            Number(profileFpsSelect.value || preferredFps),
+          );
+          if (fallback !== null && fallback !== undefined) {
+            profileFpsSelect.value = String(fallback);
+          }
+        }
       }
     }
 
@@ -875,7 +1081,10 @@
     function updateFfmpegPreview() {
       if (!ffmpegPreview) return;
 
-      const rc = profileRcSelect.value;
+      let rc = profileRcSelect.value;
+      if (rc === "vbr_hq" && isWsl2) {
+        rc = "vbr";
+      }
       const resolution = profileResolutionSelect.value;
       const [, height = "720"] = String(resolution || "1280x720").split("x");
       const filterParts = [
@@ -1619,12 +1828,12 @@
     });
 
     profileResolutionSelect.addEventListener("change", () => {
-      enforceLevelConstraints();
+      enforceLevelConstraints("resolution");
       updateFfmpegPreview();
     });
 
     profileFpsSelect.addEventListener("change", () => {
-      enforceLevelConstraints();
+      enforceLevelConstraints("fps");
       updateFfmpegPreview();
     });
 
@@ -1663,7 +1872,12 @@
       profileLevelSelect,
       audioBitrateSelect,
     ].forEach((element) => {
-      element.addEventListener("change", updateFfmpegPreview);
+      element.addEventListener("change", (event) => {
+        if (event.target === profileLevelSelect) {
+          enforceLevelConstraints("level");
+        }
+        updateFfmpegPreview();
+      });
     });
 
     document.querySelector("#log-config-form").addEventListener("submit", async (event) => {

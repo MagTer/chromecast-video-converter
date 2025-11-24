@@ -152,6 +152,13 @@ if HOST_ENVIRONMENT.get("is_wsl2"):
     LOGGER.warning(
         "Detected WSL2 environment; NVENC rate-control and multipass support may be limited"
     )
+    if NVENC_CAPABILITIES.get("rc_vbr_hq") or NVENC_CAPABILITIES.get("multipass_fullres"):
+        NVENC_CAPABILITIES["rc_vbr_hq"] = False
+        NVENC_CAPABILITIES["multipass_fullres"] = False
+        LOGGER.warning(
+            "Disabling NVENC VBR HQ and multipass; WSL2 drivers often reject that combination. "
+            "Worker will fall back to single-pass VBR."
+        )
 
 CONFIG_PATH = Path(os.environ.get("CONFIG_PATH", "/app/config/settings.yaml"))
 PROFILES: dict = {}
@@ -460,6 +467,7 @@ def build_ffmpeg_command(  # noqa: C901
     bufsize = profile.get("bufsize", "16M")
     level = profile.get("level", "4.1")
     h264_profile = str(profile.get("profile", "high"))
+    h264_profile_lower = h264_profile.lower()
     max_fps = max(1, int(profile.get("max_fps", 30) or 30))
     preset = str(profile.get("preset", "p6"))
     rc_mode = str(profile.get("rc", "vbr_hq") or "vbr_hq").lower()
@@ -467,11 +475,13 @@ def build_ffmpeg_command(  # noqa: C901
         rc_mode = "vbr"
     cq = str(profile.get("cq", 18))
     bframes = int(profile.get("bframes", 2) or 0)
-    if h264_profile.lower() == "baseline":
+    if h264_profile_lower == "baseline":
         bframes = 0
     lookahead = int(profile.get("lookahead", 24) or 0)
     adaptive_b_frames = bool(profile.get("adaptive_b_frames", True))
     adaptive_b_frames = adaptive_b_frames and lookahead > 0 and bframes > 0
+    if h264_profile_lower == "baseline":
+        adaptive_b_frames = False
     aq_enabled = bool(profile.get("aq", True))
     spatial_aq = aq_enabled and bool(profile.get("spatial_aq", True))
     temporal_aq = aq_enabled and bool(profile.get("temporal_aq", True))
