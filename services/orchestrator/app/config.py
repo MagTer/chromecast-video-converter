@@ -117,6 +117,40 @@ def _validate_bitrates(bitrate: str, max_bitrate: str, bufsize: str, audio_bitra
         raise ValueError("Target bitrate must not exceed the configured maxrate.")
 
 
+def _sanitize_profiles(raw: dict) -> dict:
+    profiles = raw.get("profiles")
+    if not isinstance(profiles, dict):
+        return raw
+
+    for name, profile in profiles.items():
+        if not isinstance(profile, dict):
+            continue
+        bitrate = profile.get("bitrate")
+        maxrate = profile.get("max_bitrate")
+        if maxrate is None:
+            continue
+        try:
+            maxrate_int = _bitrate_to_int(str(maxrate))
+        except Exception:  # noqa: BLE001
+            continue
+
+        if bitrate is None:
+            profile["bitrate"] = str(maxrate)
+            continue
+
+        try:
+            bitrate_int = _bitrate_to_int(str(bitrate))
+        except Exception:  # noqa: BLE001
+            profile["bitrate"] = str(maxrate)
+            continue
+
+        if bitrate_int > maxrate_int:
+            profile["bitrate"] = str(maxrate)
+
+    raw["profiles"] = profiles
+    return raw
+
+
 def _validate_bframe_chain(
     profile: str, bframes: int, lookahead: int, adaptive_b_frames: bool
 ) -> None:
@@ -350,7 +384,7 @@ class ConfigStore:
             ).fetchone()
         if row is None:
             raise FileNotFoundError("Configuration has not been initialized")
-        raw = json.loads(row["value"])
+        raw = _sanitize_profiles(json.loads(row["value"]))
         try:
             config = QualityConfig(**raw)
         except ValidationError as exc:
