@@ -7,7 +7,7 @@ from pathlib import Path
 from threading import RLock
 from typing import Iterable, List, Optional
 
-from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Integer, String, select
+from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Integer, String, func, select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import sessionmaker
 
@@ -62,8 +62,8 @@ class EntryUpdate:
     path: str
     library: str
     profile: str
-    profile_id: Optional[int] = None
     status: str
+    profile_id: Optional[int] = None
     output_path: Optional[str] = None
     last_error: Optional[str] = None
     last_job_id: Optional[str] = None
@@ -111,6 +111,15 @@ class LibraryEntryStore:
             stmt = stmt.offset(offset)
         with self._lock, self._session() as session:
             return list(session.scalars(stmt).all())
+
+    def count_entries(self, *, status: Optional[str] = None, library: Optional[str] = None) -> int:
+        stmt = select(func.count()).select_from(LibraryEntry)
+        if status:
+            stmt = stmt.where(LibraryEntry.status == status)
+        if library:
+            stmt = stmt.where(LibraryEntry.library == library)
+        with self._lock, self._session() as session:
+            return int(session.scalar(stmt) or 0)
 
     def get(self, entry_id: int) -> Optional[LibraryEntry]:
         with self._lock, self._session() as session:

@@ -8,6 +8,8 @@ EVENT_BUFFER_SECONDS="${EVENT_BUFFER_SECONDS:-0}"
 EVENT_RETRY_ATTEMPTS="${EVENT_RETRY_ATTEMPTS:-5}"
 EVENT_RETRY_BACKOFF_SECONDS="${EVENT_RETRY_BACKOFF_SECONDS:-2}"
 ROOT_RETRY_SECONDS="${ROOT_RETRY_SECONDS:-5}"
+EVENT_SPOOL_FILE="${EVENT_SPOOL_FILE:-/tmp/folder-watcher-spool.jsonl}"
+EVENT_SPOOL_MAX_BYTES="${EVENT_SPOOL_MAX_BYTES:-10485760}"
 
 log() {
   local level="$1" message="$2"
@@ -44,6 +46,41 @@ done
 
 log_info "Folder watcher starting. Monitoring roots: ${WATCH_ROOTS}"
 log_info "Reporting to orchestrator at ${ORCHESTRATOR_URL}"
+log_info "Spooling undelivered events to ${EVENT_SPOOL_FILE} (cap ${EVENT_SPOOL_MAX_BYTES} bytes)"
+
+replay_spool() {
+  if [[ ! -s "${EVENT_SPOOL_FILE}" ]]; then
+    return
+  fi
+
+  log_info "Replaying buffered events from ${EVENT_SPOOL_FILE}"
+  local tmp
+  tmp="${EVENT_SPOOL_FILE}.pending"
+  : >"${tmp}"
+
+  while IFS= read -r line || [[ -n "${line}" ]]; do
+    [[ -z "${line}" ]] && continue
+    if ! send_payload "${line}"; then
+      echo "${line}" >>"${tmp}"
+    fi
+  done <"${EVENT_SPOOL_FILE}"
+
+  mv "${tmp}" "${EVENT_SPOOL_FILE}"
+}
+
+trim_spool() {
+  if [[ ! -f "${EVENT_SPOOL_FILE}" ]]; then
+    return
+  fi
+  local size
+  size=$(stat -c %s "${EVENT_SPOOL_FILE}" 2>/dev/null || echo 0)
+  if (( size <= EVENT_SPOOL_MAX_BYTES )); then
+    return
+  fi
+  log_warn "Spool exceeded ${EVENT_SPOOL_MAX_BYTES} bytes; trimming to most recent chunk"
+  tail -c "${EVENT_SPOOL_MAX_BYTES}" "${EVENT_SPOOL_FILE}" >"${EVENT_SPOOL_FILE}.trim"
+  mv "${EVENT_SPOOL_FILE}.trim" "${EVENT_SPOOL_FILE}"
+}
 
 declare -a EVENT_QUEUE=()
 
@@ -57,7 +94,7 @@ flush_queue() {
   joined="${joined:1}"
   payload="{\"events\":[${joined}]}"
   EVENT_QUEUE=()
-  send_payload "${payload}"
+  deliver_payload "${payload}"
 }
 
 trap flush_queue EXIT
@@ -83,12 +120,29 @@ send_payload() {
   done
 }
 
+persist_payload() {
+  local payload="$1"
+  mkdir -p "$(dirname "${EVENT_SPOOL_FILE}")"
+  echo "${payload}" >>"${EVENT_SPOOL_FILE}"
+  trim_spool
+}
+
+deliver_payload() {
+  local payload="$1"
+  if send_payload "${payload}"; then
+    return 0
+  fi
+  log_warn "Persisting ${#payload} bytes of events to spool after retries"
+  persist_payload "${payload}"
+  return 1
+}
+
 enqueue_event() {
   local event_json="$1"
   if (( EVENT_BUFFER_SECONDS > 0 )); then
     EVENT_QUEUE+=("${event_json}")
   else
-    send_payload "{\"events\":[${event_json}]}"
+    deliver_payload "{\"events\":[${event_json}]}"
   fi
 }
 
@@ -135,6 +189,8 @@ watch_root() {
       enqueue_event "$(serialize_event "${label}" "${full_path}" "${event_type}" "${is_dir}")"
     done &
 }
+
+replay_spool
 
 for entry in "${ENTRIES[@]}"; do
   label="${entry%%:*}"

@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
-from fastapi import BackgroundTasks, FastAPI, HTTPException
+from fastapi import BackgroundTasks, FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.encoders import jsonable_encoder
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -15,7 +15,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from . import config as config_module
 from . import jellyfin, jobs
-from .db import create_session_factory
+from .db import Base, create_session_factory
 from .job_history import JobHistoryEntry, JobHistoryStatus, JobHistoryStore
 from .library_entries import EntryUpdate, LibraryEntry, LibraryEntryStore, LibraryStatus
 from .logs import (
@@ -51,6 +51,7 @@ PROFILE_STORE = ProfileStore(SESSION_FACTORY)
 LIBRARY_CONFIG_STORE = LibraryConfigStore(SESSION_FACTORY)
 LIBRARY_STORE = LibraryEntryStore(LIBRARY_DB_PATH, session_factory=SESSION_FACTORY, engine=ENGINE)
 JOB_HISTORY_STORE = JobHistoryStore(SESSION_FACTORY)
+Base.metadata.create_all(ENGINE)
 LIBRARY_STATUSES = {
     LibraryStatus.PENDING,
     LibraryStatus.CONVERTING,
@@ -64,6 +65,38 @@ LIBRARY_ROOT_PREFIXES = [
     if prefix.strip()
 ]
 WORKER_TELEMETRY: Dict[str, "WorkerTelemetryPayload"] = {}
+
+
+class WebsocketNotifier:
+    """Tracks websocket connections and pushes structured events to clients."""
+
+    def __init__(self) -> None:
+        self._connections: Set[WebSocket] = set()
+        self._lock = asyncio.Lock()
+
+    async def connect(self, websocket: WebSocket) -> None:
+        await websocket.accept()
+        async with self._lock:
+            self._connections.add(websocket)
+
+    async def disconnect(self, websocket: WebSocket) -> None:
+        async with self._lock:
+            self._connections.discard(websocket)
+
+    async def broadcast(self, message: Dict[str, Any]) -> None:
+        payload = jsonable_encoder(message)
+        async with self._lock:
+            targets = list(self._connections)
+        if not targets:
+            return
+
+        async def _send(target: WebSocket) -> None:
+            try:
+                await target.send_json(payload)
+            except Exception:
+                await self.disconnect(target)
+
+        await asyncio.gather(*(_send(target) for target in targets), return_exceptions=True)
 
 
 def configure_logging() -> None:
@@ -89,6 +122,7 @@ def configure_logging() -> None:
 configure_logging()
 
 LOGGER = logging.getLogger("orchestrator")
+NOTIFIER = WebsocketNotifier()
 
 TEMPLATE_PATH = Path(__file__).parent / "templates" / "index.html"
 INDEX_HTML = TEMPLATE_PATH.read_text()
@@ -146,6 +180,15 @@ class EntryProfilePayload(BaseModel):
     profile_id: int
 
 
+class LibraryCreatePayload(BaseModel):
+    name: str = Field(min_length=1)
+    root: str = Field(min_length=1, description="Absolute path to the library root", alias="path")
+    depth: str = Field(default="max")
+    profile_id: int
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
 class WorkerTelemetryPayload(BaseModel):
     worker_id: str
     gpu_available: bool
@@ -161,6 +204,20 @@ def _worker_metrics_summary() -> Dict[str, Any]:
     telemetry = [jsonable_encoder(item) for item in payloads]
     available = sum(1 for item in payloads if item.gpu_available)
     return {"workers": len(payloads), "available": available, "telemetry": telemetry}
+
+
+async def _emit_entry_update(entry: LibraryEntry, *, event: Optional[str] = None) -> None:
+    await NOTIFIER.broadcast(
+        {"type": "entry-update", "entry": _entry_to_response(entry), "event": event}
+    )
+
+
+async def _emit_job_update(job: jobs.Job, *, event: Optional[str] = None) -> None:
+    await NOTIFIER.broadcast({"type": "job-update", "job": job.model_dump(), "event": event})
+
+
+async def _emit_library_update(action: str, payload: Dict[str, Any]) -> None:
+    await NOTIFIER.broadcast({"type": "library-update", "action": action, "library": payload})
 
 
 class LibraryEntryResponse(BaseModel):
@@ -397,6 +454,7 @@ async def _record_library_entry(
     profile_id: int,
     *,
     emit_log: bool = True,
+    notify: bool = True,
 ) -> tuple[LibraryEntry, Optional[jobs.Job]]:
     status, output_path, original_exists = _entry_status_for_path(path)
     entry = LIBRARY_STORE.upsert(
@@ -421,7 +479,12 @@ async def _record_library_entry(
         )
         LIBRARY_STORE.attach_job(entry.id, job.id)
         _record_job_history(job, JobHistoryStatus.PENDING)
+        if notify:
+            await _emit_job_update(job, event="queued")
+            await _emit_entry_update(entry, event="queued")
         return entry, job
+    if notify:
+        await _emit_entry_update(entry, event="tracked")
     return entry, None
 
 
@@ -429,13 +492,13 @@ def _entry_to_response(entry: LibraryEntry) -> Dict[str, Any]:
     return LibraryEntryResponse.model_validate(entry).model_dump()
 
 
-def _sync_entry_from_job(job: jobs.Job, status: str, message: Optional[str] = None) -> None:
+async def _sync_entry_from_job(job: jobs.Job, status: str, message: Optional[str] = None) -> None:
     source = Path(job.path)
     original_missing = not source.exists()
     final_status = status
     if status == LibraryStatus.CONVERTED and original_missing:
         final_status = LibraryStatus.REMOVED
-    LIBRARY_STORE.safe_update_status(
+    entry = LIBRARY_STORE.safe_update_status(
         job.path,
         final_status,
         library=job.library,
@@ -446,6 +509,8 @@ def _sync_entry_from_job(job: jobs.Job, status: str, message: Optional[str] = No
         output_path=str(job_manager.output_path(source)),
         original_missing=original_missing,
     )
+    if entry:
+        await _emit_entry_update(entry, event="job-status")
 
 
 def _record_job_history(
@@ -500,6 +565,7 @@ async def _process_event_payload(payload: EventPayload) -> Optional[Dict[str, An
             output_path=str(job_manager.output_path(path)),
             original_missing=True,
         )
+        await _emit_entry_update(entry, event=event_type)
         return {"entry": _entry_to_response(entry), "event": event_type}
 
     if not _should_track_file(path):
@@ -533,7 +599,7 @@ async def reconcile_library(library_name: str, root: str, profile: str, profile_
             continue
         seen.add(str(entry))
         library_entry, job = await _record_library_entry(
-            library_name, entry, profile, profile_id, emit_log=False
+            library_name, entry, profile, profile_id, emit_log=False, notify=False
         )
         if job:
             queued += 1
@@ -607,6 +673,18 @@ async def healthz() -> JSONResponse:
 @app.get("/api/readyz")
 async def readyz() -> JSONResponse:
     return JSONResponse({"status": "ready"})
+
+
+@app.websocket("/ws")
+async def websocket_updates(websocket: WebSocket) -> None:
+    await NOTIFIER.connect(websocket)
+    try:
+        while True:
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        pass
+    finally:
+        await NOTIFIER.disconnect(websocket)
 
 
 @app.post("/api/workers/telemetry")
@@ -730,6 +808,47 @@ async def list_libraries() -> JSONResponse:
     return JSONResponse(payload)
 
 
+@app.post("/api/libraries", status_code=201)
+async def create_library(
+    payload: LibraryCreatePayload, background_tasks: BackgroundTasks
+) -> JSONResponse:
+    normalized_name = payload.name.strip()
+    if not normalized_name:
+        raise HTTPException(status_code=400, detail="Library name cannot be empty")
+    if LIBRARY_CONFIG_STORE.get(normalized_name):
+        raise HTTPException(status_code=409, detail="Library name already exists")
+    profile = PROFILE_STORE.get(payload.profile_id)
+    if profile is None:
+        raise HTTPException(status_code=404, detail="Profile not found")
+    if not payload.root.strip():
+        raise HTTPException(status_code=400, detail="Library path is required")
+
+    library = LIBRARY_CONFIG_STORE.upsert(
+        LibraryData(
+            name=normalized_name,
+            root=payload.root.strip(),
+            depth=payload.depth or "max",
+            profile_id=payload.profile_id,
+        )
+    )
+    snapshot = config_service.upsert_library(
+        normalized_name,
+        root=library.root,
+        depth=library.depth,
+        profile=profile.name,
+        profile_id=profile.id,
+    )
+    background_tasks.add_task(
+        reconcile_library, library.name, library.root, profile.name, profile.id
+    )
+    await _emit_library_update("created", {**library.to_payload(), "profile": profile.name})
+    return JSONResponse(
+        {**library.to_payload(), "profile": profile.name},
+        status_code=201,
+        headers=_cache_headers(snapshot),
+    )
+
+
 @app.patch("/api/libraries/{library_name}")
 async def update_library_profile(library_name: str, payload: LibraryProfilePayload) -> JSONResponse:
     profile = PROFILE_STORE.get(payload.profile_id)
@@ -740,6 +859,23 @@ async def update_library_profile(library_name: str, payload: LibraryProfilePaylo
     except KeyError:
         raise HTTPException(status_code=404, detail="Library not found")
     return JSONResponse({**library.to_payload(), "profile": profile.name})
+
+
+@app.delete("/api/libraries/{library_name}")
+async def delete_library(library_name: str) -> JSONResponse:
+    library = LIBRARY_CONFIG_STORE.get(library_name)
+    if library is None:
+        raise HTTPException(status_code=404, detail="Library not found")
+    LIBRARY_CONFIG_STORE.delete(library_name)
+    snapshot = config_service.delete_library(library_name)
+    removed_entries = LIBRARY_STORE.mark_missing(library_name, set())
+    await _emit_library_update(
+        "deleted", {"name": library_name, "removed_entries": removed_entries}
+    )
+    return JSONResponse(
+        {"deleted": library_name, "entries_marked": removed_entries},
+        headers=_cache_headers(snapshot),
+    )
 
 
 @app.get("/api/logs")
@@ -835,8 +971,9 @@ async def next_job() -> JSONResponse:
     if claimed is None:
         raise HTTPException(status_code=204, detail="No jobs available")
     delivery_id, job = claimed
-    _sync_entry_from_job(job, LibraryStatus.CONVERTING)
+    await _sync_entry_from_job(job, LibraryStatus.CONVERTING)
     _record_job_history(job, JobHistoryStatus.RUNNING)
+    await _emit_job_update(job, event="acquired")
     return JSONResponse(jsonable_encoder(job.model_dump() | {"delivery_id": delivery_id}))
 
 
@@ -848,12 +985,13 @@ async def update_job_status(job_id: str, payload: JobStatusPayload) -> JSONRespo
         raise HTTPException(status_code=404, detail="Job not found")
     completed = payload.status in {jobs.JobStatus.COMPLETED, jobs.JobStatus.FAILED}
     if payload.status == jobs.JobStatus.RUNNING:
-        _sync_entry_from_job(job, LibraryStatus.CONVERTING, payload.message)
+        await _sync_entry_from_job(job, LibraryStatus.CONVERTING, payload.message)
     elif payload.status == jobs.JobStatus.COMPLETED:
-        _sync_entry_from_job(job, LibraryStatus.CONVERTED, payload.message)
+        await _sync_entry_from_job(job, LibraryStatus.CONVERTED, payload.message)
     elif payload.status == jobs.JobStatus.FAILED:
-        _sync_entry_from_job(job, LibraryStatus.FAILED, payload.message)
+        await _sync_entry_from_job(job, LibraryStatus.FAILED, payload.message)
     _record_job_history(job, payload.status, payload.message, completed=completed)
+    await _emit_job_update(job, event="status")
     return JSONResponse(jsonable_encoder(job.model_dump()))
 
 
@@ -890,6 +1028,7 @@ async def list_library_entries(
     library: Optional[str] = None,
     limit: int = 100,
     offset: int = 0,
+    include_total: bool = False,
 ) -> JSONResponse:
     if status and status not in LIBRARY_STATUSES:
         raise HTTPException(status_code=400, detail="Invalid status filter")
@@ -899,7 +1038,11 @@ async def list_library_entries(
         raise HTTPException(status_code=400, detail="Offset cannot be negative")
 
     entries = LIBRARY_STORE.list_entries(status=status, library=library, limit=limit, offset=offset)
-    return JSONResponse(jsonable_encoder([_entry_to_response(entry) for entry in entries]))
+    payload = jsonable_encoder([_entry_to_response(entry) for entry in entries])
+    if include_total:
+        total = LIBRARY_STORE.count_entries(status=status, library=library)
+        return JSONResponse({"items": payload, "total": total, "limit": limit, "offset": offset})
+    return JSONResponse(payload)
 
 
 @app.patch("/api/library/entries/{entry_id}")
@@ -918,6 +1061,7 @@ async def update_entry_profile(entry_id: int, payload: EntryProfilePayload) -> J
         output_path=entry.output_path,
         original_missing=entry.original_missing,
     )
+    await _emit_entry_update(updated, event="profile-updated")
     return JSONResponse(jsonable_encoder(_entry_to_response(updated)))
 
 
@@ -970,6 +1114,8 @@ async def reprocess_entry(
         profile_id=profile_id,
     )
     payload = {"entry": _entry_to_response(updated), "job": job.model_dump()}
+    await _emit_entry_update(updated, event="reprocess")
+    await _emit_job_update(job, event="reprocess")
     return JSONResponse(jsonable_encoder(payload))
 
 
@@ -1006,6 +1152,7 @@ async def remove_original(entry_id: int) -> JSONResponse:
         profile=entry.profile,
         profile_id=entry.profile_id,
     )
+    await _emit_entry_update(updated, event="remove-original")
     return JSONResponse(jsonable_encoder({"entry": _entry_to_response(updated)}))
 
 
