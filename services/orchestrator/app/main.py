@@ -39,15 +39,15 @@ from .profiles import (
 
 logging.addLevelName(logging.DEBUG, "VERBOSE")
 
-LOG_DB_PATH = Path(os.environ.get("LOG_DB_PATH", "/app/logs/events.db")).resolve()
-CONFIG_DB_PATH = Path(os.environ.get("CONFIG_DB_PATH", "/app/logs/config.db")).resolve()
+LOG_DB_PATH = Path(os.environ.get("LOG_DB_PATH", "/app/data/events.db")).resolve()
+CONFIG_DB_PATH = Path(os.environ.get("CONFIG_DB_PATH", "/app/data/config.db")).resolve()
 CONFIG_TEMPLATE_PATH = Path(
     os.environ.get("CONFIG_TEMPLATE_PATH", "/app/config/settings.yaml.template")
 ).resolve()
 LEGACY_CONFIG_PATH = Path(os.environ.get("CONFIG_PATH", "/app/config/settings.yaml")).resolve()
 
 LOG_STORE = LogStore(LOG_DB_PATH)
-LIBRARY_DB_PATH = Path(os.environ.get("LIBRARY_DB_PATH", "/app/logs/library.db")).resolve()
+LIBRARY_DB_PATH = Path(os.environ.get("LIBRARY_DB_PATH", "/app/data/library.db")).resolve()
 SESSION_FACTORY, ENGINE = create_session_factory(LIBRARY_DB_PATH)
 PROFILE_STORE = ProfileStore(SESSION_FACTORY)
 LIBRARY_CONFIG_STORE = LibraryConfigStore(SESSION_FACTORY)
@@ -115,13 +115,8 @@ def _ensure_schema_revision(engine) -> None:
         cfg = Config(str((Path(__file__).parent / ".." / "alembic.ini").resolve()))
         cfg.set_main_option("sqlalchemy.url", str(engine.url))
         command.upgrade(cfg, "head")
-    except Exception as exc:  # noqa: BLE001
-        details = ", ".join(sorted(missing))
-        raise RuntimeError(
-            "Config DB schema is outdated (missing columns: "
-            f"{details}). Auto-migration failed: {exc}. "
-            "Run 'alembic upgrade head' inside the orchestrator container."
-        ) from exc
+    except Exception:  # noqa: BLE001
+        missing = required_columns  # fallback to manual patching below
 
     # Re-check after migration
     with engine.connect() as conn:
@@ -129,11 +124,33 @@ def _ensure_schema_revision(engine) -> None:
     present = {row[1] for row in rows}
     missing = required_columns - present
     if missing:
-        details = ", ".join(sorted(missing))
-        raise RuntimeError(
-            "Config DB schema is still missing columns after migration: "
-            f"{details}. Check alembic configuration."
-        )
+        # Manual patch for stale DBs that report head but lack columns
+        alter_statements = {
+            "bitrate": "ALTER TABLE encoding_profiles ADD COLUMN bitrate TEXT NOT NULL DEFAULT '8M'",
+            "bframes": "ALTER TABLE encoding_profiles ADD COLUMN bframes INTEGER NOT NULL DEFAULT 2",
+            "lookahead": "ALTER TABLE encoding_profiles ADD COLUMN lookahead INTEGER NOT NULL DEFAULT 24",
+            "adaptive_b_frames": "ALTER TABLE encoding_profiles ADD COLUMN adaptive_b_frames BOOLEAN NOT NULL DEFAULT 1",
+            "aq": "ALTER TABLE encoding_profiles ADD COLUMN aq BOOLEAN NOT NULL DEFAULT 1",
+            "spatial_aq": "ALTER TABLE encoding_profiles ADD COLUMN spatial_aq BOOLEAN NOT NULL DEFAULT 1",
+            "temporal_aq": "ALTER TABLE encoding_profiles ADD COLUMN temporal_aq BOOLEAN NOT NULL DEFAULT 1",
+        }
+        with engine.begin() as conn:
+            for column in missing:
+                stmt = alter_statements.get(column)
+                if stmt:
+                    conn.execute(sqlalchemy.text(stmt))
+
+        # Final check
+        with engine.connect() as conn:
+            rows = conn.execute(sqlalchemy.text("PRAGMA table_info('encoding_profiles')")).fetchall()
+        present = {row[1] for row in rows}
+        remaining = required_columns - present
+        if remaining:
+            details = ", ".join(sorted(remaining))
+            raise RuntimeError(
+                "Config DB schema is still missing columns after manual patch: "
+                f"{details}. Please inspect the database file or run alembic manually."
+            )
 
 
 _ensure_schema_revision(ENGINE)

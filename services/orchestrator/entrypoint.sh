@@ -9,7 +9,7 @@ PORT="${PORT:-9000}"
 if [[ -n "${LIBRARY_DB_PATH:-}" ]]; then
   DB_PATH="${LIBRARY_DB_PATH}"
 else
-  DB_PATH="/app/logs/library.db"
+  DB_PATH="/app/data/library.db"
 fi
 
 DATABASE_URL="${DATABASE_URL:-sqlite:////${DB_PATH#'/'}}"
