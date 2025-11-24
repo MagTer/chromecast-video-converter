@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 import logging
 import sqlite3
@@ -13,6 +14,86 @@ import yaml
 from pydantic import BaseModel, Field, ValidationError, model_validator
 
 LOGGER = logging.getLogger("orchestrator.config")
+
+
+DEFAULT_CONFIG: Dict[str, Any] = {
+    "libraries": {
+        "movies": {
+            "root": "/watch/movies",
+            "depth": "max",
+            "profile": "movies",
+            "profile_id": 1,
+        },
+        "series": {
+            "root": "/watch/series",
+            "depth": "max",
+            "profile": "series",
+            "profile_id": 2,
+        },
+    },
+    "profiles": {
+        "movies": {
+            "codec": "h264",
+            "profile": "high",
+            "level": "4.1",
+            "resolution": "1280x720",
+            "max_fps": 30,
+            "bitrate": "6M",
+            "max_bitrate": "8M",
+            "bufsize": "16M",
+            "preset": "p6",
+            "rc": "vbr_hq",
+            "cq": 18,
+            "bframes": 2,
+            "lookahead": 24,
+            "adaptive_b_frames": True,
+            "aq": True,
+            "spatial_aq": True,
+            "temporal_aq": True,
+            "audio": {
+                "codec": "aac",
+                "bitrate": "192k",
+                "channels": 2,
+            },
+        },
+        "series": {
+            "codec": "h264",
+            "profile": "high",
+            "level": "4.1",
+            "resolution": "1280x720",
+            "max_fps": 30,
+            "bitrate": "6M",
+            "max_bitrate": "8M",
+            "bufsize": "16M",
+            "preset": "p6",
+            "rc": "vbr_hq",
+            "cq": 18,
+            "bframes": 2,
+            "lookahead": 24,
+            "adaptive_b_frames": True,
+            "aq": True,
+            "spatial_aq": True,
+            "temporal_aq": True,
+            "audio": {
+                "codec": "aac",
+                "bitrate": "192k",
+                "channels": 2,
+            },
+        },
+    },
+    "operational": {
+        "max_concurrent_jobs": 1,
+        "gpu_temperature_cutoff": 85,
+        "max_disk_usage_percent": 90,
+        "remove_original_after_success": False,
+    },
+    "logging": {"retention_days": 7},
+    "notifiers": {
+        "webhook": {
+            "url": "https://hooks.example.com/notify",
+        }
+    },
+}
 
 
 def _validate_codecs(codec: str, audio_codec: str) -> None:
@@ -363,17 +444,20 @@ class ConfigStore:
         source_path = self.legacy_path if self.legacy_path and self.legacy_path.exists() else None
         if source_path:
             LOGGER.info("Seeding configuration database from legacy file %s", source_path)
+            raw = yaml.safe_load(source_path.read_text()) or {}
+            seed_source = str(source_path)
+        elif self.template_path and self.template_path.exists():
+            LOGGER.info("Seeding configuration database from template %s", self.template_path)
+            raw = yaml.safe_load(self.template_path.read_text()) or {}
+            seed_source = str(self.template_path)
         else:
-            source_path = self.template_path
-            LOGGER.info("Seeding configuration database from template %s", source_path)
+            LOGGER.info("Seeding configuration database from built-in defaults")
+            raw = copy.deepcopy(DEFAULT_CONFIG)
+            seed_source = "builtin"
 
-        if not source_path.exists():
-            raise FileNotFoundError(f"Configuration seed not found at {source_path}")
-
-        raw = yaml.safe_load(source_path.read_text()) or {}
-        snapshot = self.save_config(QualityConfig(**raw), source=str(source_path))
+        snapshot = self.save_config(QualityConfig(**raw), source=seed_source)
         LOGGER.info(
-            "Seeded configuration database (revision %s) from %s", snapshot.revision, source_path
+            "Seeded configuration database (revision %s) from %s", snapshot.revision, seed_source
         )
 
     def load_config(self) -> ConfigSnapshot:
