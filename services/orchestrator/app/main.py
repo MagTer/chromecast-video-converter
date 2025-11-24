@@ -844,9 +844,7 @@ async def delete_library(library_name: str) -> JSONResponse:
     LIBRARY_CONFIG_STORE.delete(library_name)
     snapshot = config_service.delete_library(library_name)
     removed_entries = LIBRARY_STORE.mark_missing(library_name, set())
-    await _emit_library_update(
-        "deleted", {"name": library_name, "entries_marked": removed_entries}
-    )
+    await _emit_library_update("deleted", {"name": library_name, "entries_marked": removed_entries})
     return JSONResponse(
         {"deleted": library_name, "entries_marked": removed_entries},
         headers=_cache_headers(snapshot),
