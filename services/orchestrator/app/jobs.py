@@ -330,6 +330,22 @@ class JobManager:
                 await self._redis.srem(self._path_index, job.path)
                 await self._redis.delete(self._path_key(job.path))
 
+    async def clear_processed(self) -> int:
+        await self.initialize()
+        job_ids = await self._redis.zrange(self._job_index, 0, -1)
+        removed = 0
+        for job_id in job_ids:
+            data = await self._redis.hgetall(self._job_key(job_id))
+            if not data:
+                await self._redis.zrem(self._job_index, job_id)
+                continue
+            status = data.get("status")
+            if status in {JobStatus.COMPLETED, JobStatus.FAILED}:
+                await self._redis.delete(self._job_key(job_id))
+                await self._redis.zrem(self._job_index, job_id)
+                removed += 1
+        return removed
+
     async def scan_directory(
         self,
         library: str,

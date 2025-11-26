@@ -32,13 +32,14 @@ This guide walks through prerequisites, configuration, and day-one operation of 
   back to CPU encoding.
 - Queue controls: `/api/queue/pause` and `/api/queue/resume` allow operators to throttle work when storage or thermal limits are reached.
 - Logging: `/api/logs` returns recent log entries across the orchestrator, GPU workers, and folder watcher. Configure the retention window (default 7 days) and review log disk usage from the Configuration page.
-- Library management: add libraries at runtime with `POST /api/libraries` (fields: `name`, `root`, `depth`, `profile_id`) or the Configuration page form. Remove them with `DELETE /api/libraries/{name}`; the orchestrator marks existing entries from that library as `removed` for traceability.
+- Library management: add libraries at runtime with `POST /api/libraries` (fields: `name`, `root`, `profile_id`) or the Configuration page form. The orchestrator always scans an entire tree (`depth` defaults to `"max"`), so the UI hides that field and normalizes `/watch/...` inputs to `/media/...` for clarity. Remove libraries with `DELETE /api/libraries/{name}`; existing entries are marked `removed` for traceability.
 - Live updates: the dashboard keeps a WebSocket open to `/ws` so job and entry updates land in real time. Connections auto-retry if the API restarts.
 - Job lifecycle:
   - `/api/scan` triggers a (re)scan of configured libraries to enqueue work.
   - `/api/jobs/next` supplies the next job to GPU workers.
   - `/api/jobs/{id}/status` records progress and completion updates from workers.
   - `/api/library/entries` now accepts `limit`, `offset`, and `include_total` for paginated browsing; the dashboard uses a “Load more” control instead of refetching the entire catalog on every refresh.
+  - `/api/jobs/clear` removes completed/failed jobs from Redis so the dashboard’s queue table stays focused on active work (the **Clear processed items** button on the Queue page calls this endpoint and refreshes automatically).
 
 ## Media watcher behavior
 

@@ -28,7 +28,7 @@ class EncodingProfile(Base):
     bufsize = Column(String, nullable=False)
     preset = Column(String, nullable=False)
     cq = Column(Integer, nullable=False, default=18)
-    rc = Column(String, nullable=False, default="vbr_hq")
+    rc = Column(String, nullable=False, default="vbr")
     level = Column(String, nullable=False, default="4.1")
     max_fps = Column(Integer, nullable=False, default=30)
     bframes = Column(Integer, nullable=False, default=2)
@@ -37,6 +37,7 @@ class EncodingProfile(Base):
     aq = Column(Boolean, nullable=False, default=True)
     spatial_aq = Column(Boolean, nullable=False, default=True)
     temporal_aq = Column(Boolean, nullable=False, default=True)
+    aq_strength = Column(Integer, nullable=False, default=7)
     audio_codec = Column(String, nullable=False, default="aac")
     audio_bitrate = Column(String, nullable=False, default="192k")
     audio_channels = Column(Integer, nullable=False, default=2)
@@ -64,6 +65,7 @@ class EncodingProfile(Base):
             "aq": bool(self.aq),
             "spatial_aq": bool(self.spatial_aq),
             "temporal_aq": bool(self.temporal_aq),
+            "aq_strength": self.aq_strength,
             "audio": {
                 "codec": self.audio_codec,
                 "bitrate": self.audio_bitrate,
@@ -117,6 +119,7 @@ class ProfileData:
     aq: bool
     spatial_aq: bool
     temporal_aq: bool
+    aq_strength: int
     audio_codec: str
     audio_bitrate: str
     audio_channels: int
@@ -175,6 +178,7 @@ class ProfileStore:
                 aq=data.aq,
                 spatial_aq=data.spatial_aq,
                 temporal_aq=data.temporal_aq,
+                aq_strength=data.aq_strength,
                 audio_codec=data.audio_codec,
                 audio_bitrate=data.audio_bitrate,
                 audio_channels=data.audio_channels,

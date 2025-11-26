@@ -470,8 +470,8 @@ def build_ffmpeg_command(  # noqa: C901
     h264_profile_lower = h264_profile.lower()
     max_fps = max(1, int(profile.get("max_fps", 30) or 30))
     preset = str(profile.get("preset", "p6"))
-    rc_mode = str(profile.get("rc", "vbr_hq") or "vbr_hq").lower()
-    if rc_mode == "cbr":
+    rc_mode = str(profile.get("rc", "vbr") or "vbr").lower()
+    if rc_mode in {"cbr", "vbr_hq"}:
         rc_mode = "vbr"
     cq = str(profile.get("cq", 18))
     bframes = int(profile.get("bframes", 2) or 0)
@@ -485,6 +485,8 @@ def build_ffmpeg_command(  # noqa: C901
     aq_enabled = bool(profile.get("aq", True))
     spatial_aq = aq_enabled and bool(profile.get("spatial_aq", True))
     temporal_aq = aq_enabled and bool(profile.get("temporal_aq", True))
+    aq_strength = int(profile.get("aq_strength", 7) or 7)
+    aq_strength = max(1, min(15, aq_strength))
     multipass_mode: str | None = None
     if rc_mode == "vbr_hq":
         multipass_mode = "fullres"
@@ -568,10 +570,11 @@ def build_ffmpeg_command(  # noqa: C901
             "1" if spatial_aq else "0",
             "-temporal_aq",
             "1" if temporal_aq else "0",
-            "-movflags",
-            "+faststart",
         ]
     )
+    if aq_enabled:
+        command.extend(["-aq-strength", str(aq_strength)])
+    command.extend(["-movflags", "+faststart"])
 
     if selected_audio:
         command.extend(

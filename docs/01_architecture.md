@@ -6,7 +6,7 @@
 - Keep every asset streamable on Chromecast Gen 2/3 without server-side transcoding.
 - Guarantee GPU-only encoding on an NVIDIA RTX 3060 and cap resolution at 720p.
 - Prioritize perceptual quality and smooth action playback while targeting 1.8-3.2 GB movies.
-- Enforce H.264 (High, auto-level up to 4.2) video / AAC 192 kbps stereo audio (2 channels), yuv420p pixel format, NVENC preset `p6` (P4–P7 allowed), rate control limited to CQ or VBR/VBR HQ (CQ uses `-rc constqp -qp <cq>`; VBR/VBR HQ use `-b:v/-maxrate/-bufsize` with optional full-res multipass), `-bf 0–3` gated by profile, lookahead 0–32 with adaptive B-frames only when lookahead>0, AQ on by default (`-spatial_aq 1 -temporal_aq 1`), `-movflags +faststart`, and downscale-only filtering (`scale=-2:720:force_original_aspect_ratio=decrease`, fps capped per profile).
+- Enforce H.264 (High, auto-level from 3.1 upward) video / AAC 192 kbps stereo audio (2 channels), yuv420p pixel format, NVENC preset `p7` by default (P4–P7 allowed), rate control limited to CQ or single-pass VBR (two-pass VBR HQ removed; CQ uses `-rc constqp -qp <cq>` while VBR uses `-b:v/-maxrate/-bufsize`), `-bf 0–3` gated by profile, lookahead 0–32 with adaptive B-frames only when lookahead>0, AQ on by default (`-spatial_aq 1 -temporal_aq 1`) with a tunable strength slider, `-movflags +faststart`, and downscale-only filtering (`scale=-2:720:force_original_aspect_ratio=decrease`, fps capped per profile).
 - Deliver production-grade logging, guardrails for invalid configs, and fault tolerance.
 
 ## Container topology
@@ -24,14 +24,14 @@ All containers join a private Docker network. Bind mounts provide the Windows-ho
 
 1. **Change detection** – `folder-watcher` monitors roots and posts create/modify/delete events to `/api/events`; if the API is down, events are written to the spool file and replayed on next start.
 2. **Runtime config** – Libraries and profiles seed from the config DB; operators can **add/remove libraries at runtime** via `/api/libraries` or the dashboard, which triggers background scans and marks removed libraries’ entries as `removed`.
-3. **Policy evaluation** – Orchestrator validates profiles/libraries from the SQLite config store (seeded from `config/settings.yaml` or the template). Config changes remain Chromecast-safe (H.264 High 4.1, AAC stereo, GPU-only).
+3. **Policy evaluation** – Orchestrator validates profiles/libraries from the SQLite config store (seeded from `config/settings.yaml` or the template). Config changes remain Chromecast-safe (H.264 High with minimum level 3.1, AAC stereo, GPU-only) and the API normalizes `/watch/...` mounts to `/media/...` when returning data.
 4. **Job lifecycle** – Events and scans upsert library entries and enqueue jobs in Redis when needed. Workers pull `/api/jobs/next`, report progress via `/api/jobs/{id}/status`, and acknowledgements update catalog status/history.
 5. **Live updates** – Orchestrator broadcasts `job-update`, `entry-update`, and `library-update` over `/ws`; the dashboard and any clients can subscribe instead of polling. Library entries are fetched with paginated `/api/library/entries` (`limit/offset/include_total`) and appended in the UI via “Load more.”
 6. **Observability** – Structured logs persist in SQLite and expose `/api/logs`; metrics include queue depth and worker GPU availability. Telemetry and job history stay aligned with websocket pushes.
 
 ## User interface and manual controls
 
-- A lightweight dashboard served from the orchestrator exposes health, queue metrics, and a manual scan button. The interface calls `/api/scan` to enqueue jobs on demand, so operators can trigger rescans before files are watched.
+- A lightweight dashboard served from the orchestrator exposes health, queue metrics, and manual controls. The queue page shows job IDs (clickable to pre-fill the log search), elapsed runtime, normalized file names, and a **Clear processed items** button that calls `/api/jobs/clear` to prune completed/failed jobs. Operators can still trigger rescans via `/api/scan` before files are watched.
 - The orchestrator also exposes `/api/events` for watchers or other adapters to notify about new media, plus `/api/jobs/{id}/status` so GPU workers can report progress.
 
 ## Jellyfin and optional integrations
@@ -50,7 +50,7 @@ All containers join a private Docker network. Bind mounts provide the Windows-ho
 
 The SQLite config store (seeded from `config/settings.yaml` when present) captures:
 
-- Libraries (`movies`, `series`, additional custom roots) with mount paths, recursion depth, naming hints.
+- Libraries (`movies`, `series`, additional custom roots) with mount paths (full recursive scans enforced) and naming hints.
 - Quality profile per library (resolution cap, bitrate budget, scaling rules, audio layout).
 - Operational thresholds (max concurrent jobs, GPU temp cutoffs, disk usage guardrails).
 - Notification sinks (Webhook, email) for warnings/errors.

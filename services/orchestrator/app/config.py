@@ -35,14 +35,14 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "movies": {
             "codec": "h264",
             "profile": "high",
-            "level": "4.1",
+            "level": "3.1",
             "resolution": "1280x720",
             "max_fps": 30,
-            "bitrate": "6M",
-            "max_bitrate": "8M",
+            "bitrate": "5M",
+            "max_bitrate": "10M",
             "bufsize": "16M",
-            "preset": "p6",
-            "rc": "vbr_hq",
+            "preset": "p7",
+            "rc": "vbr",
             "cq": 18,
             "bframes": 2,
             "lookahead": 24,
@@ -50,6 +50,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
             "aq": True,
             "spatial_aq": True,
             "temporal_aq": True,
+            "aq_strength": 7,
             "audio": {
                 "codec": "aac",
                 "bitrate": "192k",
@@ -59,14 +60,14 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "series": {
             "codec": "h264",
             "profile": "high",
-            "level": "4.1",
+            "level": "3.1",
             "resolution": "1280x720",
             "max_fps": 30,
-            "bitrate": "6M",
-            "max_bitrate": "8M",
+            "bitrate": "5M",
+            "max_bitrate": "10M",
             "bufsize": "16M",
-            "preset": "p6",
-            "rc": "vbr_hq",
+            "preset": "p7",
+            "rc": "vbr",
             "cq": 18,
             "bframes": 2,
             "lookahead": 24,
@@ -74,6 +75,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
             "aq": True,
             "spatial_aq": True,
             "temporal_aq": True,
+            "aq_strength": 7,
             "audio": {
                 "codec": "aac",
                 "bitrate": "192k",
@@ -276,9 +278,9 @@ def _validate_encoding_options(
             "NVENC CQ must be between 0 and 30 for stable quality on Gen 2 Chromecasts."
         )
 
-    allowed_rc_modes = {"cq", "vbr", "vbr_hq"}
+    allowed_rc_modes = {"cq", "vbr"}
     if rc_mode.lower() not in allowed_rc_modes:
-        raise ValueError("Rate control must be cq, vbr, or vbr_hq for Chromecast-safe outputs.")
+        raise ValueError("Rate control must be cq or vbr for Chromecast-safe outputs.")
 
     if max_fps <= 0 or max_fps > 60:
         raise ValueError("Frame rate must be between 1 and 60 fps.")
@@ -313,13 +315,14 @@ class Profile(BaseModel):
     bufsize: str
     preset: str = Field(default="p6")
     cq: int = Field(default=18, ge=0, le=30)
-    rc: str = Field(default="vbr_hq")
+    rc: str = Field(default="vbr")
     bframes: int = Field(default=2, ge=0, le=3)
     lookahead: int = Field(default=24, ge=0, le=32)
     adaptive_b_frames: bool = Field(default=True)
     aq: bool = Field(default=True)
     spatial_aq: bool = Field(default=True)
     temporal_aq: bool = Field(default=True)
+    aq_strength: int = Field(default=7, ge=5, le=10)
     audio: AudioProfile
 
     @model_validator(mode="after")
@@ -328,10 +331,22 @@ class Profile(BaseModel):
         _validate_profile(values.profile, values.level, values.resolution, values.max_fps)
         _validate_resolution(values.resolution)
         _validate_bitrates(values.bitrate, values.max_bitrate, values.bufsize, values.audio.bitrate)
+
+        rc_mode = values.rc.lower()
+        if rc_mode == "cbr":
+            rc_mode = "vbr"
+        if rc_mode == "vbr_hq":
+            LOGGER.warning(
+                "Profile %s uses deprecated rc=vbr_hq; defaulting to vbr",
+                getattr(values, "name", "unknown"),
+            )
+            rc_mode = "vbr"
+        values.rc = rc_mode
+
         _validate_encoding_options(
             values.preset,
             values.cq,
-            values.rc,
+            rc_mode,
             values.max_fps,
             values.audio.channels,
             values.bframes,

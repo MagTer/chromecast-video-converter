@@ -12,6 +12,7 @@ from fastapi import BackgroundTasks, FastAPI, HTTPException, WebSocket, WebSocke
 from fastapi.encoders import jsonable_encoder
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
 
 from . import config as config_module
@@ -79,6 +80,7 @@ LIBRARY_ROOT_PREFIXES = [
     for prefix in os.environ.get("LIBRARY_ROOT_PREFIXES", "/watch,/media").split(",")
     if prefix.strip()
 ]
+DISPLAY_LIBRARY_PREFIX = "/media"
 WORKER_TELEMETRY: Dict[str, "WorkerTelemetryPayload"] = {}
 
 
@@ -124,6 +126,7 @@ def _ensure_schema_revision(engine) -> None:
         "aq",
         "spatial_aq",
         "temporal_aq",
+        "aq_strength",
         "audio_codec",
         "audio_bitrate",
         "audio_channels",
@@ -201,6 +204,9 @@ def _ensure_schema_revision(engine) -> None:
             ),
             "temporal_aq": (
                 "ALTER TABLE encoding_profiles ADD COLUMN " "temporal_aq BOOLEAN NOT NULL DEFAULT 1"
+            ),
+            "aq_strength": (
+                "ALTER TABLE encoding_profiles ADD COLUMN " "aq_strength INTEGER NOT NULL DEFAULT 7"
             ),
             "audio_codec": (
                 "ALTER TABLE encoding_profiles ADD COLUMN "
@@ -294,7 +300,10 @@ configure_logging()
 LOGGER = logging.getLogger("orchestrator")
 NOTIFIER = WebsocketNotifier()
 
-TEMPLATE_PATH = Path(__file__).parent / "templates" / "index.html"
+BASE_DIR = Path(__file__).parent
+STATIC_DIR = BASE_DIR / "static"
+STATIC_DIR.mkdir(parents=True, exist_ok=True)
+TEMPLATE_PATH = BASE_DIR / "templates" / "index.html"
 INDEX_HTML = TEMPLATE_PATH.read_text()
 
 app = FastAPI(title="Chromecast Transcode Orchestrator", version="0.1.0")
@@ -304,6 +313,7 @@ app.add_middleware(
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
+app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 
 class ScanRequest(BaseModel):
@@ -353,7 +363,7 @@ class EntryProfilePayload(BaseModel):
 class LibraryCreatePayload(BaseModel):
     name: str = Field(min_length=1)
     root: str = Field(min_length=1, description="Absolute path to the library root")
-    depth: str = Field(default="max")
+    depth: Optional[str] = Field(default=None)
     profile_id: int
 
 
@@ -376,6 +386,19 @@ def _worker_metrics_summary() -> Dict[str, Any]:
 
 async def _emit_library_update(action: str, payload: Dict[str, Any]) -> None:
     await NOTIFIER.broadcast({"type": "library-update", "action": action, "library": payload})
+
+
+def _normalize_display_path(path: Optional[str]) -> Optional[str]:
+    if not path:
+        return path
+    normalized = path.replace("\\", "/")
+    watch_prefix = "/watch/"
+    if normalized == "/watch":
+        return DISPLAY_LIBRARY_PREFIX
+    if normalized.startswith(watch_prefix):
+        suffix = normalized[len(watch_prefix) :]
+        return f"{DISPLAY_LIBRARY_PREFIX.rstrip('/')}/{suffix}".replace("//", "/")
+    return normalized
 
 
 class LibraryEntryResponse(BaseModel):
@@ -416,6 +439,7 @@ class EncodingUpdatePayload(BaseModel):
     aq: bool = Field(default=True)
     spatial_aq: bool = Field(default=True)
     temporal_aq: bool = Field(default=True)
+    aq_strength: int = Field(default=7, ge=5, le=10)
     audio: config_module.AudioProfile
 
 
@@ -467,6 +491,7 @@ def _seed_profiles_and_libraries(snapshot: config_module.ConfigSnapshot) -> None
                 aq=profile.aq,
                 spatial_aq=profile.spatial_aq,
                 temporal_aq=profile.temporal_aq,
+                aq_strength=getattr(profile, "aq_strength", 7),
                 audio_codec=profile.audio.codec,
                 audio_bitrate=profile.audio.bitrate,
                 audio_channels=profile.audio.channels,
@@ -514,6 +539,7 @@ def _profile_data_from_payload(
         aq=payload.aq,
         spatial_aq=payload.spatial_aq,
         temporal_aq=payload.temporal_aq,
+        aq_strength=payload.aq_strength,
         audio=payload.audio,
     )
     profile_data = ProfileData(
@@ -536,6 +562,7 @@ def _profile_data_from_payload(
         aq=validated.aq,
         spatial_aq=validated.spatial_aq,
         temporal_aq=validated.temporal_aq,
+        aq_strength=validated.aq_strength,
         audio_codec=validated.audio.codec,
         audio_bitrate=validated.audio.bitrate,
         audio_channels=validated.audio.channels,
@@ -575,6 +602,7 @@ def encoding_payload(profile_id: int) -> Dict[str, Any]:
         "lookahead": profile.lookahead,
         "adaptive_b_frames": profile.adaptive_b_frames,
         "aq": profile.aq,
+        "aq_strength": getattr(profile, "aq_strength", 7),
         "spatial_aq": profile.spatial_aq,
         "temporal_aq": profile.temporal_aq,
         "audio": {
@@ -677,7 +705,30 @@ async def _record_library_entry(
 
 
 def _entry_to_response(entry: LibraryEntry) -> Dict[str, Any]:
-    return LibraryEntryResponse.model_validate(entry).model_dump()
+    payload = LibraryEntryResponse.model_validate(entry).model_dump()
+    payload["path"] = _normalize_display_path(payload.get("path"))
+    if payload.get("output_path"):
+        payload["output_path"] = _normalize_display_path(payload.get("output_path"))
+    return payload
+
+
+def _job_elapsed_seconds(job: jobs.Job) -> int:
+    start = job.created_at or datetime.utcnow()
+    if job.status in {jobs.JobStatus.COMPLETED, jobs.JobStatus.FAILED}:
+        end = job.updated_at or datetime.utcnow()
+    else:
+        end = datetime.utcnow()
+    try:
+        return max(0, int((end - start).total_seconds()))
+    except Exception:  # noqa: BLE001
+        return 0
+
+
+def _job_to_response(job: jobs.Job) -> Dict[str, Any]:
+    payload = job.model_dump()
+    payload["path"] = _normalize_display_path(payload.get("path"))
+    payload["elapsed_seconds"] = _job_elapsed_seconds(job)
+    return payload
 
 
 def _sync_entry_from_job(job: jobs.Job, status: str, message: Optional[str] = None) -> None:
@@ -1010,11 +1061,19 @@ async def create_library(
     if not root:
         raise HTTPException(status_code=400, detail="Library root is required")
 
+    depth_value = "max"
+    if payload.depth and payload.depth.lower() != "max":
+        LOGGER.info(
+            "Ignoring requested depth %s for library %s; full scans enforced.",
+            payload.depth,
+            normalized_name,
+        )
+
     library = LIBRARY_CONFIG_STORE.upsert(
         LibraryData(
             name=normalized_name,
             root=root,
-            depth=payload.depth or "max",
+            depth=depth_value,
             profile_id=payload.profile_id,
         )
     )
@@ -1141,7 +1200,13 @@ async def update_logging(payload: LoggingUpdatePayload) -> JSONResponse:
 @app.get("/api/jobs")
 async def list_jobs() -> JSONResponse:
     jobs_list = await job_manager.list_jobs()
-    return JSONResponse(jsonable_encoder([job.model_dump() for job in jobs_list]))
+    return JSONResponse(jsonable_encoder([_job_to_response(job) for job in jobs_list]))
+
+
+@app.post("/api/jobs/clear")
+async def clear_completed_jobs() -> JSONResponse:
+    removed = await job_manager.clear_processed()
+    return JSONResponse({"removed": removed})
 
 
 @app.get("/api/jobs/next")
@@ -1155,7 +1220,9 @@ async def next_job() -> JSONResponse:
     delivery_id, job = claimed
     _sync_entry_from_job(job, LibraryStatus.CONVERTING)
     _record_job_history(job, JobHistoryStatus.RUNNING)
-    return JSONResponse(jsonable_encoder(job.model_dump() | {"delivery_id": delivery_id}))
+    payload = _job_to_response(job)
+    payload["delivery_id"] = delivery_id
+    return JSONResponse(jsonable_encoder(payload))
 
 
 @app.post("/api/jobs/{job_id}/status")
@@ -1172,7 +1239,7 @@ async def update_job_status(job_id: str, payload: JobStatusPayload) -> JSONRespo
     elif payload.status == jobs.JobStatus.FAILED:
         _sync_entry_from_job(job, LibraryStatus.FAILED, payload.message)
     _record_job_history(job, payload.status, payload.message, completed=completed)
-    return JSONResponse(jsonable_encoder(job.model_dump()))
+    return JSONResponse(jsonable_encoder(_job_to_response(job)))
 
 
 @app.post("/api/jobs/{job_id}/ack")
