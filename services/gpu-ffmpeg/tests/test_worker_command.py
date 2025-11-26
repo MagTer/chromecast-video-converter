@@ -95,6 +95,7 @@ def test_build_ffmpeg_command_maps_streams(worker_module, tmp_path):
     assert "-map" in command and "0:v" in command
     assert "-map" in command and "0:a:0" in command and "0:a:1" in command
     assert "-c:a" in command and "aac" in command
+    assert "-aq-strength" in command and command[command.index("-aq-strength") + 1] == "7"
     assert "-disposition:a:0" in command and "default" in command
     assert "-c:s" in command and "mov_text" in command
     assert command[-1] == str(output_path)
@@ -116,6 +117,7 @@ def test_build_ffmpeg_command_respects_frame_limits(worker_module, tmp_path):
                 "rc": "vbr_hq",
                 "cq": 17,
                 "lookahead": 24,
+                "aq_strength": 9,
                 "audio": {"codec": "aac", "bitrate": "192k", "channels": 2},
                 "resolution": "1920x1080",
             }
@@ -132,8 +134,8 @@ def test_build_ffmpeg_command_respects_frame_limits(worker_module, tmp_path):
     vf_index = command.index("-vf")
     assert "fps=24" in command[vf_index + 1]
     assert "scale_cuda=-2:1080" in command[vf_index + 1]
-    assert "-multipass" in command
-    assert "-rc" in command and "vbr_hq" in command
+    assert "-rc" in command and command[command.index("-rc") + 1] == "vbr"
+    assert "-aq-strength" in command and command[command.index("-aq-strength") + 1] == "9"
 
 
 def test_build_ffmpeg_command_respects_profile_level_and_aq(worker_module, tmp_path):
@@ -181,5 +183,6 @@ def test_build_ffmpeg_command_respects_profile_level_and_aq(worker_module, tmp_p
     assert "-b:v" not in command  # CQ should not emit VBR flags
     assert "-spatial_aq" in command and command[command.index("-spatial_aq") + 1] == "0"
     assert "-temporal_aq" in command and command[command.index("-temporal_aq") + 1] == "0"
+    assert "-aq-strength" not in command
     assert "-c:a" in command and command[command.index("-c:a") + 1] == "aac"
     assert "-ac" in command and command[command.index("-ac") + 1] == "2"

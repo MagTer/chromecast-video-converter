@@ -98,6 +98,16 @@ class InMemoryRedis:
         items = sorted(self._sorted.get(key, {}).items(), key=lambda item: item[1], reverse=True)
         return [item[0] for item in items[start : stop + 1]]
 
+    async def zrange(self, key: str, start: int, stop: int):
+        items = sorted(self._sorted.get(key, {}).items(), key=lambda item: item[1])
+        end = None if stop == -1 else stop + 1
+        return [item[0] for item in items[start:end]]
+
+    async def zrem(self, key: str, member: str):
+        bucket = self._sorted.get(key)
+        if bucket and member in bucket:
+            bucket.pop(member, None)
+
     async def xadd(
         self, stream: str, fields: dict[str, str], *, maxlen: int, approximate: bool = True
     ):

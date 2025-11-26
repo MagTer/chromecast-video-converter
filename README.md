@@ -12,7 +12,13 @@ Alpine watcher feeds file-system events into the system.
   ```bash
   curl -X POST http://localhost:9000/api/libraries \
     -H 'Content-Type: application/json' \
-    -d '{"name":"movies","root":"/watch/movies","depth":"max","profile_id":1}'
+    -d '{"name":"movies","root":"/media/movies","profile_id":1}'
+  ```
+
+- **Clear processed jobs**
+
+  ```bash
+  curl -X POST http://localhost:9000/api/jobs/clear
   ```
 
 - **Subscribe to live updates** (jobs/entries/libraries)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import importlib
 import sys
 from pathlib import Path
@@ -52,6 +53,12 @@ def _first_profile_id(client: TestClient) -> int:
     profiles = client.get("/api/profiles").json()
     assert profiles, "Profiles should be seeded"
     return profiles[0]["id"]
+
+
+def _first_profile_name(client: TestClient) -> str:
+    profiles = client.get("/api/profiles").json()
+    assert profiles
+    return profiles[0]["name"]
 
 
 def test_events_ingest_creates_entry(test_app, tmp_path):
@@ -187,3 +194,45 @@ def test_websocket_pushes_library_update(test_app, tmp_path):
         message = websocket.receive_json()
         assert message["type"] == "library-update"
         assert message["action"] == "created"
+
+
+def test_clear_jobs_endpoint_removes_completed_jobs(test_app, tmp_path):
+    client, main = test_app
+    profile_id = _first_profile_id(client)
+    profile_name = _first_profile_name(client)
+
+    media_root = tmp_path / "clear"
+    media_root.mkdir()
+    library_payload = {
+        "name": "clear-lib",
+        "root": str(media_root),
+        "profile_id": profile_id,
+    }
+    assert client.post("/api/libraries", json=library_payload).status_code == 201
+
+    source = media_root / "sample.mkv"
+    source.write_bytes(b"data")
+
+    job = asyncio.run(
+        main.job_manager.add_job(
+            str(source),
+            "clear-lib",
+            profile_name,
+            profile_id=profile_id,
+            encoding=main.encoding_payload(profile_id),
+        )
+    )
+
+    asyncio.run(
+        main.job_manager.update_job(
+            job.id,
+            main.jobs.JobStatusUpdate(status=main.jobs.JobStatus.COMPLETED, progress=100),
+        )
+    )
+
+    response = client.post("/api/jobs/clear")
+    assert response.status_code == 200
+    assert response.json()["removed"] >= 1
+
+    jobs_after = client.get("/api/jobs").json()
+    assert all(item["status"] != main.jobs.JobStatus.COMPLETED for item in jobs_after)

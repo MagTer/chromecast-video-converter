@@ -10,13 +10,12 @@ This cheatsheet covers the orchestrator endpoints most operators and scripts wil
   ```json
   {
     "name": "movies",
-    "root": "/watch/movies",
-    "depth": "max",
+    "root": "/media/movies",
     "profile_id": 1
   }
   ```
 
-  Constraints: `name` unique; `root` non-empty (use mounted `/watch/...` or `/media/...`); `profile_id` must exist.
+  Constraints: `name` unique; `root` non-empty (use mounted `/media/...` or `/watch/...`, the API normalizes to `/media/...` when responding); `profile_id` must exist. Depth always defaults to `"max"` so the entire tree is scanned.
 
 - **Delete**: `DELETE /api/libraries/{name}` — Removes library config and marks existing entries from that library as `removed`.
 
@@ -53,9 +52,11 @@ This cheatsheet covers the orchestrator endpoints most operators and scripts wil
 
 ## Jobs
 
+- **List**: `GET /api/jobs` returns recent queue entries (newest first) with normalized paths and an `elapsed_seconds` field suitable for showing runtime in the dashboard.
 - **Next job**: `GET /api/jobs/next`
 - **Update status**: `POST /api/jobs/{job_id}/status` with `{ "status": "running|completed|failed", "progress": 0-100, "message": "..." }`
 - **Acknowledge**: `POST /api/jobs/{job_id}/ack` with `{ "delivery_id": "..." }`
+- **Clear processed jobs**: `POST /api/jobs/clear` removes completed and failed jobs from Redis.
 
 ## WebSocket
 
