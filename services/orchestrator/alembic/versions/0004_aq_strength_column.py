@@ -23,7 +23,19 @@ def upgrade() -> None:
     )
     conn = op.get_bind()
     conn.execute(sa.text("UPDATE encoding_profiles SET aq_strength = 7 WHERE aq_strength IS NULL"))
-    op.alter_column("encoding_profiles", "aq_strength", server_default=None)
+
+    if conn.dialect.name == "sqlite":
+        # SQLite cannot drop a column default in-place, so recreate the table via
+        # batch_alter_table to align the new schema with other backends.
+        with op.batch_alter_table("encoding_profiles", recreate="always") as batch_op:
+            batch_op.alter_column(
+                "aq_strength",
+                existing_type=sa.Integer(),
+                existing_nullable=False,
+                server_default=None,
+            )
+    else:
+        op.alter_column("encoding_profiles", "aq_strength", server_default=None)
 
 
 def downgrade() -> None:
