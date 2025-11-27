@@ -30,6 +30,13 @@ def _build_test_app(tmp_path: Path, monkeypatch, fake_redis):
         "app.logs",
         "app.config",
         "app.db",
+        "app.dependencies",
+        "app.services.core",
+        "app.routers.system",
+        "app.routers.jobs",
+        "app.routers.libraries",
+        "app.routers.config",
+        "app.routers.logs",
     ]:
         sys.modules.pop(module, None)
 
@@ -101,6 +108,10 @@ def test_events_ingest_creates_entry(test_app, tmp_path):
 
 def test_reprocess_endpoint_adds_job(test_app, tmp_path):
     client, main = test_app
+
+    # Ensure cleanup
+    client.delete("/api/libraries/runtime")
+
     profile_id = _first_profile_id(client)
     profile_name = client.get(f"/api/profiles/{profile_id}").json()["name"]
 
@@ -198,6 +209,8 @@ def test_websocket_pushes_library_update(test_app, tmp_path):
 
 def test_clear_jobs_endpoint_removes_completed_jobs(test_app, tmp_path):
     client, main = test_app
+    import app.jobs as jobs_module
+
     profile_id = _first_profile_id(client)
     profile_name = _first_profile_name(client)
 
@@ -226,7 +239,7 @@ def test_clear_jobs_endpoint_removes_completed_jobs(test_app, tmp_path):
     asyncio.run(
         main.job_manager.update_job(
             job.id,
-            main.jobs.JobStatusUpdate(status=main.jobs.JobStatus.COMPLETED, progress=100),
+            jobs_module.JobStatusUpdate(status=jobs_module.JobStatus.COMPLETED, progress=100),
         )
     )
 
@@ -235,4 +248,4 @@ def test_clear_jobs_endpoint_removes_completed_jobs(test_app, tmp_path):
     assert response.json()["removed"] >= 1
 
     jobs_after = client.get("/api/jobs").json()
-    assert all(item["status"] != main.jobs.JobStatus.COMPLETED for item in jobs_after)
+    assert all(item["status"] != jobs_module.JobStatus.COMPLETED for item in jobs_after)
