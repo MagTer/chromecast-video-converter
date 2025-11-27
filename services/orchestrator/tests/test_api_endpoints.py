@@ -30,6 +30,13 @@ def _build_test_app(tmp_path: Path, monkeypatch, fake_redis):
         "app.logs",
         "app.config",
         "app.db",
+        "app.dependencies",
+        "app.services.core",
+        "app.routers.system",
+        "app.routers.jobs",
+        "app.routers.libraries",
+        "app.routers.config",
+        "app.routers.logs",
     ]:
         sys.modules.pop(module, None)
 
