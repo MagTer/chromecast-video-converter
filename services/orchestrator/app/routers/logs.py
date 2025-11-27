@@ -1,0 +1,75 @@
+from datetime import datetime, timezone
+from typing import Optional
+
+from fastapi import APIRouter
+from fastapi.responses import JSONResponse
+
+from ..dependencies import LOG_STORE
+from ..logs import LogEntry, derive_source_category, severity_value
+from ..schemas import LogIngestBatch
+
+router = APIRouter()
+
+
+@router.get("/api/logs")
+async def list_logs(
+    level: Optional[str] = None,
+    min_severity: Optional[str] = None,
+    query: Optional[str] = None,
+    logger: Optional[str] = None,
+    source: Optional[str] = None,
+    category: Optional[str] = None,
+) -> JSONResponse:
+    severity_filter = None if min_severity == "ALL" else (min_severity or "INFO")
+    entries = LOG_STORE.list_entries(
+        level=level,
+        min_severity=severity_filter,
+        query=query,
+        logger_name=logger,
+        category=category,
+        source=source,
+        limit=200,
+    )
+    return JSONResponse(entries)
+
+
+@router.get("/api/logs/categories")
+async def list_log_categories() -> JSONResponse:
+    return JSONResponse(LOG_STORE.list_categories())
+
+
+@router.get("/api/logs/sources")
+async def list_log_sources() -> JSONResponse:
+    return JSONResponse(LOG_STORE.list_sources())
+
+
+@router.get("/api/logs/stats")
+async def log_stats() -> JSONResponse:
+    return JSONResponse(LOG_STORE.stats())
+
+
+@router.post("/api/logs/ingest")
+async def ingest_logs(batch: LogIngestBatch) -> JSONResponse:
+    stored = 0
+    for entry in batch.entries:
+        severity = entry.severity or entry.level
+        source = entry.source
+        category = entry.category
+        if not source or not category:
+            derived_source, derived_category = derive_source_category(entry.logger)
+            source = source or derived_source
+            category = category or derived_category
+        LOG_STORE.add_entry(
+            LogEntry(
+                timestamp=entry.timestamp or datetime.now(timezone.utc),
+                level=entry.level,
+                severity=severity,
+                severity_value=severity_value(severity),
+                logger=entry.logger,
+                source=source,
+                category=category,
+                message=entry.message,
+            )
+        )
+        stored += 1
+    return JSONResponse({"stored": stored})
