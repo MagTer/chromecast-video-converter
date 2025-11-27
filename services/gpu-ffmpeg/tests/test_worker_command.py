@@ -25,7 +25,7 @@ def worker_module(monkeypatch):
     return importlib.reload(worker)
 
 
-def test_nvenc_capabilities_downgraded_on_wsl(monkeypatch):
+def test_nvenc_capabilities_preserved_on_wsl(monkeypatch):
     def fake_run(command, check=True, capture_output=True, text=True):  # noqa: ANN001, ANN204
         if "encoder=h264_nvenc" in " ".join(command):
             return types.SimpleNamespace(stdout="fullres\nvbr_hq\n", stderr="")
@@ -39,8 +39,8 @@ def test_nvenc_capabilities_downgraded_on_wsl(monkeypatch):
     worker_module = importlib.reload(worker)
 
     assert worker_module.HOST_ENVIRONMENT["is_wsl2"] is True
-    assert worker_module.NVENC_CAPABILITIES["rc_vbr_hq"] is False
-    assert worker_module.NVENC_CAPABILITIES["multipass_fullres"] is False
+    assert worker_module.NVENC_CAPABILITIES["rc_vbr_hq"] is True
+    assert worker_module.NVENC_CAPABILITIES["multipass_fullres"] is True
 
 
 def test_build_ffmpeg_command_maps_streams(worker_module, tmp_path):
@@ -91,7 +91,8 @@ def test_build_ffmpeg_command_maps_streams(worker_module, tmp_path):
     assert "-multipass" not in command
     assert "-b:v" in command and "5M" in command
     assert "-bf" in command
-    assert "-look_ahead_depth" in command
+    assert "-rc-lookahead" in command
+    assert command[command.index("-rc-lookahead") + 1] == "10"
     assert "-map" in command and "0:v" in command
     assert "-map" in command and "0:a:0" in command and "0:a:1" in command
     assert "-c:a" in command and "aac" in command
@@ -134,7 +135,8 @@ def test_build_ffmpeg_command_respects_frame_limits(worker_module, tmp_path):
     vf_index = command.index("-vf")
     assert "fps=24" in command[vf_index + 1]
     assert "scale_cuda=-2:1080" in command[vf_index + 1]
-    assert "-rc" in command and command[command.index("-rc") + 1] == "vbr"
+    assert "-rc" in command and command[command.index("-rc") + 1] == "vbr_hq"
+    assert "-multipass" in command and command[command.index("-multipass") + 1] == "fullres"
     assert "-aq-strength" in command and command[command.index("-aq-strength") + 1] == "9"
 
 
@@ -177,7 +179,7 @@ def test_build_ffmpeg_command_respects_profile_level_and_aq(worker_module, tmp_p
     bf_index = command.index("-bf")
     assert command[bf_index + 1] == "0"
     assert "-b_adapt" in command and command[command.index("-b_adapt") + 1] == "0"
-    assert "-look_ahead" in command and command[command.index("-look_ahead") + 1] == "0"
+    assert "-rc-lookahead" in command and command[command.index("-rc-lookahead") + 1] == "0"
     assert "-rc" in command and command[command.index("-rc") + 1] == "constqp"
     assert "-qp" in command and command[command.index("-qp") + 1] == "20"
     assert "-b:v" not in command  # CQ should not emit VBR flags

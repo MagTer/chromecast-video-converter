@@ -1,4 +1,7 @@
-FROM nvidia/cuda:12.9.0-runtime-ubuntu22.04
+FROM nvidia/cuda:13.0.2-runtime-ubuntu24.04
+
+# Allow pip installs on Ubuntu 24.04 base image (PEP 668 managed env)
+ENV PIP_BREAK_SYSTEM_PACKAGES=1
 
 RUN apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y \
