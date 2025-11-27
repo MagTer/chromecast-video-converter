@@ -278,9 +278,9 @@ def _validate_encoding_options(
             "NVENC CQ must be between 0 and 30 for stable quality on Gen 2 Chromecasts."
         )
 
-    allowed_rc_modes = {"cq", "vbr"}
+    allowed_rc_modes = {"cq", "vbr", "vbr_hq"}
     if rc_mode.lower() not in allowed_rc_modes:
-        raise ValueError("Rate control must be cq or vbr for Chromecast-safe outputs.")
+        raise ValueError("Rate control must be cq, vbr, or vbr_hq for Chromecast-safe outputs.")
 
     if max_fps <= 0 or max_fps > 60:
         raise ValueError("Frame rate must be between 1 and 60 fps.")
@@ -334,12 +334,6 @@ class Profile(BaseModel):
 
         rc_mode = values.rc.lower()
         if rc_mode == "cbr":
-            rc_mode = "vbr"
-        if rc_mode == "vbr_hq":
-            LOGGER.warning(
-                "Profile %s uses deprecated rc=vbr_hq; defaulting to vbr",
-                getattr(values, "name", "unknown"),
-            )
             rc_mode = "vbr"
         values.rc = rc_mode
 

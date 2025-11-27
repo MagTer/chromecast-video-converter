@@ -401,6 +401,14 @@ def _normalize_display_path(path: Optional[str]) -> Optional[str]:
     return normalized
 
 
+def _resolve_media_path(path: Optional[str]) -> Path:
+    normalized = _normalize_display_path(path)
+    target = normalized or path
+    if not target:
+        raise ValueError("Path is required")
+    return Path(target)
+
+
 class LibraryEntryResponse(BaseModel):
     id: int
     path: str
@@ -1361,11 +1369,11 @@ async def reprocess_entry(
 @app.post("/api/library/entries/{entry_id}/remove-original")
 async def remove_original(entry_id: int) -> JSONResponse:
     entry = _get_entry_or_404(entry_id)
-    output_path = Path(entry.output_path or job_manager.output_path(Path(entry.path)))
+    source = _resolve_media_path(entry.path)
+    output_path = Path(entry.output_path or job_manager.output_path(source))
     if not output_path.exists() or output_path.stat().st_size == 0:
         raise HTTPException(status_code=409, detail="Converted output missing or empty")
 
-    source = Path(entry.path)
     if not source.exists():
         updated = LIBRARY_STORE.update_status(
             entry.path,

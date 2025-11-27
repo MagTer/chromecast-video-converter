@@ -94,6 +94,17 @@ POLL_INTERVAL = int(os.environ.get("GPU_POLL_INTERVAL", "5"))
 # Keep scaling on the GPU to avoid format mismatches between CUDA surfaces and
 # software filters.
 SCALING_EXPRESSION = "scale_cuda=-2:720:force_original_aspect_ratio=decrease"
+WATCH_PREFIX = Path("/watch")
+MEDIA_PREFIX = Path("/media")
+
+
+def _resolve_media_path(path: str | Path) -> Path:
+    normalized = Path(str(path).replace("\\", "/"))
+    try:
+        relative = normalized.relative_to(WATCH_PREFIX)
+    except ValueError:
+        return normalized
+    return MEDIA_PREFIX / relative
 
 
 def _detect_host_environment() -> dict[str, bool]:
@@ -148,18 +159,6 @@ def _probe_nvenc_capabilities() -> dict[str, bool]:
 HOST_ENVIRONMENT = _detect_host_environment()
 NVENC_CAPABILITIES = _probe_nvenc_capabilities()
 
-if HOST_ENVIRONMENT.get("is_wsl2"):
-    LOGGER.warning(
-        "Detected WSL2 environment; NVENC rate-control and multipass support may be limited"
-    )
-    if NVENC_CAPABILITIES.get("rc_vbr_hq") or NVENC_CAPABILITIES.get("multipass_fullres"):
-        NVENC_CAPABILITIES["rc_vbr_hq"] = False
-        NVENC_CAPABILITIES["multipass_fullres"] = False
-        LOGGER.warning(
-            "Disabling NVENC VBR HQ and multipass; WSL2 drivers often reject that combination. "
-            "Worker will fall back to single-pass VBR."
-        )
-
 CONFIG_PATH = Path(os.environ.get("CONFIG_PATH", "/app/config/settings.yaml"))
 PROFILES: dict = {}
 OPERATIONAL_CONFIG: dict = {}
@@ -211,9 +210,10 @@ if not _load_config_from_api():
     _load_config_from_disk()
 FFPROBE_ANALYSIS_CMD = [
     "ffprobe",
-    "-v",
-    "quiet",
-    "-print_format",
+    "-hide_banner",
+    "-loglevel",
+    "warning",
+    "-of",
     "json",
     "-show_format",
     "-show_streams",
@@ -301,22 +301,49 @@ def require_gpu(gpu_state: dict[str, Any] | None = None) -> dict[str, Any]:
 
 
 def probe_file(filepath: str | Path) -> dict:
-    command = [*FFPROBE_ANALYSIS_CMD, str(filepath)]
-    try:
-        result = subprocess.run(
-            command,
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-    except subprocess.SubprocessError as exc:
-        LOGGER.warning("ffprobe analysis failed for %s: %s", filepath, exc)
-        return {}
-    try:
-        return json.loads(result.stdout)
-    except json.JSONDecodeError:
-        LOGGER.warning("Failed to parse ffprobe output for %s", filepath)
-        return {}
+    target_path = _resolve_media_path(filepath)
+    command = [*FFPROBE_ANALYSIS_CMD, str(target_path)]
+    attempts = 3
+    for attempt in range(1, attempts + 1):
+        try:
+            result = subprocess.run(
+                command,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            try:
+                return json.loads(result.stdout)
+            except json.JSONDecodeError:
+                LOGGER.warning("Failed to parse ffprobe output for %s", filepath)
+                return {}
+        except subprocess.CalledProcessError as exc:
+            stderr = (exc.stderr or "").strip()
+            lowered = stderr.lower()
+            if "moov atom not found" in lowered:
+                LOGGER.info(
+                    "ffprobe skipped %s (file still being written): %s",
+                    target_path,
+                    stderr or exc,
+                )
+            else:
+                LOGGER.warning(
+                    "ffprobe analysis failed for %s (exit %s): %s",
+                    target_path,
+                    exc.returncode,
+                    stderr or exc,
+                )
+            if attempt < attempts and "moov atom not found" in stderr.lower():
+                time.sleep(0.5 * attempt)
+                continue
+            return {}
+        except subprocess.SubprocessError as exc:
+            LOGGER.warning("ffprobe analysis failed for %s: %s", target_path, exc)
+            if attempt < attempts:
+                time.sleep(0.5 * attempt)
+                continue
+            return {}
+    return {}
 
 
 def _normalize_language(language: str | None) -> str | None:
@@ -471,7 +498,7 @@ def build_ffmpeg_command(  # noqa: C901
     max_fps = max(1, int(profile.get("max_fps", 30) or 30))
     preset = str(profile.get("preset", "p6"))
     rc_mode = str(profile.get("rc", "vbr") or "vbr").lower()
-    if rc_mode in {"cbr", "vbr_hq"}:
+    if rc_mode == "cbr":
         rc_mode = "vbr"
     cq = str(profile.get("cq", 18))
     bframes = int(profile.get("bframes", 2) or 0)
@@ -559,9 +586,9 @@ def build_ffmpeg_command(  # noqa: C901
     command.extend(["-bf", str(bframes)])
 
     if lookahead > 0:
-        command.extend(["-look_ahead", "1", "-look_ahead_depth", str(lookahead)])
+        command.extend(["-rc-lookahead", str(lookahead)])
     else:
-        command.extend(["-look_ahead", "0"])
+        command.extend(["-rc-lookahead", "0"])
 
     command.extend(["-b_adapt", "1" if adaptive_b_frames else "0"])
     command.extend(
@@ -869,10 +896,12 @@ async def _validate_output(output: Path, expected_duration: float) -> bool:
 
 
 def _build_output_path(source: Path) -> Path:
-    return source.parent / f"{source.stem}-chromecast.mp4"
+    resolved = _resolve_media_path(source)
+    return resolved.parent / f"{resolved.stem}-chromecast.mp4"
 
 
 async def _maybe_remove_original(source: Path, output_path: Path, expected_duration: float) -> bool:
+    source = _resolve_media_path(source)
     if not REMOVE_ORIGINAL:
         return False
     if not await _validate_output(output_path, expected_duration):
@@ -890,9 +919,9 @@ async def _maybe_remove_original(source: Path, output_path: Path, expected_durat
 async def process_job(client: httpx.AsyncClient, job: dict) -> None:  # noqa: C901
     job_id = job["id"]
     source = job["path"]
-    LOGGER.info("Picked up job %s for %s", job_id[:8], source)
+    playback_target = _resolve_media_path(source)
+    LOGGER.info("Picked up job %s for %s (resolved %s)", job_id[:8], source, playback_target)
     await update_job_status(client, job_id, "running", 5, "Allocated to GPU worker")
-    playback_target = Path(source)
     if not playback_target.exists():
         message = f"Source file not found: {source}"
         LOGGER.error("%s", message)

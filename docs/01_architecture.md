@@ -6,7 +6,7 @@
 - Keep every asset streamable on Chromecast Gen 2/3 without server-side transcoding.
 - Guarantee GPU-only encoding on an NVIDIA RTX 3060 and cap resolution at 720p.
 - Prioritize perceptual quality and smooth action playback while targeting 1.8-3.2 GB movies.
-- Enforce H.264 (High, auto-level from 3.1 upward) video / AAC 192 kbps stereo audio (2 channels), yuv420p pixel format, NVENC preset `p7` by default (P4–P7 allowed), rate control limited to CQ or single-pass VBR (two-pass VBR HQ removed; CQ uses `-rc constqp -qp <cq>` while VBR uses `-b:v/-maxrate/-bufsize`), `-bf 0–3` gated by profile, lookahead 0–32 with adaptive B-frames only when lookahead>0, AQ on by default (`-spatial_aq 1 -temporal_aq 1`) with a tunable strength slider, `-movflags +faststart`, and downscale-only filtering (`scale=-2:720:force_original_aspect_ratio=decrease`, fps capped per profile).
+- Enforce H.264 (High, auto-level from 3.1 upward) video / AAC 192 kbps stereo audio (2 channels), yuv420p pixel format, NVENC preset `p7` by default (P4–P7 allowed), and rate control modes CQ, single-pass VBR, or multi-pass VBR HQ (CQ keeps `-rc constqp -qp <cq>`, VBR uses `-rc vbr` plus `-b:v/-maxrate/-bufsize`, and VBR HQ layers on `-multipass fullres` when workers report support). We drive lookahead through FFmpeg 6.1’s `-rc-lookahead` flag (0–32 frames) with adaptive B-frames gated on lookahead>0, keep AQ on by default (`-spatial_aq 1 -temporal_aq 1`) with a tunable strength slider, always set `-movflags +faststart`, and only downscale (`scale=-2:720:force_original_aspect_ratio=decrease` with fps caps per profile).
 - Deliver production-grade logging, guardrails for invalid configs, and fault tolerance.
 
 ## Container topology

@@ -304,7 +304,7 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
       if (!ffmpegPreview) return;
 
       let rc = profileRcSelect.value || "vbr";
-      if (rc === "cbr" || rc === "vbr_hq") {
+      if (rc === "cbr") {
         rc = "vbr";
       }
       const resolution = profileResolutionSelect.value;
@@ -334,6 +334,9 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
         parts.push(`-b:v ${profileBitrateSelect.value || "5M"}`);
         parts.push(`-maxrate ${profileMaxrateSelect.value || "10M"}`);
         parts.push(`-bufsize ${profileBufsizeSelect.value || "16M"}`);
+        if (rc === "vbr_hq") {
+          parts.push("-multipass fullres");
+        }
       }
 
       const bframes = Number(bframesSelect.value || "0");
@@ -341,9 +344,9 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
 
       const lookahead = Number(lookaheadInput.value || "0");
       if (lookahead > 0) {
-        parts.push("-look_ahead 1", `-look_ahead_depth ${lookahead}`);
+        parts.push(`-rc-lookahead ${lookahead}`);
       } else {
-        parts.push("-look_ahead 0");
+        parts.push("-rc-lookahead 0");
       }
 
       const adaptiveAllowed = lookahead > 0 && bframes > 0;
@@ -383,6 +386,7 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
 
     function renderProfileSelect() {
       const profileSelect = document.querySelector("#profile-select");
+      const previousValue = profileSelect.value;
       const profiles = profileList();
       profileSelect.innerHTML = "";
       if (!profiles.length) {
@@ -399,21 +403,26 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
         option.textContent = profile.id ? `${profile.name} (#${profile.id})` : profile.name;
         profileSelect.appendChild(option);
       });
-      if (!profileSelect.value) {
+      if (previousValue && profiles.some((profile) => profile.name === previousValue)) {
+        profileSelect.value = previousValue;
+      } else if (!profileSelect.value) {
         profileSelect.value = profiles[0].name;
       }
       profileNameInput.value = profileSelect.value;
 
       if (libraryProfileSelect) {
         libraryProfileSelect.innerHTML = "";
+        const previousLibrarySelection = libraryProfileSelect.value;
         profiles.forEach((profile) => {
           const option = document.createElement("option");
           option.value = profile.id ?? profile.name;
           option.textContent = profile.name;
           libraryProfileSelect.appendChild(option);
         });
-        if (!libraryProfileSelect.value && profiles.length) {
-          libraryProfileSelect.value = profiles[0].id;
+        if (previousLibrarySelection && profiles.some((profile) => String(profile.id ?? profile.name) === previousLibrarySelection)) {
+          libraryProfileSelect.value = previousLibrarySelection;
+        } else if (!libraryProfileSelect.value && profiles.length) {
+          libraryProfileSelect.value = profiles[0].id ?? profiles[0].name;
         }
       }
     }
@@ -554,7 +563,7 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
       ensureOption(profileFpsSelect, profile.max_fps ?? 30);
       ensureOption(profilePresetSelect, profile.preset ?? "p7");
       let rcMode = profile.rc || "vbr";
-      if (rcMode === "cbr" || rcMode === "vbr_hq") {
+      if (rcMode === "cbr") {
         rcMode = "vbr";
       }
       ensureOption(profileRcSelect, rcMode);
@@ -584,9 +593,16 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
     }
 
     function renderJobTable() {
-      const sorted = [...(jobCache || [])].sort((a, b) =>
-        a.created_at > b.created_at ? -1 : 1,
-      );
+      const sorted = [...(jobCache || [])].sort((a, b) => {
+        const statusA = String(a.status || "").toLowerCase();
+        const statusB = String(b.status || "").toLowerCase();
+        if (statusA === "running" && statusB !== "running") return -1;
+        if (statusB === "running" && statusA !== "running") return 1;
+        const createdA = new Date(a.created_at || 0).getTime();
+        const createdB = new Date(b.created_at || 0).getTime();
+        if (createdA === createdB) return 0;
+        return createdA > createdB ? -1 : 1;
+      });
       jobRows.innerHTML = "";
       sorted.forEach((job) => {
         const tr = document.createElement("tr");
@@ -595,7 +611,14 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
         const statusLabel = status ? `${status[0].toUpperCase()}${status.slice(1)}` : "";
         const normalizedPath = normalizeDisplayPath(job.path);
         const fileName = fileNameFromPath(normalizedPath);
-        const elapsed = formatElapsed(jobElapsedSeconds(job));
+        const recordedElapsed = Number(job?.elapsed_seconds ?? Number.NaN);
+        const elapsedSeconds =
+          status === "running"
+            ? jobElapsedSeconds(job)
+            : Number.isFinite(recordedElapsed)
+            ? recordedElapsed
+            : 0;
+        const elapsed = formatElapsed(elapsedSeconds);
         tr.innerHTML = `
           <td>
             <button
@@ -652,7 +675,10 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
     async function refreshQueueState() {
       const response = await fetch("/api/queue/state");
       const state = await response.json();
-      queueMetrics.textContent = `Depth: ${state.depth ?? 0} (pending ${state.pending ?? 0})`;
+      const depth = Number(state.depth ?? 0);
+      const inFlight = Number(state.pending ?? 0);
+      const pending = Math.max(0, depth - inFlight);
+      queueMetrics.textContent = `Depth: ${depth} (pending ${pending})`;
       queueMetrics.className = "status-pill status-idle";
       const workerMetrics = state.workers || {};
       if (gpuMetrics) {
@@ -1346,7 +1372,7 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
       if (!link) return;
       const jobId = link.dataset.jobId || "";
       const jobPath = link.dataset.jobPath || "";
-      logQuery.value = jobId || jobPath;
+      logQuery.value = jobPath || jobId;
       switchPage("logs");
       fetchLogs();
     });
