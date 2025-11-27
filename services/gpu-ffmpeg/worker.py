@@ -9,10 +9,9 @@ from collections import deque
 from contextlib import suppress
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Dict, Optional, Tuple
 
 import httpx
-import redis.asyncio as redis
 import yaml
 
 logging.addLevelName(logging.DEBUG, "VERBOSE")
@@ -21,9 +20,6 @@ LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
 if LOG_LEVEL == "VERBOSE":
     LOG_LEVEL = "DEBUG"
 ORCHESTRATOR_URL = os.environ.get("ORCHESTRATOR_URL", "http://localhost:9000")
-JOB_QUEUE_URL = os.environ.get("JOB_QUEUE", "redis://redis:6379/0")
-JOB_QUEUE_STREAM = os.environ.get("JOB_QUEUE_STREAM", "job_queue")
-JOB_QUEUE_GROUP = os.environ.get("JOB_QUEUE_GROUP", "workers")
 JOB_VISIBILITY_TIMEOUT = int(os.environ.get("JOB_VISIBILITY_TIMEOUT", "300"))
 STREAM_READER_LIMIT = int(os.environ.get("GPU_STREAM_READER_LIMIT", "1000000"))
 WORKER_ID = os.environ.get("WORKER_ID", f"worker-{os.getpid()}")
@@ -724,74 +720,35 @@ async def resolve_encoding_for_job(job: dict, client: httpx.AsyncClient) -> dict
     return encoding or {}
 
 
-async def ensure_queue(redis_client: redis.Redis) -> None:
+async def claim_job(client: httpx.AsyncClient) -> Tuple[Optional[str], Optional[Dict[str, Any]]]:
     try:
-        await redis_client.xgroup_create(JOB_QUEUE_STREAM, JOB_QUEUE_GROUP, id="0-0", mkstream=True)
-    except redis.ResponseError as exc:
-        if "BUSYGROUP" not in str(exc):
-            raise
+        response = await client.get("/api/jobs/next")
+        if response.status_code == 204:
+            return None, None
+        response.raise_for_status()
+        data = response.json()
+        delivery_id = data.pop("delivery_id")
+        return delivery_id, data
+    except httpx.HTTPError as exc:
+        LOGGER.warning("Failed to claim job: %s", exc)
+        return None, None
 
 
-def _normalize_job(payload: dict) -> dict:
-    normalized = dict(payload)
-    if isinstance(normalized.get("encoding"), str):
-        try:
-            normalized["encoding"] = json.loads(normalized["encoding"])
-        except json.JSONDecodeError:
-            normalized["encoding"] = {}
-    if normalized.get("profile_id") not in (None, ""):
-        try:
-            normalized["profile_id"] = int(normalized["profile_id"])
-        except (TypeError, ValueError):
-            normalized["profile_id"] = None
-    normalized["progress"] = int(normalized.get("progress") or 0)
-    return normalized
+async def acknowledge_job(client: httpx.AsyncClient, job_id: str, delivery_id: str) -> None:
+    try:
+        await client.post(f"/api/jobs/{job_id}/ack", json={"delivery_id": delivery_id})
+    except httpx.HTTPError as exc:
+        LOGGER.error("Failed to acknowledge job %s: %s", job_id[:8], exc)
 
 
-async def _claim_stalled(redis_client: redis.Redis, consumer: str) -> tuple[str, dict] | None:
-    resp = await redis_client.xautoclaim(
-        JOB_QUEUE_STREAM,
-        JOB_QUEUE_GROUP,
-        consumer,
-        min_idle_time=JOB_VISIBILITY_TIMEOUT * 1000,
-        start_id="0-0",
-        count=1,
-    )
-    # redis-py returns (next_id, messages); some RESP3/older variants return
-    # (next_id, messages, deleted)
-    if isinstance(resp, tuple):
-        if len(resp) == 2:
-            _next_id, messages = resp
-        elif len(resp) >= 3:
-            _next_id, messages, _deleted = resp[0], resp[1], resp[2]
-        else:
-            messages = []
-    else:  # fallback: treat as sequence
-        try:
-            _next_id, messages = resp[0], resp[1]
-        except Exception:  # noqa: BLE001
-            messages = []
-    if not messages:
-        return None
-    entry_id, fields = messages[0]
-    payload = json.loads(fields.get("payload", "{}"))
-    return entry_id, _normalize_job(payload)
-
-
-async def claim_job(redis_client: redis.Redis, consumer: str) -> tuple[str, dict] | None:
-    pending = await _claim_stalled(redis_client, consumer)
-    if pending:
-        return pending
-
-    result = await redis_client.xreadgroup(
-        JOB_QUEUE_GROUP, consumer, {JOB_QUEUE_STREAM: ">"}, count=1, block=1000
-    )
-    if not result:
-        return None
-    _, messages = result[0]
-    entry_id, fields = messages[0]
-    payload = json.loads(fields.get("payload", "{}"))
-    return entry_id, _normalize_job(payload)
+async def queue_paused(client: httpx.AsyncClient) -> Tuple[bool, Optional[str]]:
+    try:
+        response = await client.get("/api/queue/state")
+        response.raise_for_status()
+        state = response.json()
+        return state.get("paused", False), state.get("reason")
+    except httpx.HTTPError:
+        return False, None
 
 
 async def update_job_status(
@@ -847,19 +804,6 @@ async def _ensure_gpu_ready(client: httpx.AsyncClient, job_id: str) -> bool:
         await update_job_status(client, job_id, "failed", 0, message)
         return False
     return True
-
-
-async def acknowledge_job(client: httpx.AsyncClient, job_id: str, delivery_id: str) -> None:
-    try:
-        await client.post(f"/api/jobs/{job_id}/ack", json={"delivery_id": delivery_id})
-    except httpx.HTTPError as exc:
-        LOGGER.error("Failed to acknowledge job %s: %s", job_id[:8], exc)
-
-
-async def queue_paused(redis_client: redis.Redis) -> tuple[bool, str | None]:
-    paused = await redis_client.get(f"{JOB_QUEUE_STREAM}:paused")
-    reason = await redis_client.get(f"{JOB_QUEUE_STREAM}:pause_reason")
-    return bool(int(paused)) if paused is not None else False, reason
 
 
 async def _probe_duration(source: Path) -> float:
@@ -1005,15 +949,12 @@ async def main() -> None:
         POLL_INTERVAL,
         LOG_LEVEL,
     )
-    consumer_id = WORKER_ID
-    redis_client = redis.from_url(JOB_QUEUE_URL, decode_responses=True)
-    await ensure_queue(redis_client)
-    last_pause_reason: str | None = None
+    last_pause_reason: Optional[str] = None
     async with httpx.AsyncClient(base_url=ORCHESTRATOR_URL, timeout=30.0) as client:
-        telemetry_task = asyncio.create_task(telemetry_loop(client, consumer_id))
+        telemetry_task = asyncio.create_task(telemetry_loop(client, WORKER_ID))
         try:
             while True:
-                paused, reason = await queue_paused(redis_client)
+                paused, reason = await queue_paused(client)
                 if paused:
                     if reason != last_pause_reason:
                         LOGGER.warning("Job queue paused: %s", reason or "no reason provided")
@@ -1022,12 +963,12 @@ async def main() -> None:
                     continue
                 last_pause_reason = None
 
-                claimed = await claim_job(redis_client, consumer_id)
-                if not claimed:
+                delivery_id, job = await claim_job(client)
+                if not job or not delivery_id:
                     LOGGER.debug("No job available; sleeping for %ss", POLL_INTERVAL)
                     await asyncio.sleep(POLL_INTERVAL)
                     continue
-                delivery_id, job = claimed
+
                 try:
                     await process_job(client, job)
                 except Exception as exc:  # noqa: BLE001
@@ -1040,7 +981,6 @@ async def main() -> None:
             telemetry_task.cancel()
             with suppress(asyncio.CancelledError):
                 await telemetry_task
-            await redis_client.aclose()
 
 
 if __name__ == "__main__":
