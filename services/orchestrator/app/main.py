@@ -33,6 +33,9 @@ from .routers import (
     config as config_router,
 )
 from .routers import (
+    history as history_router,
+)
+from .routers import (
     jobs as jobs_router,
 )
 from .routers import (
@@ -157,6 +160,7 @@ app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 app.include_router(system_router.router)
 app.include_router(jobs_router.router)
+app.include_router(history_router.router)
 app.include_router(libraries_router.router)
 app.include_router(config_router.router)
 app.include_router(logs_router.router)

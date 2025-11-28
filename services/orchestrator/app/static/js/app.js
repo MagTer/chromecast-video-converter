@@ -1,6 +1,7 @@
 const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
     const pages = Array.from(document.querySelectorAll(".page"));
     const jobRows = document.querySelector("#job-rows");
+    const historyRows = document.querySelector("#history-rows");
     const scanResult = document.querySelector("#scan-result");
     const queueStatus = document.querySelector("#queue-status");
     const queueMetrics = document.querySelector("#queue-metrics");
@@ -56,6 +57,12 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
     const profileMaxrateSelect = document.querySelector("#profile-maxrate");
     const profileBufsizeSelect = document.querySelector("#profile-bufsize");
     const audioBitrateSelect = document.querySelector("#profile-audio-bitrate");
+    const setupWizard = document.querySelector("#setup-wizard");
+    const wizardSetupBtn = document.querySelector("#wizard-setup-btn");
+    const wizardSkipBtn = document.querySelector("#wizard-skip-btn");
+    const refreshHistoryBtn = document.querySelector("#refresh-history");
+    const exportConfigBtn = document.querySelector("#export-config");
+    const resetConfigBtn = document.querySelector("#reset-config");
 
     let configCache = null;
     let libraryEntries = [];
@@ -64,6 +71,7 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
     let entryLoadingState = false;
     let entryHasMore = true;
     let jobCache = [];
+    let historyCache = [];
     let liveSocket = null;
     let isWsl2 = false;
 
@@ -549,6 +557,12 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
       }
       renderLibraryProfiles();
       renderLibraryFilters();
+
+      if (Object.keys(config.libraries || {}).length === 0) {
+         if (setupWizard && !sessionStorage.getItem("wizardSkipped")) {
+           setupWizard.showModal();
+         }
+      }
     }
 
     function loadProfile(name) {
@@ -655,6 +669,35 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
       const response = await fetch("/api/jobs");
       jobCache = await response.json();
       renderJobTable();
+    }
+
+    async function fetchHistory() {
+      const response = await fetch("/api/history?limit=50");
+      historyCache = await response.json();
+      renderHistoryTable();
+    }
+
+    function renderHistoryTable() {
+      if (!historyRows) return;
+      historyRows.innerHTML = "";
+      historyCache.forEach((job) => {
+        const tr = document.createElement("tr");
+        const status = String(job.status || "unknown").toLowerCase();
+        const statusLabel = status ? `${status[0].toUpperCase()}${status.slice(1)}` : "";
+        const normalizedPath = normalizeDisplayPath(job.path);
+        const fileName = fileNameFromPath(normalizedPath);
+        const finished = job.updated_at ? new Date(job.updated_at).toLocaleString() : "-";
+
+        tr.innerHTML = `
+          <td>${job.id.slice(0, 8)}</td>
+          <td class="status-${status}">${statusLabel}</td>
+          <td>${finished}</td>
+          <td class="path-cell" title="${normalizedPath}">${fileName}</td>
+          <td>${job.profile}</td>
+          <td>${job.message || "-"}</td>
+        `;
+        historyRows.appendChild(tr);
+      });
     }
 
     async function enqueueLibraryScan(library) {
@@ -837,11 +880,28 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
         const tr = document.createElement("tr");
         const normalizedPath = normalizeDisplayPath(entry.path);
         const fileName = fileNameFromPath(normalizedPath);
+
+        let statusHtml = formatStatusChip(entry.status);
+        if (entry.status === "converting" && entry.last_job_id) {
+            const job = jobCache.find((j) => j.id === entry.last_job_id);
+            if (job && typeof job.progress === "number") {
+                statusHtml += ` <span class="hint">(${job.progress}%)</span>`;
+            }
+        }
+
+        let errorHtml = "";
+        if (entry.status === "failed" && entry.last_error) {
+            errorHtml = `<div class="warn" style="margin-top:0.25rem; font-size:0.85rem;">${entry.last_error}</div>`;
+        }
+
         tr.innerHTML = `
           <td>${entry.id}</td>
-          <td>${formatStatusChip(entry.status)}</td>
+          <td>${statusHtml}</td>
           <td>${entry.library}</td>
-          <td class="path-cell" title="${normalizedPath}">${fileName}</td>
+          <td class="path-cell" title="${normalizedPath}">
+            ${fileName}
+            ${errorHtml}
+          </td>
           <td>${formatProfile(entry)}</td>
           <td>${formatUpdated(entry.updated_at)}</td>
           <td>
@@ -1167,6 +1227,49 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
       });
     }
 
+    if (setupWizard) {
+      wizardSetupBtn.addEventListener("click", () => {
+        setupWizard.close();
+        switchPage("config");
+      });
+      wizardSkipBtn.addEventListener("click", () => {
+        setupWizard.close();
+        sessionStorage.setItem("wizardSkipped", "true");
+      });
+    }
+
+    if (refreshHistoryBtn) {
+        refreshHistoryBtn.addEventListener("click", fetchHistory);
+    }
+
+    if (exportConfigBtn) {
+        exportConfigBtn.addEventListener("click", () => {
+            window.open("/api/config/yaml", "_blank");
+        });
+    }
+
+    if (resetConfigBtn) {
+        resetConfigBtn.addEventListener("click", async () => {
+            if (!confirm("Are you sure you want to reset configuration to defaults? This cannot be undone.")) return;
+            resetConfigBtn.disabled = true;
+            resetConfigBtn.textContent = "Resetting...";
+            try {
+                const response = await fetch("/api/config/reset", { method: "POST" });
+                if (response.ok) {
+                    alert("Configuration reset to defaults.");
+                    fetchConfig();
+                } else {
+                    alert("Failed to reset configuration.");
+                }
+            } catch (e) {
+                alert("Error resetting configuration.");
+            } finally {
+                resetConfigBtn.disabled = false;
+                resetConfigBtn.textContent = "Reset to Defaults";
+            }
+        });
+    }
+
     [
       profileCqSelect,
       profileBitrateSelect,
@@ -1379,6 +1482,7 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
 
     fetchConfig();
     fetchJobs();
+    fetchHistory();
     fetchLogFilters();
     fetchLogs();
     fetchLogStats();
@@ -1388,6 +1492,7 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
     const initialPage = window.location.hash.replace("#", "") || "queue";
     switchPage(initialPage);
     setInterval(fetchJobs, 5000);
+    setInterval(fetchHistory, 15000);
     setInterval(fetchLogs, 6000);
     setInterval(fetchLogFilters, 15000);
     setInterval(fetchLogStats, 20000);

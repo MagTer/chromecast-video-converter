@@ -1,6 +1,7 @@
 import logging
 from typing import Dict
 
+import yaml
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import JSONResponse
 
@@ -180,5 +181,31 @@ async def update_logging(payload: LoggingUpdatePayload) -> JSONResponse:
             "retention_days": snapshot.config.logging.retention_days,
             "revision": snapshot.revision,
         },
+        headers=cache_headers(snapshot),
+    )
+
+
+@router.get("/api/config/yaml")
+async def export_config_yaml() -> JSONResponse:
+    """Export the current configuration as YAML."""
+    snapshot = config_service.snapshot
+    # We dump the current configuration model to a dict, then to YAML string
+    config_dict = snapshot.config.model_dump()
+    yaml_str = yaml.dump(config_dict, sort_keys=False)
+    return JSONResponse({"yaml": yaml_str})
+
+
+@router.post("/api/config/reset")
+async def reset_config() -> JSONResponse:
+    """Reset configuration to built-in defaults."""
+    snapshot = config_service.reset_to_defaults()
+    # Note: We do not reset the PROFILE_STORE here to avoid breaking existing IDs
+    # referenced by jobs. The user can manually clean up profiles if needed.
+
+    # We also need to update LOG_STORE retention
+    LOG_STORE.update_retention(snapshot.config.logging.retention_days)
+
+    return JSONResponse(
+        config_module.sanitize_config(snapshot.config, revision=snapshot.revision),
         headers=cache_headers(snapshot),
     )

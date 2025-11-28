@@ -560,6 +560,12 @@ class ConfigService:
         self._snapshot = self.store.save_config(config)
         return self._snapshot
 
+    def reset_to_defaults(self) -> ConfigSnapshot:
+        raw = copy.deepcopy(DEFAULT_CONFIG)
+        self._snapshot = self.store.save_config(QualityConfig(**raw), source="reset")
+        LOGGER.warning("Reset configuration to built-in defaults")
+        return self._snapshot
+
 
 def sanitize_config(config: QualityConfig, *, revision: Optional[float] = None) -> Dict[str, Any]:
     data = config.model_dump()
