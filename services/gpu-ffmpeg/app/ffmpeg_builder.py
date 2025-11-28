@@ -190,6 +190,7 @@ class FFmpegBuilder:
         nvenc_capabilities: dict,
         host_environment: dict,
         language_preferences: Iterable[str] | None = None,
+        filter_capabilities: dict | None = None,
     ):
         self.analysis = analysis
         self.input_path = input_path
@@ -198,6 +199,7 @@ class FFmpegBuilder:
         self.nvenc_capabilities = nvenc_capabilities
         self.host_environment = host_environment
         self.language_preferences = tuple(language_preferences or DEFAULT_LANGUAGE_PREFERENCES)
+        self.filter_capabilities = filter_capabilities or {"tonemap_cuda": True}
 
     # --------------- Language helpers --------------- #
     def _normalize_language(self, language: str | None) -> str | None:
@@ -424,6 +426,10 @@ class FFmpegBuilder:
             )
 
         if needs_tonemap and profile.allow_tonemap:
+            if not self.filter_capabilities.get("tonemap_cuda", True):
+                raise RuntimeError(
+                    "HDR detected but tonemap_cuda filter unavailable in ffmpeg build"
+                )
             filters.append("tonemap_cuda=t=bt709:format=nv12")
 
         filters.extend(["hwdownload", "format=nv12", "hwupload_cuda"])
