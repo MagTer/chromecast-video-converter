@@ -1,61 +1,11 @@
-FROM nvidia/cuda:13.0.2-devel-ubuntu24.04
+FROM jrottenberg/ffmpeg:7.1-nvidia2404
 
-# Install python, curl, and build deps for ffmpeg build
+# Install Python runtime for the worker
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 \
     python3-pip \
     ca-certificates \
-    curl \
-    git \
-    pkg-config \
-    yasm \
-    nasm \
-    autoconf \
-    automake \
-    libtool \
-    cmake \
-    build-essential \
-    libnuma-dev \
-    cuda-toolkit-13-0 \
-    libnpp-dev-13-0 \
     && rm -rf /var/lib/apt/lists/*
-
-# Build and install nv-codec-headers (required for NVENC/NVDEC)
-RUN set -eux; \
-    git clone https://github.com/FFmpeg/nv-codec-headers.git /tmp/nv-codec-headers; \
-    make -C /tmp/nv-codec-headers install; \
-    rm -rf /tmp/nv-codec-headers
-
-# Build FFmpeg from source with CUDA/NVENC/NPP (tonemap_cuda, scale_cuda)
-RUN set -eux; \
-    FF_VER="6.1.1"; \
-    git clone --branch n"$FF_VER" https://github.com/FFmpeg/FFmpeg.git /tmp/ffmpeg; \
-    cd /tmp/ffmpeg; \
-    ln -s /usr/local/cuda-13.0 /usr/local/cuda || true; \
-    /usr/local/cuda-13.0/bin/nvcc -V; \
-    export PATH=/usr/local/cuda-13.0/bin:/usr/local/cuda/bin:$PATH; \
-    export PKG_CONFIG_PATH=/usr/local/lib/pkgconfig:/usr/lib/pkgconfig; \
-    export CUDA_HOME=/usr/local/cuda-13.0; \
-    ./configure \
-        --prefix=/opt/ffmpeg \
-        --pkg-config-flags="--static" \
-        --enable-nonfree \
-        --enable-cuda-nvcc \
-        --enable-libnpp \
-        --enable-nvenc \
-        --enable-cuvid \
-        --enable-cuda \
-        --extra-cflags=-I/usr/local/cuda/include \
-        --extra-ldflags=-L/usr/local/cuda/lib64 \
-        --disable-debug \
-        --disable-doc \
-        --disable-static \
-        --enable-shared; \
-    make -j"$(nproc)"; \
-    make install; \
-    rm -rf /tmp/ffmpeg; \
-    ln -sf /opt/ffmpeg/bin/ffmpeg /usr/local/bin/ffmpeg; \
-    ln -sf /opt/ffmpeg/bin/ffprobe /usr/local/bin/ffprobe
 
 WORKDIR /app
 
