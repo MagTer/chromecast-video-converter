@@ -43,6 +43,9 @@ RUN set -eux; \
         --enable-nvenc \
         --enable-cuvid \
         --enable-cuda \
+        --disable-encoder=hevc_nvenc \
+        --disable-encoder=av1_nvenc \
+        --disable-encoder=vp9_nvenc \
         --extra-cflags=-I/usr/local/cuda/include \
         --extra-ldflags=-L/usr/local/cuda/lib64 \
         --disable-debug \
