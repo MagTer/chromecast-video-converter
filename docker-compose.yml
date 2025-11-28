@@ -44,8 +44,8 @@ services:
 
   gpu-ffmpeg:
     build:
-      context: .
-      dockerfile: ./services/gpu-ffmpeg/Dockerfile
+      context: ./services/gpu-ffmpeg
+      dockerfile: Dockerfile
     image: chromecast-video-converter/gpu-ffmpeg:dev
     gpus: all
     volumes:

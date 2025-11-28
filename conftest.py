@@ -8,10 +8,19 @@ from typing import Any
 import pytest
 
 try:
-    from redis.exceptions import ResponseError
+    from redis.exceptions import ConnectionError, RedisError, ResponseError, TimeoutError
 except ModuleNotFoundError:  # pragma: no cover - fallback for test environments without redis
 
-    class ResponseError(Exception):
+    class RedisError(Exception):
+        pass
+
+    class ResponseError(RedisError):
+        pass
+
+    class ConnectionError(RedisError):
+        pass
+
+    class TimeoutError(RedisError):
         pass
 
 
@@ -24,9 +33,15 @@ def _install_redis_stub() -> None:
     )
     redis_asyncio.Redis = type("Redis", (), {})  # type: ignore[attr-defined]
     redis_asyncio.ResponseError = ResponseError  # type: ignore[attr-defined]
+    redis_asyncio.RedisError = RedisError  # type: ignore[attr-defined]
+    redis_asyncio.ConnectionError = ConnectionError  # type: ignore[attr-defined]
+    redis_asyncio.TimeoutError = TimeoutError  # type: ignore[attr-defined]
 
     redis_exceptions = types.ModuleType("redis.exceptions")
+    redis_exceptions.RedisError = RedisError  # type: ignore[attr-defined]
     redis_exceptions.ResponseError = ResponseError  # type: ignore[attr-defined]
+    redis_exceptions.ConnectionError = ConnectionError  # type: ignore[attr-defined]
+    redis_exceptions.TimeoutError = TimeoutError  # type: ignore[attr-defined]
 
     redis_module = types.ModuleType("redis")
     redis_module.asyncio = redis_asyncio  # type: ignore[attr-defined]
@@ -152,7 +167,7 @@ class InMemoryRedis:
         start_id: str,
         count: int,
     ):
-        return "0-0", []
+        return "0-0", [], 0
 
 
 @pytest.fixture()

@@ -99,6 +99,8 @@ def test_build_ffmpeg_command_maps_streams(tmp_path):
     assert "0:v" in command
     assert "0:a:0" in command
     assert "0:a:1" in command
+    assert "-pix_fmt" in command
+    assert command[command.index("-pix_fmt") + 1] == "nv12"
 
     assert "-c:a" in command and command[command.index("-c:a") + 1] == "aac"
     assert "-aq-strength" in command and command[command.index("-aq-strength") + 1] == "7"
@@ -147,11 +149,100 @@ def test_build_ffmpeg_command_respects_frame_limits(tmp_path):
     vf_index = command.index("-vf")
     vf_val = command[vf_index + 1]
     assert "fps=24" in vf_val
-    assert "scale_cuda=-2:1080" in vf_val
+    assert "scale_cuda=-2:1080:force_original_aspect_ratio=decrease" in vf_val
+    assert "format=nv12" in vf_val
+    assert "hwupload_cuda" in vf_val
+    assert "-pix_fmt" in command and command[command.index("-pix_fmt") + 1] == "nv12"
 
     assert "-rc" in command and command[command.index("-rc") + 1] == "vbr_hq"
     assert "-multipass" in command and command[command.index("-multipass") + 1] == "fullres"
     assert "-aq-strength" in command and command[command.index("-aq-strength") + 1] == "9"
+
+
+def test_build_ffmpeg_command_honors_source_frame_rate(tmp_path):
+    profiles = {
+        "adaptive": {
+            "max_bitrate": "8M",
+            "bufsize": "12M",
+            "level": "4.1",
+            "profile": "high",
+            "max_fps": 30,
+            "preset": "p5",
+            "rc": "vbr",
+            "cq": 19,
+            "lookahead": 10,
+            "audio": {"codec": "aac", "bitrate": "192k", "channels": 2},
+        }
+    }
+
+    nvenc_capabilities = {"rc_vbr_hq": True, "multipass_fullres": True}
+    host_env = {"is_wsl2": False}
+
+    input_path = tmp_path / "series.mkv"
+    output_path = tmp_path / "series.mp4"
+    analysis = {
+        "profile": "adaptive",
+        "streams": [
+            {"codec_type": "video", "avg_frame_rate": "24000/1001"},
+        ],
+    }
+
+    builder = FFmpegBuilder(
+        analysis,
+        input_path,
+        output_path,
+        profiles,
+        nvenc_capabilities,
+        host_env,
+    )
+    command = builder.build()
+
+    vf_index = command.index("-vf")
+    vf_val = command[vf_index + 1]
+    assert "fps=" not in vf_val
+
+
+def test_build_ffmpeg_command_clamps_high_frame_rate(tmp_path):
+    profiles = {
+        "adaptive": {
+            "max_bitrate": "8M",
+            "bufsize": "12M",
+            "level": "4.1",
+            "profile": "high",
+            "max_fps": 30,
+            "preset": "p5",
+            "rc": "vbr",
+            "cq": 19,
+            "lookahead": 10,
+            "audio": {"codec": "aac", "bitrate": "192k", "channels": 2},
+        }
+    }
+
+    nvenc_capabilities = {"rc_vbr_hq": True, "multipass_fullres": True}
+    host_env = {"is_wsl2": False}
+
+    input_path = tmp_path / "series60.mkv"
+    output_path = tmp_path / "series60.mp4"
+    analysis = {
+        "profile": "adaptive",
+        "streams": [
+            {"codec_type": "video", "avg_frame_rate": "60000/1001"},
+        ],
+    }
+
+    builder = FFmpegBuilder(
+        analysis,
+        input_path,
+        output_path,
+        profiles,
+        nvenc_capabilities,
+        host_env,
+    )
+    command = builder.build()
+
+    vf_index = command.index("-vf")
+    vf_val = command[vf_index + 1]
+    assert "fps=30" in vf_val
 
 
 def test_build_ffmpeg_command_respects_profile_level_and_aq(tmp_path):
