@@ -33,8 +33,8 @@ from ..services.core import (
     get_library_profile,
     process_event_payload,
     reconcile_library,
-    resolve_media_path,
 )
+from ..utils import resolve_media_path
 
 LOGGER = logging.getLogger("orchestrator.libraries")
 router = APIRouter()
@@ -146,12 +146,6 @@ async def list_library_entries(
     limit: int = 100,
     offset: int = 0,
 ) -> JSONResponse:
-    # We need to import LIBRARY_STATUSES ? No, just string check or re-import
-    # In main.py: LIBRARY_STATUSES = {LibraryStatus.PENDING, ...}
-    # I can check validity against LibraryStatus enum values if I want, or just let it pass.
-    # main.py did: if status and status not in LIBRARY_STATUSES
-
-    # I'll re-implement validation simply
     if limit <= 0:
         raise HTTPException(status_code=400, detail="Limit must be greater than zero")
     if offset < 0:

@@ -7,10 +7,8 @@ from fastapi import HTTPException
 
 from .. import jobs
 from ..dependencies import (
-    DISPLAY_LIBRARY_PREFIX,
     JOB_HISTORY_STORE,
     LIBRARY_CONFIG_STORE,
-    LIBRARY_ROOT_PREFIXES,
     LIBRARY_STORE,
     PROFILE_STORE,
     get_library_map,
@@ -20,29 +18,12 @@ from ..job_history import JobHistoryEntry, JobHistoryStatus
 from ..library_entries import EntryUpdate, LibraryEntry, LibraryStatus
 from ..profiles import EncodingProfile, LibraryConfig
 from ..schemas import EventPayload, LibraryEntryResponse
+from ..utils import (
+    LIBRARY_ROOT_PREFIXES,
+    normalize_display_path,
+)
 
 LOGGER = logging.getLogger("orchestrator.core")
-
-
-def _normalize_display_path(path: Optional[str]) -> Optional[str]:
-    if not path:
-        return path
-    normalized = path.replace("\\", "/")
-    watch_prefix = "/watch/"
-    if normalized == "/watch":
-        return DISPLAY_LIBRARY_PREFIX
-    if normalized.startswith(watch_prefix):
-        suffix = normalized[len(watch_prefix) :]
-        return f"{DISPLAY_LIBRARY_PREFIX.rstrip('/')}/{suffix}".replace("//", "/")
-    return normalized
-
-
-def resolve_media_path(path: Optional[str]) -> Path:
-    normalized = _normalize_display_path(path)
-    target = normalized or path
-    if not target:
-        raise ValueError("Path is required")
-    return Path(target)
 
 
 def _job_elapsed_seconds(job: jobs.Job) -> int:
@@ -59,16 +40,16 @@ def _job_elapsed_seconds(job: jobs.Job) -> int:
 
 def job_to_response(job: jobs.Job) -> Dict[str, Any]:
     payload = job.model_dump()
-    payload["path"] = _normalize_display_path(payload.get("path"))
+    payload["path"] = normalize_display_path(payload.get("path"))
     payload["elapsed_seconds"] = _job_elapsed_seconds(job)
     return payload
 
 
 def entry_to_response(entry: LibraryEntry) -> Dict[str, Any]:
     payload = LibraryEntryResponse.model_validate(entry).model_dump()
-    payload["path"] = _normalize_display_path(payload.get("path"))
+    payload["path"] = normalize_display_path(payload.get("path"))
     if payload.get("output_path"):
-        payload["output_path"] = _normalize_display_path(payload.get("output_path"))
+        payload["output_path"] = normalize_display_path(payload.get("output_path"))
     return payload
 
 

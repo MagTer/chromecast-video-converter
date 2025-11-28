@@ -1,26 +1,20 @@
-FROM nvidia/cuda:13.0.2-runtime-ubuntu24.04
+FROM nvidia/cuda:12.2.0-base-ubuntu22.04
 
-# Allow pip installs on Ubuntu 24.04 base image (PEP 668 managed env)
-ENV PIP_BREAK_SYSTEM_PACKAGES=1
-
-RUN apt-get update && \
-    DEBIAN_FRONTEND=noninteractive apt-get install -y \
-        ffmpeg \
-        bash \
-        python3 \
-        python3-pip \
-        && \
-    rm -rf /var/lib/apt/lists/*
+# Install python and ffmpeg dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3 \
+    python3-pip \
+    ffmpeg \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-COPY services/gpu-ffmpeg/requirements.txt ./requirements.txt
-RUN python3 -m pip install --no-cache-dir -r requirements.txt
+COPY requirements.txt .
+RUN pip3 install --no-cache-dir -r requirements.txt
 
-COPY services/gpu-ffmpeg/worker.py ./worker.py
-COPY services/gpu-ffmpeg/entrypoint.sh ./entrypoint.sh
-COPY services/orchestrator/alembic.ini ./alembic.ini
-COPY services/orchestrator/alembic ./alembic
-RUN chmod +x ./entrypoint.sh
+COPY app /app/app
 
-ENTRYPOINT ["./entrypoint.sh"]
+ENV PYTHONPATH=/app
+
+CMD ["python3", "-m", "app.worker"]

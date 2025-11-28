@@ -14,6 +14,9 @@ from typing import Any, Dict, Optional, Tuple
 import httpx
 import yaml
 
+from .ffmpeg_builder import FFmpegBuilder
+from .utils import detect_host_environment, resolve_media_path
+
 logging.addLevelName(logging.DEBUG, "VERBOSE")
 
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
@@ -87,34 +90,6 @@ def configure_logging() -> logging.Logger:
 LOGGER = configure_logging()
 
 POLL_INTERVAL = int(os.environ.get("GPU_POLL_INTERVAL", "5"))
-# Keep scaling on the GPU to avoid format mismatches between CUDA surfaces and
-# software filters.
-SCALING_EXPRESSION = "scale_cuda=-2:720:force_original_aspect_ratio=decrease"
-WATCH_PREFIX = Path("/watch")
-MEDIA_PREFIX = Path("/media")
-
-
-def _resolve_media_path(path: str | Path) -> Path:
-    normalized = Path(str(path).replace("\\", "/"))
-    try:
-        relative = normalized.relative_to(WATCH_PREFIX)
-    except ValueError:
-        return normalized
-    return MEDIA_PREFIX / relative
-
-
-def _detect_host_environment() -> dict[str, bool]:
-    """Detect whether we're running under WSL2 (for NVENC quirks)."""
-
-    try:
-        version = Path("/proc/version").read_text().lower()
-        if "microsoft" in version or "wsl2" in version:
-            return {"is_wsl2": True}
-    except OSError:
-        pass
-
-    is_wsl2 = any(os.environ.get(var) for var in ("WSL_DISTRO_NAME", "WSL_INTEROP"))
-    return {"is_wsl2": is_wsl2}
 
 
 def _probe_nvenc_capabilities() -> dict[str, bool]:
@@ -152,7 +127,7 @@ def _probe_nvenc_capabilities() -> dict[str, bool]:
     return capabilities
 
 
-HOST_ENVIRONMENT = _detect_host_environment()
+HOST_ENVIRONMENT = detect_host_environment()
 NVENC_CAPABILITIES = _probe_nvenc_capabilities()
 
 CONFIG_PATH = Path(os.environ.get("CONFIG_PATH", "/app/config/settings.yaml"))
@@ -297,7 +272,7 @@ def require_gpu(gpu_state: dict[str, Any] | None = None) -> dict[str, Any]:
 
 
 def probe_file(filepath: str | Path) -> dict:
-    target_path = _resolve_media_path(filepath)
+    target_path = resolve_media_path(filepath)
     command = [*FFPROBE_ANALYSIS_CMD, str(target_path)]
     attempts = 3
     for attempt in range(1, attempts + 1):
@@ -340,286 +315,6 @@ def probe_file(filepath: str | Path) -> dict:
                 continue
             return {}
     return {}
-
-
-def _normalize_language(language: str | None) -> str | None:
-    if not language:
-        return None
-    code = language.lower()
-    if code in {"swe", "sv"}:
-        return "swe"
-    if code in {"eng", "en"}:
-        return "eng"
-    return code
-
-
-def _scaling_expression(profile: dict) -> str:
-    resolution = profile.get("max_resolution") or profile.get("resolution")
-    if resolution:
-        try:
-            _, height_str = resolution.lower().split("x", 1)
-            height = int(height_str)
-            if height > 0:
-                return f"scale_cuda=-2:{height}:force_original_aspect_ratio=decrease"
-        except (ValueError, AttributeError):
-            LOGGER.debug("Invalid resolution %s; falling back to default scale", resolution)
-    return SCALING_EXPRESSION
-
-
-def _gather_streams(streams: list[dict]) -> tuple[bool, list[dict], list[dict]]:
-    video_present = False
-    audio_streams: list[dict] = []
-    subtitle_streams: list[dict] = []
-    audio_pos = 0
-    subtitle_pos = 0
-    for stream in streams:
-        codec_type = stream.get("codec_type")
-        if codec_type == "video":
-            video_present = True
-        elif codec_type == "audio":
-            audio_streams.append(
-                {
-                    "input_index": audio_pos,
-                    "language": _normalize_language(stream.get("tags", {}).get("language")),
-                    "disposition": stream.get("disposition", {}),
-                    "title": stream.get("tags", {}).get("title"),
-                }
-            )
-            audio_pos += 1
-        elif codec_type == "subtitle":
-            subtitle_streams.append(
-                {
-                    "input_index": subtitle_pos,
-                    "language": _normalize_language(stream.get("tags", {}).get("language")),
-                    "disposition": stream.get("disposition", {}),
-                    "title": stream.get("tags", {}).get("title"),
-                }
-            )
-            subtitle_pos += 1
-    return video_present, audio_streams, subtitle_streams
-
-
-def _is_commentary(stream: dict) -> bool:
-    disposition = stream.get("disposition", {}) or {}
-    title = (stream.get("title") or "").lower()
-    return bool(disposition.get("comment") or "commentary" in title)
-
-
-def _pick_best_stream(candidates: list[dict]) -> dict | None:
-    if not candidates:
-        return None
-    original = next((s for s in candidates if s.get("disposition", {}).get("original")), None)
-    if original:
-        return original
-    default = next((s for s in candidates if s.get("disposition", {}).get("default")), None)
-    if default:
-        return default
-    return candidates[0]
-
-
-def _select_priority_streams(stream_list: list[dict]) -> tuple[list[dict], int | None]:
-    mapped: list[dict] = []
-    seen_inputs: set[int] = set()
-
-    def _pick_for_language(language: str) -> dict | None:
-        language_matches = [s for s in stream_list if s.get("language") == language]
-        if not language_matches:
-            return None
-        preferred = [s for s in language_matches if not _is_commentary(s)]
-        return _pick_best_stream(preferred or language_matches)
-
-    swedish = _pick_for_language("swe")
-    english = _pick_for_language("eng")
-
-    non_commentary = [s for s in stream_list if not _is_commentary(s)]
-    original_fallback = _pick_best_stream(non_commentary or stream_list)
-
-    for candidate in [swedish, english, original_fallback]:
-        if candidate is None:
-            continue
-        idx = candidate["input_index"]
-        if idx in seen_inputs:
-            continue
-        mapped.append(candidate)
-        seen_inputs.add(idx)
-
-    default_idx: int | None = None
-    if swedish is not None and swedish in mapped:
-        default_idx = mapped.index(swedish)
-    elif english is not None and english in mapped:
-        default_idx = mapped.index(english)
-    elif mapped:
-        default_idx = 0
-    return mapped, default_idx
-
-
-def _build_disposition_flags(
-    mapped_streams: list[dict], default_idx: int | None, stream_type: str
-) -> list[str]:
-    flags: list[str] = []
-    for output_idx in range(len(mapped_streams)):
-        disposition_value = "default" if default_idx == output_idx else "0"
-        flags.extend([f"-disposition:{stream_type}:{output_idx}", disposition_value])
-    return flags
-
-
-def _ffmpeg_base_command(input_path: Path) -> list[str]:
-    return [
-        "ffmpeg",
-        "-y",
-        "-hwaccel",
-        "cuda",
-        "-hwaccel_output_format",
-        "cuda",
-        "-i",
-        str(input_path),
-    ]
-
-
-def build_ffmpeg_command(  # noqa: C901
-    analysis_json: dict, input_path: Path, output_path: Path
-) -> list[str]:
-    profile = analysis_json.get("encoding") or PROFILES.get(
-        analysis_json.get("profile"),
-        {},
-    )
-
-    profile = profile or {}
-    bitrate = profile.get("bitrate") or profile.get("max_bitrate", "8M")
-    maxrate = profile.get("max_bitrate", bitrate)
-    bufsize = profile.get("bufsize", "16M")
-    level = profile.get("level", "4.1")
-    h264_profile = str(profile.get("profile", "high"))
-    h264_profile_lower = h264_profile.lower()
-    max_fps = max(1, int(profile.get("max_fps", 30) or 30))
-    preset = str(profile.get("preset", "p6"))
-    rc_mode = str(profile.get("rc", "vbr") or "vbr").lower()
-    if rc_mode == "cbr":
-        rc_mode = "vbr"
-    cq = str(profile.get("cq", 18))
-    bframes = int(profile.get("bframes", 2) or 0)
-    if h264_profile_lower == "baseline":
-        bframes = 0
-    lookahead = int(profile.get("lookahead", 24) or 0)
-    adaptive_b_frames = bool(profile.get("adaptive_b_frames", True))
-    adaptive_b_frames = adaptive_b_frames and lookahead > 0 and bframes > 0
-    if h264_profile_lower == "baseline":
-        adaptive_b_frames = False
-    aq_enabled = bool(profile.get("aq", True))
-    spatial_aq = aq_enabled and bool(profile.get("spatial_aq", True))
-    temporal_aq = aq_enabled and bool(profile.get("temporal_aq", True))
-    aq_strength = int(profile.get("aq_strength", 7) or 7)
-    aq_strength = max(1, min(15, aq_strength))
-    multipass_mode: str | None = None
-    if rc_mode == "vbr_hq":
-        multipass_mode = "fullres"
-
-    if rc_mode == "vbr_hq" and not NVENC_CAPABILITIES.get("rc_vbr_hq", True):
-        LOGGER.warning(
-            "Requested rc mode vbr_hq is unavailable; falling back to vbr (WSL2=%s)",
-            HOST_ENVIRONMENT.get("is_wsl2"),
-        )
-        rc_mode = "vbr"
-        multipass_mode = None
-
-    if multipass_mode and not NVENC_CAPABILITIES.get("multipass_fullres", True):
-        LOGGER.warning(
-            "NVENC multipass fullres mode is unavailable; continuing without multipass",
-        )
-        multipass_mode = None
-    audio_cfg = profile.get("audio", {})
-    audio_codec = audio_cfg.get("codec", "aac")
-    audio_bitrate = audio_cfg.get("bitrate", "192k")
-    audio_channels = 2  # Chromecast-safe stereo only
-
-    streams = analysis_json.get("streams", [])
-    video_present, audio_streams, subtitle_streams = _gather_streams(streams)
-
-    selected_audio, default_audio_idx = _select_priority_streams(audio_streams)
-    selected_subtitles, default_sub_idx = _select_priority_streams(subtitle_streams)
-
-    command: list[str] = _ffmpeg_base_command(input_path)
-
-    if video_present:
-        command.extend(["-map", "0:v"])
-
-    for audio_stream in selected_audio:
-        command.extend(["-map", f"0:a:{audio_stream['input_index']}"])
-
-    for subtitle_stream in selected_subtitles:
-        command.extend(["-map", f"0:s:{subtitle_stream['input_index']}"])
-
-    audio_dispositions = _build_disposition_flags(selected_audio, default_audio_idx, "a")
-    subtitle_dispositions = _build_disposition_flags(selected_subtitles, default_sub_idx, "s")
-
-    filters = [_scaling_expression(profile)]
-    if max_fps > 0:
-        filters.append(f"fps={max_fps}")
-    video_filter = ",".join(filters)
-
-    command.extend(
-        [
-            "-vf",
-            video_filter,
-            "-c:v",
-            "h264_nvenc",
-            "-preset",
-            preset,
-            "-profile:v",
-            h264_profile,
-            "-level",
-            level,
-        ]
-    )
-
-    if rc_mode == "cq":
-        command.extend(["-rc", "constqp", "-qp", cq])
-    else:
-        command.extend(["-rc", rc_mode, "-b:v", bitrate, "-maxrate", maxrate, "-bufsize", bufsize])
-        if multipass_mode:
-            command.extend(["-multipass", multipass_mode])
-
-    command.extend(["-bf", str(bframes)])
-
-    if lookahead > 0:
-        command.extend(["-rc-lookahead", str(lookahead)])
-    else:
-        command.extend(["-rc-lookahead", "0"])
-
-    command.extend(["-b_adapt", "1" if adaptive_b_frames else "0"])
-    command.extend(
-        [
-            "-spatial_aq",
-            "1" if spatial_aq else "0",
-            "-temporal_aq",
-            "1" if temporal_aq else "0",
-        ]
-    )
-    if aq_enabled:
-        command.extend(["-aq-strength", str(aq_strength)])
-    command.extend(["-movflags", "+faststart"])
-
-    if selected_audio:
-        command.extend(
-            [
-                "-c:a",
-                audio_codec,
-                "-b:a",
-                audio_bitrate,
-                "-ac",
-                str(audio_channels),
-            ]
-        )
-
-    if selected_subtitles:
-        command.extend(["-c:s", "mov_text"])
-
-    command.extend(audio_dispositions)
-    command.extend(subtitle_dispositions)
-
-    command.extend(["-progress", "pipe:1", str(output_path)])
-
-    return command
 
 
 def _loggable_command(command: list[str]) -> str:
@@ -840,12 +535,12 @@ async def _validate_output(output: Path, expected_duration: float) -> bool:
 
 
 def _build_output_path(source: Path) -> Path:
-    resolved = _resolve_media_path(source)
+    resolved = resolve_media_path(source)
     return resolved.parent / f"{resolved.stem}-chromecast.mp4"
 
 
 async def _maybe_remove_original(source: Path, output_path: Path, expected_duration: float) -> bool:
-    source = _resolve_media_path(source)
+    source = resolve_media_path(source)
     if not REMOVE_ORIGINAL:
         return False
     if not await _validate_output(output_path, expected_duration):
@@ -863,7 +558,7 @@ async def _maybe_remove_original(source: Path, output_path: Path, expected_durat
 async def process_job(client: httpx.AsyncClient, job: dict) -> None:  # noqa: C901
     job_id = job["id"]
     source = job["path"]
-    playback_target = _resolve_media_path(source)
+    playback_target = resolve_media_path(source)
     LOGGER.info("Picked up job %s for %s (resolved %s)", job_id[:8], source, playback_target)
     await update_job_status(client, job_id, "running", 5, "Allocated to GPU worker")
     if not playback_target.exists():
@@ -906,7 +601,10 @@ async def process_job(client: httpx.AsyncClient, job: dict) -> None:  # noqa: C9
             )
         return
 
-    command = build_ffmpeg_command(analysis, playback_target, output_path)
+    builder = FFmpegBuilder(
+        analysis, playback_target, output_path, PROFILES, NVENC_CAPABILITIES, HOST_ENVIRONMENT
+    )
+    command = builder.build()
 
     loop = asyncio.get_running_loop()
     progress_callback, _, _ = _progress_callback_factory(duration, loop, client, job_id)

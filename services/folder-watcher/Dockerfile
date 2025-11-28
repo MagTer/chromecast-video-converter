@@ -1,10 +1,14 @@
-FROM alpine:3.20
-
-RUN apk add --no-cache inotify-tools bash curl
+FROM python:3.10-slim
 
 WORKDIR /app
 
-COPY watch.sh ./watch.sh
-RUN chmod +x ./watch.sh
+# Install dependencies
+RUN pip install --no-cache-dir watchdog httpx
 
-ENTRYPOINT ["./watch.sh"]
+# Copy application code
+COPY app /app/app
+
+# Set python path
+ENV PYTHONPATH=/app
+
+CMD ["python", "app/watcher.py"]
