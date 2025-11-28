@@ -1,26 +1,54 @@
-FROM nvidia/cuda:13.0.2-base-ubuntu24.04
+FROM nvidia/cuda:13.0.2-devel-ubuntu24.04
 
-# Install python, curl, and build deps for ffmpeg runtime
+# Install python, curl, and build deps for ffmpeg build
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 \
     python3-pip \
     ca-certificates \
     curl \
-    xz-utils \
+    git \
+    pkg-config \
+    yasm \
+    nasm \
+    autoconf \
+    automake \
+    libtool \
+    cmake \
+    build-essential \
+    libnuma-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Install NVIDIA-provided FFmpeg build with CUDA filters (tonemap_cuda, scale_cuda, etc.)
+# Build and install nv-codec-headers (required for NVENC/NVDEC)
+RUN set -eux; \
+    git clone https://github.com/FFmpeg/nv-codec-headers.git /tmp/nv-codec-headers; \
+    make -C /tmp/nv-codec-headers install; \
+    rm -rf /tmp/nv-codec-headers
+
+# Build FFmpeg from source with CUDA/NVENC/NPP (tonemap_cuda, scale_cuda)
 RUN set -eux; \
     FF_VER="6.1.1"; \
-    DIST="ubuntu2204"; \
-    ARCHIVE="ffmpeg-${FF_VER}-${DIST}-x86_64-nvidia.tar.xz"; \
-    URL="https://developer.download.nvidia.com/compute/redist/ffmpeg/${ARCHIVE}"; \
-    curl -fL "$URL" -o /tmp/ffmpeg.tar.xz; \
-    mkdir -p /opt/ffmpeg-nvidia; \
-    tar -xJf /tmp/ffmpeg.tar.xz -C /opt/ffmpeg-nvidia --strip-components=1; \
-    ln -sf /opt/ffmpeg-nvidia/bin/ffmpeg /usr/local/bin/ffmpeg; \
-    ln -sf /opt/ffmpeg-nvidia/bin/ffprobe /usr/local/bin/ffprobe; \
-    rm /tmp/ffmpeg.tar.xz
+    git clone --branch n"$FF_VER" https://github.com/FFmpeg/FFmpeg.git /tmp/ffmpeg; \
+    cd /tmp/ffmpeg; \
+    ./configure \
+        --prefix=/opt/ffmpeg \
+        --pkg-config-flags="--static" \
+        --enable-nonfree \
+        --enable-cuda-nvcc \
+        --enable-libnpp \
+        --enable-nvenc \
+        --enable-cuvid \
+        --enable-cuda \
+        --extra-cflags=-I/usr/local/cuda/include \
+        --extra-ldflags=-L/usr/local/cuda/lib64 \
+        --disable-debug \
+        --disable-doc \
+        --disable-static \
+        --enable-shared; \
+    make -j"$(nproc)"; \
+    make install; \
+    rm -rf /tmp/ffmpeg; \
+    ln -sf /opt/ffmpeg/bin/ffmpeg /usr/local/bin/ffmpeg; \
+    ln -sf /opt/ffmpeg/bin/ffprobe /usr/local/bin/ffprobe
 
 WORKDIR /app
 
