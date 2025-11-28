@@ -13,9 +13,9 @@
 
 | Container | Base | Role |
 | --- | --- | --- |
-| `orchestrator` | Ubuntu LTS | Coordinates workers, applies policy, exposes API/logging, persists state in SQLite/Postgres. Primary configuration entrypoint and status dashboard. Supports runtime library add/remove, websocket broadcasts, paginated entry queries. |
-| `folder-watcher` | Alpine + `inotify-tools` | Watches bind-mounted `movies` and `series` folders, emits events to orchestrator via HTTP. If API is unavailable, spools undelivered batches to disk and replays them on restart. |
-| `gpu-ffmpeg` | Ubuntu + FFmpeg + CUDA/NVIDIA runtime | Executes validation and transcode jobs using NVENC. Launches via orchestrator with bind-mounted file chunks and temp workspace. |
+| `orchestrator` | Ubuntu LTS | Coordinates workers, applies policy, exposes API/logging, persists state in SQLite. Primary configuration entrypoint and status dashboard. Supports runtime library add/remove, websocket broadcasts, paginated entry queries. |
+| `folder-watcher` | Python + Watchdog | Watches bind-mounted `movies` and `series` folders, emits events to orchestrator via HTTP. Supports `WATCH_POLLING` for Docker Desktop compatibility. Spools undelivered events if API is down. |
+| `gpu-ffmpeg` | Ubuntu + FFmpeg + CUDA/NVIDIA runtime | Executes validation and transcode jobs using NVENC. Pulls jobs via HTTP (`/api/jobs/next`) to ensure decoupling from the backing queue. |
 | `queue` (optional) | Redis | Buffers work to smooth spikes. |
 
 All containers join a private Docker network. Bind mounts provide the Windows-host media folders and a `config/` directory containing the template/legacy YAML used to seed the SQLite configuration store. NVIDIA Container Toolkit is required so `gpu-ffmpeg` can access the RTX 3060 from WSL2.

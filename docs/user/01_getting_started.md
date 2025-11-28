@@ -43,7 +43,11 @@ This guide walks through prerequisites, configuration, and day-one operation of 
 
 ## Media watcher behavior
 
-The `folder-watcher` container uses `inotifywait` to stream create/modify/delete events from the mounted `movies` and `series` directories. Events include the library name, full path, basic metadata, and whether the entry is a directory. The watcher backs off and retries when the orchestrator API is temporarily unavailable and can optionally buffer events for batch delivery. Set `EVENT_BUFFER_SECONDS` to a non-zero value in `docker-compose.yml` to group events into timed batches; adjust `EVENT_RETRY_ATTEMPTS` and `EVENT_RETRY_BACKOFF_SECONDS` to control the retry window if the API is down. If the API remains unreachable, undelivered batches are spooled to `EVENT_SPOOL_FILE` (default `/tmp/folder-watcher-spool.jsonl`) and replayed automatically on the next start.
+The `folder-watcher` container uses Python's `watchdog` library to stream create/modify/delete events from the mounted `movies` and `series` directories. Events include the library name, full path, basic metadata, and whether the entry is a directory. The watcher backs off and retries when the orchestrator API is temporarily unavailable and can optionally buffer events for batch delivery.
+
+For environments where bind mounts do not propagate filesystem events reliably (e.g., Docker Desktop on Windows/Mac), set `WATCH_POLLING=true` in `docker-compose.yml` to use polling instead of native OS events.
+
+Set `EVENT_BUFFER_SECONDS` to a non-zero value to group events into timed batches; adjust `EVENT_RETRY_ATTEMPTS` and `EVENT_RETRY_BACKOFF_SECONDS` to control the retry window if the API is down. If the API remains unreachable, undelivered batches are spooled to `EVENT_SPOOL_FILE` (default `/tmp/folder-watcher-spool.jsonl`) and replayed automatically on the next start.
 
 ## Cleanup and troubleshooting
 
