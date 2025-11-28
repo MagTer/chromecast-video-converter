@@ -141,7 +141,7 @@ class JobManager:
 
     async def _acquire_stalled(self, consumer: str) -> tuple[Optional[str], Optional[Job]]:
         try:
-            _next_id, messages = await self._redis.xautoclaim(
+            response = await self._redis.xautoclaim(
                 self._stream,
                 self._group,
                 consumer,
@@ -149,6 +149,15 @@ class JobManager:
                 start_id="0-0",
                 count=1,
             )
+            if isinstance(response, tuple):
+                if len(response) == 3:  # redis-py>=5 returns (next_id, messages, deleted)
+                    _next_id, messages, _deleted = response
+                elif len(response) == 2:
+                    _next_id, messages = response
+                else:  # pragma: no cover - defensive for unexpected shapes
+                    _next_id, messages = response, []
+            else:  # pragma: no cover - compatibility shim
+                _next_id, messages = response, []
         except redis.ResponseError as exc:
             self._logger.debug("xautoclaim failed: %s", exc)
             return None, None

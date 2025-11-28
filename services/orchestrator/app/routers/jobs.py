@@ -1,8 +1,10 @@
 import logging
+from functools import wraps
 
 from fastapi import APIRouter, HTTPException
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
+from redis.exceptions import RedisError
 
 from .. import jobs
 from ..dependencies import job_manager, worker_metrics_summary
@@ -19,19 +21,34 @@ LOGGER = logging.getLogger("orchestrator.jobs")
 router = APIRouter()
 
 
+def guard_job_queue_errors(func):
+    @wraps(func)
+    async def wrapper(*args, **kwargs):
+        try:
+            return await func(*args, **kwargs)
+        except RedisError as exc:  # pragma: no cover - exercised via FastAPI tests
+            LOGGER.error("Job queue unavailable: %s", exc)
+            raise HTTPException(status_code=503, detail="Job queue unavailable") from exc
+
+    return wrapper
+
+
 @router.get("/api/jobs")
+@guard_job_queue_errors
 async def list_jobs() -> JSONResponse:
     jobs_list = await job_manager.list_jobs()
     return JSONResponse(jsonable_encoder([job_to_response(job) for job in jobs_list]))
 
 
 @router.post("/api/jobs/clear")
+@guard_job_queue_errors
 async def clear_completed_jobs() -> JSONResponse:
     removed = await job_manager.clear_processed()
     return JSONResponse({"removed": removed})
 
 
 @router.get("/api/jobs/next")
+@guard_job_queue_errors
 async def next_job() -> JSONResponse:
     queue_state = await job_manager.queue_state()
     if queue_state["paused"]:
@@ -50,6 +67,7 @@ async def next_job() -> JSONResponse:
 
 
 @router.post("/api/jobs/{job_id}/status")
+@guard_job_queue_errors
 async def update_job_status(job_id: str, payload: JobStatusPayload) -> JSONResponse:
     try:
         job = await job_manager.update_job(job_id, jobs.JobStatusUpdate(**payload.model_dump()))
@@ -67,12 +85,14 @@ async def update_job_status(job_id: str, payload: JobStatusPayload) -> JSONRespo
 
 
 @router.post("/api/jobs/{job_id}/ack")
+@guard_job_queue_errors
 async def acknowledge_job(job_id: str, payload: JobAckPayload) -> JSONResponse:
     await job_manager.acknowledge(payload.delivery_id, job_id)
     return JSONResponse({"acknowledged": True})
 
 
 @router.get("/api/queue/state")
+@guard_job_queue_errors
 async def queue_state() -> JSONResponse:
     state = await job_manager.queue_state()
     state["workers"] = worker_metrics_summary()
@@ -80,6 +100,7 @@ async def queue_state() -> JSONResponse:
 
 
 @router.post("/api/queue/pause")
+@guard_job_queue_errors
 async def pause_queue(payload: QueuePauseRequest) -> JSONResponse:
     await job_manager.pause(payload.reason)
     LOGGER.warning("Job queue paused: %s", payload.reason or "no reason provided")
@@ -87,6 +108,7 @@ async def pause_queue(payload: QueuePauseRequest) -> JSONResponse:
 
 
 @router.post("/api/queue/resume")
+@guard_job_queue_errors
 async def resume_queue() -> JSONResponse:
     await job_manager.resume()
     LOGGER.info("Job queue resumed")

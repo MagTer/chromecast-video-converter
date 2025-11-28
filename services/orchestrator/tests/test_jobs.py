@@ -63,3 +63,15 @@ def test_pause_and_resume(fake_redis, tmp_path, monkeypatch):
         assert resumed_state["reason"] is None
 
     asyncio.run(_run())
+
+
+def test_acquire_stalled_handles_tuple_shape(fake_redis, monkeypatch):
+    async def _run():
+        monkeypatch.setattr(
+            "app.jobs.redis.from_url", lambda url, decode_responses=True: fake_redis
+        )
+        manager = JobManager("redis://test", visibility_timeout=1)
+        stalled = await manager._acquire_stalled("worker-1")
+        assert stalled == (None, None)
+
+    asyncio.run(_run())

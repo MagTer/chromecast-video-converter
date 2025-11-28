@@ -4,12 +4,14 @@ import asyncio
 import importlib
 import sys
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 import pytest
 import yaml
 from app.config import DEFAULT_CONFIG
 from app.library_entries import LibraryStatus
 from fastapi.testclient import TestClient
+from redis.exceptions import ConnectionError
 
 
 def _build_test_app(tmp_path: Path, monkeypatch, fake_redis):
@@ -252,3 +254,13 @@ def test_clear_jobs_endpoint_removes_completed_jobs(test_app, tmp_path):
 
     jobs_after = client.get("/api/jobs").json()
     assert all(item["status"] != jobs_module.JobStatus.COMPLETED for item in jobs_after)
+
+
+def test_next_job_reports_queue_outage(test_app, monkeypatch):
+    client, _main = test_app
+    failure = AsyncMock(side_effect=ConnectionError("offline"))
+    monkeypatch.setattr("app.routers.jobs.job_manager.queue_state", failure)
+
+    response = client.get("/api/jobs/next")
+    assert response.status_code == 503
+    assert response.json()["detail"] == "Job queue unavailable"

@@ -1,4 +1,5 @@
 import logging
+from fractions import Fraction
 from pathlib import Path
 
 LOGGER = logging.getLogger("gpu-ffmpeg.builder")
@@ -44,6 +45,44 @@ class FFmpegBuilder:
             except (ValueError, AttributeError):
                 LOGGER.debug("Invalid resolution %s; falling back to default scale", resolution)
         return SCALING_EXPRESSION
+
+    def _parse_frame_rate(self, value: str | int | float | None) -> float | None:
+        if value is None:
+            return None
+        if isinstance(value, (int, float)):
+            return float(value) if value > 0 else None
+        try:
+            if "/" in value:
+                return float(Fraction(value))
+            return float(value)
+        except (ValueError, ZeroDivisionError, TypeError):
+            return None
+
+    def _source_frame_rate(self) -> float | None:
+        streams = self.analysis.get("streams") or []
+        for stream in streams:
+            if stream.get("codec_type") != "video":
+                continue
+            fps = self._parse_frame_rate(stream.get("avg_frame_rate"))
+            if fps:
+                return fps
+            fps = self._parse_frame_rate(stream.get("r_frame_rate"))
+            if fps:
+                return fps
+        return None
+
+    def _format_fps_value(self, fps: float) -> str:
+        if fps.is_integer():
+            return str(int(fps))
+        return f"{fps:.3f}".rstrip("0").rstrip(".")
+
+    def _fps_filter_config(self, max_fps: int) -> tuple[float, bool]:
+        source_fps = self._source_frame_rate()
+        if source_fps and source_fps > 0:
+            if source_fps > max_fps + 0.01:
+                return float(max_fps), True
+            return float(source_fps), False
+        return float(max_fps), True
 
     def _gather_streams(self, streams: list[dict]) -> tuple[bool, list[dict], list[dict]]:
         video_present = False
@@ -231,8 +270,10 @@ class FFmpegBuilder:
 
         filters = [self._scaling_expression(profile)]
         if max_fps > 0:
-            filters.append(f"fps={max_fps}")
-        video_filter = ",".join(filters)
+            fps_value, needs_filter = self._fps_filter_config(max_fps)
+            if needs_filter:
+                filters.append(f"fps={self._format_fps_value(fps_value)}")
+        video_filter = ",".join(filters + ["hwdownload", "format=nv12", "hwupload_cuda"])
 
         command.extend(
             [
@@ -248,6 +289,7 @@ class FFmpegBuilder:
                 level,
             ]
         )
+        command.extend(["-pix_fmt", "nv12"])
 
         if rc_mode == "cq":
             command.extend(["-rc", "constqp", "-qp", cq])
