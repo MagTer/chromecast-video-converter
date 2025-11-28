@@ -4,19 +4,21 @@ from pathlib import Path
 import pytest
 
 
-def _load_worker_module():
-    worker_path = Path(__file__).with_name("worker.py")
-    spec = importlib.util.spec_from_file_location("gpu_ffmpeg_worker", worker_path)
+def _load_builder_module():
+    path = Path(__file__).with_name("ffmpeg_builder.py")
+    spec = importlib.util.spec_from_file_location("ffmpeg_builder", path)
     module = importlib.util.module_from_spec(spec)
     assert spec and spec.loader
     spec.loader.exec_module(module)
     return module
 
 
-worker = _load_worker_module()
+builder_module = _load_builder_module()
+FFmpegBuilder = builder_module.FFmpegBuilder
 
 
 def test_prefers_non_commentary_when_multiple_streams_share_language():
+    builder = FFmpegBuilder({}, {}, {})
     streams = [
         {
             "input_index": 0,
@@ -32,7 +34,7 @@ def test_prefers_non_commentary_when_multiple_streams_share_language():
         },
     ]
 
-    mapped, default_idx = worker._select_priority_streams(streams)
+    mapped, default_idx = builder._select_priority_streams(streams)
 
     assert [stream["input_index"] for stream in mapped] == [1]
     assert default_idx == 0
@@ -40,6 +42,7 @@ def test_prefers_non_commentary_when_multiple_streams_share_language():
 
 @pytest.mark.parametrize("languages", [("swe", "eng"), ("swe", None)])
 def test_default_prefers_swedish_then_english(languages):
+    builder = FFmpegBuilder({}, {}, {})
     swedish_language, english_language = languages
     streams = [
         {
@@ -62,7 +65,7 @@ def test_default_prefers_swedish_then_english(languages):
         },
     ]
 
-    mapped, default_idx = worker._select_priority_streams(streams)
+    mapped, default_idx = builder._select_priority_streams(streams)
 
     assert mapped[0]["language"] == "swe"
     assert default_idx == 0
