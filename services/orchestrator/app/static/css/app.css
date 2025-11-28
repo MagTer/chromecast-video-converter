@@ -333,3 +333,37 @@
 
     .row-actions { display: flex; flex-wrap: wrap; gap: 0.35rem; }
     .row-actions button { padding: 0.35rem 0.6rem; font-size: 0.9rem; }
+
+    /* Modal */
+    .modal {
+      position: fixed;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      border: 1px solid #1d4ed8;
+      border-radius: 0.75rem;
+      background: var(--panel);
+      padding: 0;
+      width: min(500px, 90%);
+      color: var(--text);
+      z-index: 1000;
+    }
+    .modal::backdrop {
+      background: rgba(0, 0, 0, 0.5);
+    }
+    .modal-content {
+      padding: 1.5rem;
+    }
+    .modal-actions {
+      margin-top: 1.5rem;
+      display: flex;
+      gap: 1rem;
+      justify-content: flex-end;
+    }
+    .danger {
+      color: #f87171 !important;
+      border-color: #7f1d1d !important;
+    }
+    .danger:hover {
+      background: rgba(248, 113, 113, 0.1) !important;
+    }

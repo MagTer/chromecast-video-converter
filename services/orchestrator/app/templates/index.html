@@ -13,12 +13,25 @@
     </div>
     <ul>
       <li><a href="#queue" data-page="queue" class="active">Queue management</a></li>
+      <li><a href="#history" data-page="history">History</a></li>
       <li><a href="#library" data-page="library">Library entries</a></li>
       <li><a href="#logs" data-page="logs">Logs</a></li>
       <li><a href="#config" data-page="config">Configuration</a></li>
     </ul>
   </nav>
   <main>
+    <!-- Setup Wizard Modal -->
+    <dialog id="setup-wizard" class="modal">
+      <div class="modal-content">
+        <h2>Welcome to Chromecast Converter</h2>
+        <p>No libraries are currently configured. Would you like to set one up now?</p>
+        <div class="modal-actions">
+          <button id="wizard-setup-btn" type="button">Configure Library</button>
+          <button id="wizard-skip-btn" type="button" class="secondary">Skip</button>
+        </div>
+      </div>
+    </dialog>
+
     <section class="page active" data-page="queue">
       <header>
         <div>
@@ -61,6 +74,33 @@
             </tr>
           </thead>
           <tbody id="job-rows"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="page" data-page="history">
+      <header>
+        <div>
+          <h2>Job History</h2>
+          <p class="subtitle">Recently completed or failed jobs.</p>
+        </div>
+        <div style="display:flex; gap:0.5rem; align-items:center;">
+            <button id="refresh-history" type="button">Refresh</button>
+        </div>
+      </header>
+      <div class="panel">
+        <table>
+          <thead>
+            <tr>
+              <th>ID</th>
+              <th>Status</th>
+              <th>Finished</th>
+              <th>File</th>
+              <th>Profile</th>
+              <th>Details</th>
+            </tr>
+          </thead>
+          <tbody id="history-rows"></tbody>
         </table>
       </div>
     </section>
@@ -175,6 +215,10 @@
         <div>
           <h2>Encoding configuration</h2>
           <p class="subtitle">Values are constrained to Chromecast Gen 2 capabilities.</p>
+        </div>
+        <div style="display:flex; gap:0.5rem; align-items:center;">
+          <button id="export-config" type="button" class="secondary">Export YAML</button>
+          <button id="reset-config" type="button" class="secondary danger">Reset to Defaults</button>
         </div>
       </header>
       <div class="panel">
