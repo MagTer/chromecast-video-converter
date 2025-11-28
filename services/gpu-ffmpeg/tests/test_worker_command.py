@@ -1,6 +1,8 @@
 import sys
 from pathlib import Path
 
+import pytest
+
 # Add services/gpu-ffmpeg to path so we can import app
 sys.path.append(str(Path(__file__).parents[1]))
 
@@ -307,3 +309,66 @@ def test_build_ffmpeg_command_respects_profile_level_and_aq(tmp_path):
 
     assert "-c:a" in command and command[command.index("-c:a") + 1] == "aac"
     assert "-ac" in command and command[command.index("-ac") + 1] == "2"
+
+
+def test_build_ffmpeg_command_adds_tonemap_for_hdr(tmp_path):
+    profiles = {
+        "hdr": {
+            "bitrate": "8M",
+            "max_bitrate": "10M",
+            "bufsize": "16M",
+            "max_fps": 30,
+            "audio": {"codec": "aac", "bitrate": "192k", "channels": 2},
+        }
+    }
+    nvenc_capabilities = {"rc_vbr_hq": True, "multipass_fullres": True}
+    host_env = {"is_wsl2": False}
+    input_path = tmp_path / "hdr.mkv"
+    output_path = tmp_path / "hdr.mp4"
+    analysis = {
+        "profile": "hdr",
+        "streams": [
+            {
+                "codec_type": "video",
+                "pix_fmt": "yuv420p10le",
+                "color_transfer": "smpte2084",
+                "avg_frame_rate": "30000/1001",
+            }
+        ],
+    }
+    builder = FFmpegBuilder(
+        analysis,
+        input_path,
+        output_path,
+        profiles,
+        nvenc_capabilities,
+        host_env,
+    )
+    command = builder.build()
+    vf_val = command[command.index("-vf") + 1]
+    assert "tonemap_cuda" in vf_val
+
+
+def test_hdr_rejected_when_tonemap_disabled(tmp_path):
+    profiles = {
+        "hdr": {
+            "allow_tonemap": False,
+            "audio": {"codec": "aac", "bitrate": "192k"},
+        }
+    }
+    nvenc_capabilities = {"rc_vbr_hq": True, "multipass_fullres": True}
+    host_env = {"is_wsl2": False}
+    analysis = {
+        "profile": "hdr",
+        "streams": [{"codec_type": "video", "pix_fmt": "p010le", "color_transfer": "smpte2084"}],
+    }
+    builder = FFmpegBuilder(
+        analysis,
+        tmp_path / "in.mkv",
+        tmp_path / "out.mp4",
+        profiles,
+        nvenc_capabilities,
+        host_env,
+    )
+    with pytest.raises(RuntimeError):
+        builder.build()

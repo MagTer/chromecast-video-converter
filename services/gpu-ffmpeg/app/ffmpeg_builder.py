@@ -1,10 +1,183 @@
 import logging
+import re
+from dataclasses import dataclass
 from fractions import Fraction
 from pathlib import Path
+from typing import Iterable
 
 LOGGER = logging.getLogger("gpu-ffmpeg.builder")
 
 SCALING_EXPRESSION = "scale_cuda=-2:720:force_original_aspect_ratio=decrease"
+DEFAULT_LANGUAGE_PREFERENCES = ("swe", "eng")
+
+
+@dataclass
+class StreamDisposition:
+    default: bool = False
+    original: bool = False
+    comment: bool = False
+
+    @classmethod
+    def from_raw(cls, disposition: dict | None) -> "StreamDisposition":
+        disposition = disposition or {}
+        return cls(
+            default=bool(disposition.get("default")),
+            original=bool(disposition.get("original")),
+            comment=bool(disposition.get("comment")),
+        )
+
+
+@dataclass
+class VideoStreamInfo:
+    input_index: int
+    codec_name: str | None = None
+    pix_fmt: str | None = None
+    bits_per_raw_sample: str | int | None = None
+    color_space: str | None = None
+    color_transfer: str | None = None
+    color_primaries: str | None = None
+    side_data_list: list | None = None
+    avg_frame_rate: str | None = None
+    r_frame_rate: str | None = None
+
+    def bit_depth(self) -> int | None:
+        if self.bits_per_raw_sample:
+            try:
+                return int(self.bits_per_raw_sample)
+            except (TypeError, ValueError):
+                pass
+        if self.pix_fmt:
+            matches = re.findall(r"(\d+)", self.pix_fmt)
+            if matches:
+                try:
+                    return int(matches[-1])
+                except ValueError:
+                    return None
+        return None
+
+    def frame_rate(self) -> float | None:
+        for candidate in (self.avg_frame_rate, self.r_frame_rate):
+            if not candidate:
+                continue
+            try:
+                if "/" in candidate:
+                    return float(Fraction(candidate))
+                return float(candidate)
+            except (ValueError, ZeroDivisionError):
+                continue
+        return None
+
+    def is_hdr(self) -> bool:
+        if self.color_transfer and self.color_transfer.lower() in {
+            "smpte2084",
+            "arib-std-b67",
+        }:
+            return True
+        if self.side_data_list:
+            for item in self.side_data_list:
+                if item.get("side_data_type", "").lower() in {
+                    "mastering display metadata",
+                    "content light level metadata",
+                    "hdr_dynamic_metadata",
+                }:
+                    return True
+        bit_depth = self.bit_depth() or 8
+        return bit_depth > 8
+
+
+@dataclass
+class AudioStreamInfo:
+    input_index: int
+    language: str | None
+    disposition: StreamDisposition
+    title: str | None = None
+    codec_name: str | None = None
+
+
+@dataclass
+class SubtitleStreamInfo:
+    input_index: int
+    language: str | None
+    disposition: StreamDisposition
+    title: str | None = None
+    codec_name: str | None = None
+
+
+@dataclass
+class TranscodeProfile:
+    name: str | None
+    bitrate: str = "8M"
+    max_bitrate: str = "8M"
+    bufsize: str = "16M"
+    level: str = "4.1"
+    h264_profile: str = "high"
+    max_fps: int = 30
+    preset: str = "p6"
+    rc_mode: str = "vbr"
+    cq: str = "18"
+    bframes: int = 2
+    lookahead: int = 24
+    adaptive_b_frames: bool = True
+    aq_enabled: bool = True
+    spatial_aq: bool = True
+    temporal_aq: bool = True
+    aq_strength: int = 7
+    resolution: str | None = None
+    max_resolution: str | None = None
+    audio_codec: str = "aac"
+    audio_bitrate: str = "192k"
+    audio_channels: int = 2
+    allow_tonemap: bool = True
+
+    @classmethod
+    def from_dict(cls, raw: dict | None, name: str | None = None) -> "TranscodeProfile":
+        raw = raw or {}
+        audio_cfg = raw.get("audio", {}) or {}
+
+        def _int(value, default):
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                return default
+
+        profile = cls(
+            name=name,
+            bitrate=str(raw.get("bitrate") or raw.get("max_bitrate") or "8M"),
+            max_bitrate=str(raw.get("max_bitrate") or raw.get("bitrate") or "8M"),
+            bufsize=str(raw.get("bufsize", "16M")),
+            level=str(raw.get("level", "4.1")),
+            h264_profile=str(raw.get("profile", "high")),
+            max_fps=max(1, _int(raw.get("max_fps", 30), 30)),
+            preset=str(raw.get("preset", "p6")),
+            rc_mode=str(raw.get("rc", "vbr") or "vbr").lower(),
+            cq=str(raw.get("cq", 18)),
+            bframes=_int(raw.get("bframes", 2), 2),
+            lookahead=_int(raw.get("lookahead", 24), 24),
+            adaptive_b_frames=bool(raw.get("adaptive_b_frames", True)),
+            aq_enabled=bool(raw.get("aq", True)),
+            spatial_aq=bool(raw.get("spatial_aq", True)),
+            temporal_aq=bool(raw.get("temporal_aq", True)),
+            aq_strength=_int(raw.get("aq_strength", 7), 7),
+            resolution=raw.get("resolution"),
+            max_resolution=raw.get("max_resolution"),
+            audio_codec=str(audio_cfg.get("codec", "aac")),
+            audio_bitrate=str(audio_cfg.get("bitrate", "192k")),
+            audio_channels=_int(audio_cfg.get("channels", 2), 2),
+            allow_tonemap=bool(raw.get("allow_tonemap", True)),
+        )
+        profile.validate()
+        return profile
+
+    def validate(self) -> None:
+        errors: list[str] = []
+        if self.max_fps <= 0:
+            errors.append("max_fps must be >0")
+        if self.audio_channels not in (1, 2):
+            errors.append("audio_channels must be 1 or 2 for Chromecast")
+        if self.aq_strength < 1 or self.aq_strength > 15:
+            errors.append("aq_strength must be between 1 and 15")
+        if errors:
+            raise ValueError(f"Invalid profile {self.name or ''}: {', '.join(errors)}")
 
 
 class FFmpegBuilder:
@@ -16,6 +189,7 @@ class FFmpegBuilder:
         profiles: dict,
         nvenc_capabilities: dict,
         host_environment: dict,
+        language_preferences: Iterable[str] | None = None,
     ):
         self.analysis = analysis
         self.input_path = input_path
@@ -23,7 +197,9 @@ class FFmpegBuilder:
         self.profiles = profiles
         self.nvenc_capabilities = nvenc_capabilities
         self.host_environment = host_environment
+        self.language_preferences = tuple(language_preferences or DEFAULT_LANGUAGE_PREFERENCES)
 
+    # --------------- Language helpers --------------- #
     def _normalize_language(self, language: str | None) -> str | None:
         if not language:
             return None
@@ -34,8 +210,178 @@ class FFmpegBuilder:
             return "eng"
         return code
 
-    def _scaling_expression(self, profile: dict) -> str:
-        resolution = profile.get("max_resolution") or profile.get("resolution")
+    # --------------- Profile helpers --------------- #
+    def _resolve_profile(self) -> TranscodeProfile:
+        profile_id = self.analysis.get("profile")
+        raw_profile = self.analysis.get("encoding") or self.profiles.get(profile_id, {})
+        try:
+            return TranscodeProfile.from_dict(raw_profile, name=str(profile_id))
+        except ValueError as exc:
+            LOGGER.warning("Profile %s invalid (%s); using defaults", profile_id, exc)
+            return TranscodeProfile.from_dict({}, name=str(profile_id))
+
+    # --------------- Stream parsing --------------- #
+    def _parse_streams(
+        self, streams: list[dict]
+    ) -> tuple[list[VideoStreamInfo], list[AudioStreamInfo], list[SubtitleStreamInfo]]:
+        videos: list[VideoStreamInfo] = []
+        audios: list[AudioStreamInfo] = []
+        subs: list[SubtitleStreamInfo] = []
+        audio_pos = 0
+        subtitle_pos = 0
+        for stream in streams:
+            codec_type = stream.get("codec_type")
+            if codec_type == "video":
+                videos.append(
+                    VideoStreamInfo(
+                        input_index=len(videos),
+                        codec_name=stream.get("codec_name"),
+                        pix_fmt=stream.get("pix_fmt"),
+                        bits_per_raw_sample=stream.get("bits_per_raw_sample"),
+                        color_space=stream.get("color_space"),
+                        color_transfer=stream.get("color_transfer"),
+                        color_primaries=stream.get("color_primaries"),
+                        side_data_list=stream.get("side_data_list"),
+                        avg_frame_rate=stream.get("avg_frame_rate"),
+                        r_frame_rate=stream.get("r_frame_rate"),
+                    )
+                )
+            elif codec_type == "audio":
+                audios.append(
+                    AudioStreamInfo(
+                        input_index=audio_pos,
+                        language=self._normalize_language(stream.get("tags", {}).get("language")),
+                        disposition=StreamDisposition.from_raw(stream.get("disposition")),
+                        title=stream.get("tags", {}).get("title"),
+                        codec_name=stream.get("codec_name"),
+                    )
+                )
+                audio_pos += 1
+            elif codec_type == "subtitle":
+                subs.append(
+                    SubtitleStreamInfo(
+                        input_index=subtitle_pos,
+                        language=self._normalize_language(stream.get("tags", {}).get("language")),
+                        disposition=StreamDisposition.from_raw(stream.get("disposition")),
+                        title=stream.get("tags", {}).get("title"),
+                        codec_name=stream.get("codec_name"),
+                    )
+                )
+                subtitle_pos += 1
+            else:
+                LOGGER.warning(
+                    "Ignoring unsupported stream type %s (codec %s)",
+                    codec_type,
+                    stream.get("codec_name"),
+                    extra={"stream_type": codec_type, "codec": stream.get("codec_name")},
+                )
+        return videos, audios, subs
+
+    # --------------- Selection helpers --------------- #
+    def _is_commentary(self, stream: AudioStreamInfo | SubtitleStreamInfo) -> bool:
+        title = (stream.title or "").lower()
+        return bool(stream.disposition.comment or "commentary" in title)
+
+    def _pick_best_stream(self, candidates: list[AudioStreamInfo | SubtitleStreamInfo]):
+        if not candidates:
+            return None
+        original = next((s for s in candidates if s.disposition.original), None)
+        if original:
+            return original
+        default = next((s for s in candidates if s.disposition.default), None)
+        if default:
+            return default
+        return candidates[0]
+
+    def _select_priority_streams(  # noqa: C901
+        self, stream_list: list[AudioStreamInfo | SubtitleStreamInfo]
+    ) -> tuple[list[AudioStreamInfo | SubtitleStreamInfo], int | None]:
+        mapped: list[AudioStreamInfo | SubtitleStreamInfo] = []
+        seen_inputs: set[int] = set()
+        seen_languages: set[str | None] = set()
+
+        def _infer_original_language() -> str | None:
+            original_tag = next((s.language for s in stream_list if s.disposition.original), None)
+            if original_tag:
+                return original_tag
+            non_preferred = [
+                s.language
+                for s in stream_list
+                if s.language not in self.language_preferences and s.language is not None
+            ]
+            return non_preferred[0] if non_preferred else None
+
+        def _pick_for_language(language: str) -> AudioStreamInfo | SubtitleStreamInfo | None:
+            language_matches = [s for s in stream_list if s.language == language]
+            if not language_matches:
+                return None
+            preferred = [s for s in language_matches if not self._is_commentary(s)]
+            chosen = self._pick_best_stream(preferred or language_matches)
+            if chosen:
+                LOGGER.debug(
+                    "Selected %s stream for language %s",
+                    chosen.__class__.__name__,
+                    language,
+                    extra={"language": language, "stream_index": chosen.input_index},
+                )
+            return chosen
+
+        original_language = _infer_original_language()
+        language_order = list(self.language_preferences)
+        if original_language and original_language not in language_order:
+            language_order.append(original_language)
+
+        preferred_streams = [
+            _pick_for_language(lang) for lang in language_order if lang is not None
+        ]
+        original_fallback = self._pick_best_stream(
+            [s for s in stream_list if not self._is_commentary(s)] or stream_list
+        )
+
+        for candidate in preferred_streams + [original_fallback]:
+            if candidate is None:
+                continue
+            idx = candidate.input_index
+            if candidate.language in seen_languages:
+                continue
+            if idx in seen_inputs:
+                continue
+            mapped.append(candidate)
+            seen_inputs.add(idx)
+            seen_languages.add(candidate.language)
+
+        default_idx: int | None = None
+        for lang in language_order:
+            candidate = next((s for s in mapped if s.language == lang), None)
+            if candidate:
+                default_idx = mapped.index(candidate)
+                break
+        if default_idx is None and mapped:
+            default_idx = 0
+        LOGGER.debug(
+            "Selected %s streams (default=%s) with preferences %s",
+            len(mapped),
+            default_idx,
+            self.language_preferences,
+            extra={"mapped_streams": len(mapped), "default_idx": default_idx},
+        )
+        return mapped, default_idx
+
+    def _build_disposition_flags(
+        self,
+        mapped_streams: list[AudioStreamInfo | SubtitleStreamInfo],
+        default_idx: int | None,
+        stream_type: str,
+    ) -> list[str]:
+        flags: list[str] = []
+        for output_idx in range(len(mapped_streams)):
+            disposition_value = "default" if default_idx == output_idx else "0"
+            flags.extend([f"-disposition:{stream_type}:{output_idx}", disposition_value])
+        return flags
+
+    # --------------- Filter helpers --------------- #
+    def _scaling_expression(self, profile: TranscodeProfile) -> str:
+        resolution = profile.max_resolution or profile.resolution
         if resolution:
             try:
                 _, height_str = resolution.lower().split("x", 1)
@@ -46,139 +392,54 @@ class FFmpegBuilder:
                 LOGGER.debug("Invalid resolution %s; falling back to default scale", resolution)
         return SCALING_EXPRESSION
 
-    def _parse_frame_rate(self, value: str | int | float | None) -> float | None:
-        if value is None:
-            return None
-        if isinstance(value, (int, float)):
-            return float(value) if value > 0 else None
-        try:
-            if "/" in value:
-                return float(Fraction(value))
-            return float(value)
-        except (ValueError, ZeroDivisionError, TypeError):
-            return None
-
-    def _source_frame_rate(self) -> float | None:
-        streams = self.analysis.get("streams") or []
-        for stream in streams:
-            if stream.get("codec_type") != "video":
-                continue
-            fps = self._parse_frame_rate(stream.get("avg_frame_rate"))
-            if fps:
-                return fps
-            fps = self._parse_frame_rate(stream.get("r_frame_rate"))
-            if fps:
-                return fps
-        return None
-
-    def _format_fps_value(self, fps: float) -> str:
-        if fps.is_integer():
-            return str(int(fps))
-        return f"{fps:.3f}".rstrip("0").rstrip(".")
-
-    def _fps_filter_config(self, max_fps: int) -> tuple[float, bool]:
-        source_fps = self._source_frame_rate()
+    def _fps_filter_config(self, source_fps: float | None, max_fps: int) -> tuple[float, bool]:
         if source_fps and source_fps > 0:
             if source_fps > max_fps + 0.01:
                 return float(max_fps), True
             return float(source_fps), False
         return float(max_fps), True
 
-    def _gather_streams(self, streams: list[dict]) -> tuple[bool, list[dict], list[dict]]:
-        video_present = False
-        audio_streams: list[dict] = []
-        subtitle_streams: list[dict] = []
-        audio_pos = 0
-        subtitle_pos = 0
-        for stream in streams:
-            codec_type = stream.get("codec_type")
-            if codec_type == "video":
-                video_present = True
-            elif codec_type == "audio":
-                audio_streams.append(
-                    {
-                        "input_index": audio_pos,
-                        "language": self._normalize_language(
-                            stream.get("tags", {}).get("language")
-                        ),
-                        "disposition": stream.get("disposition", {}),
-                        "title": stream.get("tags", {}).get("title"),
-                    }
-                )
-                audio_pos += 1
-            elif codec_type == "subtitle":
-                subtitle_streams.append(
-                    {
-                        "input_index": subtitle_pos,
-                        "language": self._normalize_language(
-                            stream.get("tags", {}).get("language")
-                        ),
-                        "disposition": stream.get("disposition", {}),
-                        "title": stream.get("tags", {}).get("title"),
-                    }
-                )
-                subtitle_pos += 1
-        return video_present, audio_streams, subtitle_streams
+    def _build_filter_chain(
+        self, profile: TranscodeProfile, video_stream: VideoStreamInfo | None
+    ) -> str:
+        filters: list[str] = [self._scaling_expression(profile)]
+        source_fps = video_stream.frame_rate() if video_stream else None
+        if profile.max_fps > 0:
+            fps_value, needs_filter = self._fps_filter_config(source_fps, profile.max_fps)
+            if needs_filter:
+                filters.append(f"fps={self._format_fps_value(fps_value)}")
 
-    def _is_commentary(self, stream: dict) -> bool:
-        disposition = stream.get("disposition", {}) or {}
-        title = (stream.get("title") or "").lower()
-        return bool(disposition.get("comment") or "commentary" in title)
+        needs_tonemap = False
+        if video_stream and video_stream.is_hdr():
+            needs_tonemap = True
+            LOGGER.warning(
+                "HDR stream detected (pix_fmt=%s, transfer=%s); tonemapping to SDR",
+                video_stream.pix_fmt,
+                video_stream.color_transfer,
+                extra={
+                    "event": "tonemap",
+                    "pix_fmt": video_stream.pix_fmt,
+                    "color_transfer": video_stream.color_transfer,
+                },
+            )
 
-    def _pick_best_stream(self, candidates: list[dict]) -> dict | None:
-        if not candidates:
-            return None
-        original = next((s for s in candidates if s.get("disposition", {}).get("original")), None)
-        if original:
-            return original
-        default = next((s for s in candidates if s.get("disposition", {}).get("default")), None)
-        if default:
-            return default
-        return candidates[0]
+        if needs_tonemap and profile.allow_tonemap:
+            filters.append("tonemap_cuda=t=bt709:format=nv12")
 
-    def _select_priority_streams(self, stream_list: list[dict]) -> tuple[list[dict], int | None]:
-        mapped: list[dict] = []
-        seen_inputs: set[int] = set()
+        filters.extend(["hwdownload", "format=nv12", "hwupload_cuda"])
+        filter_chain = ",".join(filters)
+        LOGGER.debug(
+            "Video filter chain constructed: %s",
+            filter_chain,
+            extra={"event": "filter_chain", "filters": filters},
+        )
+        return filter_chain
 
-        def _pick_for_language(language: str) -> dict | None:
-            language_matches = [s for s in stream_list if s.get("language") == language]
-            if not language_matches:
-                return None
-            preferred = [s for s in language_matches if not self._is_commentary(s)]
-            return self._pick_best_stream(preferred or language_matches)
-
-        swedish = _pick_for_language("swe")
-        english = _pick_for_language("eng")
-
-        non_commentary = [s for s in stream_list if not self._is_commentary(s)]
-        original_fallback = self._pick_best_stream(non_commentary or stream_list)
-
-        for candidate in [swedish, english, original_fallback]:
-            if candidate is None:
-                continue
-            idx = candidate["input_index"]
-            if idx in seen_inputs:
-                continue
-            mapped.append(candidate)
-            seen_inputs.add(idx)
-
-        default_idx: int | None = None
-        if swedish is not None and swedish in mapped:
-            default_idx = mapped.index(swedish)
-        elif english is not None and english in mapped:
-            default_idx = mapped.index(english)
-        elif mapped:
-            default_idx = 0
-        return mapped, default_idx
-
-    def _build_disposition_flags(
-        self, mapped_streams: list[dict], default_idx: int | None, stream_type: str
-    ) -> list[str]:
-        flags: list[str] = []
-        for output_idx in range(len(mapped_streams)):
-            disposition_value = "default" if default_idx == output_idx else "0"
-            flags.extend([f"-disposition:{stream_type}:{output_idx}", disposition_value])
-        return flags
+    # --------------- Misc helpers --------------- #
+    def _format_fps_value(self, fps: float) -> str:
+        if fps.is_integer():
+            return str(int(fps))
+        return f"{fps:.3f}".rstrip("0").rstrip(".")
 
     def _ffmpeg_base_command(self) -> list[str]:
         return [
@@ -192,38 +453,66 @@ class FFmpegBuilder:
             str(self.input_path),
         ]
 
+    # --------------- Build --------------- #
     def build(self) -> list[str]:  # noqa: C901
-        profile = self.analysis.get("encoding") or self.profiles.get(
-            self.analysis.get("profile"),
-            {},
+        profile = self._resolve_profile()
+
+        streams = self.analysis.get("streams", []) or []
+        video_streams, audio_streams, subtitle_streams = self._parse_streams(streams)
+        video_stream = video_streams[0] if video_streams else None
+
+        if video_stream and video_stream.is_hdr() and not profile.allow_tonemap:
+            raise RuntimeError("HDR content detected but tonemapping is disabled in profile")
+
+        selected_audio, default_audio_idx = self._select_priority_streams(audio_streams)
+        selected_subtitles, default_sub_idx = self._select_priority_streams(subtitle_streams)
+
+        command: list[str] = self._ffmpeg_base_command()
+        if video_streams:
+            command.extend(["-map", "0:v"])
+        for audio_stream in selected_audio:
+            command.extend(["-map", f"0:a:{audio_stream.input_index}"])
+        for subtitle_stream in selected_subtitles:
+            command.extend(["-map", f"0:s:{subtitle_stream.input_index}"])
+
+        audio_dispositions = self._build_disposition_flags(selected_audio, default_audio_idx, "a")
+        subtitle_dispositions = self._build_disposition_flags(
+            selected_subtitles, default_sub_idx, "s"
         )
 
-        profile = profile or {}
-        bitrate = profile.get("bitrate") or profile.get("max_bitrate", "8M")
-        maxrate = profile.get("max_bitrate", bitrate)
-        bufsize = profile.get("bufsize", "16M")
-        level = profile.get("level", "4.1")
-        h264_profile = str(profile.get("profile", "high"))
-        h264_profile_lower = h264_profile.lower()
-        max_fps = max(1, int(profile.get("max_fps", 30) or 30))
-        preset = str(profile.get("preset", "p6"))
-        rc_mode = str(profile.get("rc", "vbr") or "vbr").lower()
+        video_filter = self._build_filter_chain(profile, video_stream)
+
+        command.extend(
+            [
+                "-vf",
+                video_filter,
+                "-c:v",
+                "h264_nvenc",
+                "-preset",
+                profile.preset,
+                "-profile:v",
+                profile.h264_profile,
+                "-level",
+                profile.level,
+            ]
+        )
+        command.extend(["-pix_fmt", "nv12"])
+
+        rc_mode = profile.rc_mode
         if rc_mode == "cbr":
             rc_mode = "vbr"
-        cq = str(profile.get("cq", 18))
-        bframes = int(profile.get("bframes", 2) or 0)
+        h264_profile_lower = profile.h264_profile.lower()
+        bframes = profile.bframes
         if h264_profile_lower == "baseline":
             bframes = 0
-        lookahead = int(profile.get("lookahead", 24) or 0)
-        adaptive_b_frames = bool(profile.get("adaptive_b_frames", True))
-        adaptive_b_frames = adaptive_b_frames and lookahead > 0 and bframes > 0
+        lookahead = profile.lookahead
+        adaptive_b_frames = profile.adaptive_b_frames and lookahead > 0 and bframes > 0
         if h264_profile_lower == "baseline":
             adaptive_b_frames = False
-        aq_enabled = bool(profile.get("aq", True))
-        spatial_aq = aq_enabled and bool(profile.get("spatial_aq", True))
-        temporal_aq = aq_enabled and bool(profile.get("temporal_aq", True))
-        aq_strength = int(profile.get("aq_strength", 7) or 7)
-        aq_strength = max(1, min(15, aq_strength))
+        aq_enabled = profile.aq_enabled
+        spatial_aq = aq_enabled and profile.spatial_aq
+        temporal_aq = aq_enabled and profile.temporal_aq
+        aq_strength = max(1, min(15, profile.aq_strength))
         multipass_mode: str | None = None
         if rc_mode == "vbr_hq":
             multipass_mode = "fullres"
@@ -241,61 +530,21 @@ class FFmpegBuilder:
                 "NVENC multipass fullres mode is unavailable; continuing without multipass",
             )
             multipass_mode = None
-        audio_cfg = profile.get("audio", {})
-        audio_codec = audio_cfg.get("codec", "aac")
-        audio_bitrate = audio_cfg.get("bitrate", "192k")
-        audio_channels = 2  # Chromecast-safe stereo only
-
-        streams = self.analysis.get("streams", [])
-        video_present, audio_streams, subtitle_streams = self._gather_streams(streams)
-
-        selected_audio, default_audio_idx = self._select_priority_streams(audio_streams)
-        selected_subtitles, default_sub_idx = self._select_priority_streams(subtitle_streams)
-
-        command: list[str] = self._ffmpeg_base_command()
-
-        if video_present:
-            command.extend(["-map", "0:v"])
-
-        for audio_stream in selected_audio:
-            command.extend(["-map", f"0:a:{audio_stream['input_index']}"])
-
-        for subtitle_stream in selected_subtitles:
-            command.extend(["-map", f"0:s:{subtitle_stream['input_index']}"])
-
-        audio_dispositions = self._build_disposition_flags(selected_audio, default_audio_idx, "a")
-        subtitle_dispositions = self._build_disposition_flags(
-            selected_subtitles, default_sub_idx, "s"
-        )
-
-        filters = [self._scaling_expression(profile)]
-        if max_fps > 0:
-            fps_value, needs_filter = self._fps_filter_config(max_fps)
-            if needs_filter:
-                filters.append(f"fps={self._format_fps_value(fps_value)}")
-        video_filter = ",".join(filters + ["hwdownload", "format=nv12", "hwupload_cuda"])
-
-        command.extend(
-            [
-                "-vf",
-                video_filter,
-                "-c:v",
-                "h264_nvenc",
-                "-preset",
-                preset,
-                "-profile:v",
-                h264_profile,
-                "-level",
-                level,
-            ]
-        )
-        command.extend(["-pix_fmt", "nv12"])
 
         if rc_mode == "cq":
-            command.extend(["-rc", "constqp", "-qp", cq])
+            command.extend(["-rc", "constqp", "-qp", profile.cq])
         else:
             command.extend(
-                ["-rc", rc_mode, "-b:v", bitrate, "-maxrate", maxrate, "-bufsize", bufsize]
+                [
+                    "-rc",
+                    rc_mode,
+                    "-b:v",
+                    profile.bitrate,
+                    "-maxrate",
+                    profile.max_bitrate,
+                    "-bufsize",
+                    profile.bufsize,
+                ]
             )
             if multipass_mode:
                 command.extend(["-multipass", multipass_mode])
@@ -324,11 +573,11 @@ class FFmpegBuilder:
             command.extend(
                 [
                     "-c:a",
-                    audio_codec,
+                    profile.audio_codec,
                     "-b:a",
-                    audio_bitrate,
+                    profile.audio_bitrate,
                     "-ac",
-                    str(audio_channels),
+                    str(profile.audio_channels),
                 ]
             )
 

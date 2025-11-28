@@ -45,6 +45,8 @@ All containers join a private Docker network. Bind mounts provide the Windows-ho
 - **Circuit breakers** - Orchestrator can pause scheduling if GPU temperature exceeds thresholds or storage free space is low.
 - **Rollback strategy** - Originals persist until verification passes. Failures keep source files untouched and log detailed ffmpeg stderr for analysis.
 - **Self-healing watchers** - `folder-watcher` restarts quickly (tiny Alpine image). If orchestrator is unavailable, watchers retry with exponential backoff and can buffer events locally before replaying.
+- **Media gatekeeping** - Workers probe HDR metadata (bit depth, transfer/primaries, mastering data) and either tonemap to SDR (bt709/nv12) or fail fast with a categorized error before ffmpeg spins. Retryable errors (device busy, incomplete moov, missing ffmpeg) are tagged separately from fatal codec/pix_fmt issues so the dashboard can display actionable guidance.
+- **Language preferences** - Audio/subtitle selection prefers Swedish, then English, then original, with dispositions preserved. Preferences are configurable per `operational.language_preferences` while keeping the Swedish-first default for legacy libraries.
 
 ## Configuration model
 

@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import shlex
 import subprocess
 import time
@@ -14,7 +15,7 @@ from typing import Any, Dict, Optional, Tuple
 import httpx
 import yaml
 
-from .ffmpeg_builder import FFmpegBuilder
+from .ffmpeg_builder import DEFAULT_LANGUAGE_PREFERENCES, FFmpegBuilder
 from .utils import detect_host_environment, resolve_media_path
 
 logging.addLevelName(logging.DEBUG, "VERBOSE")
@@ -135,10 +136,11 @@ PROFILES: dict = {}
 OPERATIONAL_CONFIG: dict = {}
 REMOVE_ORIGINAL = False
 GPU_TELEMETRY_INTERVAL = int(os.environ.get("GPU_TELEMETRY_INTERVAL", "30"))
+LANGUAGE_PREFERENCES: tuple[str, ...] = DEFAULT_LANGUAGE_PREFERENCES
 
 
 def _hydrate_config(raw: dict) -> None:
-    global PROFILES, OPERATIONAL_CONFIG, REMOVE_ORIGINAL
+    global PROFILES, OPERATIONAL_CONFIG, REMOVE_ORIGINAL, LANGUAGE_PREFERENCES
     profiles_raw = raw.get("profiles", {}) or {}
     if isinstance(profiles_raw, list):
         PROFILES = {item.get("name"): item for item in profiles_raw if item.get("name")}
@@ -146,6 +148,8 @@ def _hydrate_config(raw: dict) -> None:
         PROFILES = profiles_raw
     OPERATIONAL_CONFIG = raw.get("operational", {}) or {}
     REMOVE_ORIGINAL = bool(OPERATIONAL_CONFIG.get("remove_original_after_success", False))
+    language_pref = OPERATIONAL_CONFIG.get("language_preferences") or DEFAULT_LANGUAGE_PREFERENCES
+    LANGUAGE_PREFERENCES = tuple(str(lang).lower() for lang in language_pref if lang)
 
 
 def _load_config_from_api() -> bool:
@@ -271,6 +275,49 @@ def require_gpu(gpu_state: dict[str, Any] | None = None) -> dict[str, Any]:
     return state
 
 
+def _derive_bit_depth(stream: dict) -> int | None:
+    bits = stream.get("bits_per_raw_sample")
+    if bits:
+        try:
+            return int(bits)
+        except (TypeError, ValueError):
+            pass
+    pix_fmt = stream.get("pix_fmt") or ""
+    matches = re.findall(r"(\d+)", pix_fmt)
+    if matches:
+        try:
+            return int(matches[-1])
+        except ValueError:
+            return None
+    return None
+
+
+def _detect_hdr(stream: dict) -> bool:
+    transfer = (stream.get("color_transfer") or "").lower()
+    if transfer in {"smpte2084", "arib-std-b67"}:
+        return True
+    for item in stream.get("side_data_list") or []:
+        if item.get("side_data_type", "").lower() in {
+            "mastering display metadata",
+            "content light level metadata",
+            "hdr_dynamic_metadata",
+        }:
+            return True
+    bit_depth = _derive_bit_depth(stream) or 8
+    return bit_depth > 8
+
+
+def _augment_analysis_with_video_metadata(analysis: dict) -> dict:
+    streams = analysis.get("streams") or []
+    for stream in streams:
+        if stream.get("codec_type") != "video":
+            continue
+        stream["bit_depth"] = _derive_bit_depth(stream)
+        stream["is_hdr"] = _detect_hdr(stream)
+    analysis["streams"] = streams
+    return analysis
+
+
 def probe_file(filepath: str | Path) -> dict:
     target_path = resolve_media_path(filepath)
     command = [*FFPROBE_ANALYSIS_CMD, str(target_path)]
@@ -284,7 +331,8 @@ def probe_file(filepath: str | Path) -> dict:
                 text=True,
             )
             try:
-                return json.loads(result.stdout)
+                raw = json.loads(result.stdout)
+                return _augment_analysis_with_video_metadata(raw)
             except json.JSONDecodeError:
                 LOGGER.warning("Failed to parse ffprobe output for %s", filepath)
                 return {}
@@ -321,17 +369,48 @@ def _loggable_command(command: list[str]) -> str:
     return " ".join(shlex.quote(arg) for arg in command)
 
 
+def classify_ffmpeg_error(logs: list[str], return_code: int) -> dict[str, str | bool | int]:
+    """Categorize common ffmpeg failures for clearer UI messaging."""
+    patterns = [
+        (r"10[- ]?bit|yuv420p10", "unsupported_bit_depth", False),
+        (r"pix_fmt [^ ]+ is not supported", "unsupported_pixel_format", False),
+        (r"device busy|resource temporarily unavailable", "device_busy", True),
+        (r"nvenc.+not available|no capable devices", "nvenc_unavailable", True),
+        (r"Invalid data found when processing input", "corrupt_input", False),
+        (r"moov atom not found", "incomplete_file", True),
+    ]
+    tail = "\n".join(logs[-5:]) if logs else ""
+    for pattern, category, retryable in patterns:
+        if re.search(pattern, tail, re.IGNORECASE):
+            return {
+                "category": category,
+                "retryable": retryable,
+                "message": tail.splitlines()[-1] if tail else "",
+                "return_code": return_code,
+            }
+    return {
+        "category": "unknown",
+        "retryable": False,
+        "message": logs[-1] if logs else "",
+        "return_code": return_code,
+    }
+
+
 def run_conversion(command: list[str], progress_callback) -> tuple[int, list[str]]:
     LOGGER.info("Starting FFmpeg with command: %s", _loggable_command(command))
     ffmpeg_logs: deque[str] = deque(maxlen=100)
-    process = subprocess.Popen(
-        command,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-    )
+    try:
+        process = subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+    except FileNotFoundError as exc:
+        LOGGER.error("FFmpeg binary not found: %s", exc)
+        return 127, ["ffmpeg not found"]
     assert process.stdout is not None
     try:
         while True:
@@ -556,6 +635,7 @@ async def _maybe_remove_original(source: Path, output_path: Path, expected_durat
 
 
 async def process_job(client: httpx.AsyncClient, job: dict) -> None:  # noqa: C901
+    global NVENC_CAPABILITIES
     job_id = job["id"]
     source = job["path"]
     playback_target = resolve_media_path(source)
@@ -602,9 +682,21 @@ async def process_job(client: httpx.AsyncClient, job: dict) -> None:  # noqa: C9
         return
 
     builder = FFmpegBuilder(
-        analysis, playback_target, output_path, PROFILES, NVENC_CAPABILITIES, HOST_ENVIRONMENT
+        analysis,
+        playback_target,
+        output_path,
+        PROFILES,
+        NVENC_CAPABILITIES,
+        HOST_ENVIRONMENT,
+        language_preferences=LANGUAGE_PREFERENCES,
     )
-    command = builder.build()
+    try:
+        command = builder.build()
+    except RuntimeError as exc:
+        message = f"Validation failed: {exc}"
+        LOGGER.error("%s", message)
+        await update_job_status(client, job_id, "failed", 0, message)
+        return
 
     loop = asyncio.get_running_loop()
     progress_callback, _, _ = _progress_callback_factory(duration, loop, client, job_id)
@@ -628,6 +720,7 @@ async def process_job(client: httpx.AsyncClient, job: dict) -> None:  # noqa: C9
         await update_job_status(client, job_id, "completed", 100, message)
         LOGGER.info("Job %s completed, output: %s", job_id[:8], output_path)
     else:
+        classification = classify_ffmpeg_error(ffmpeg_logs, return_code)
         message = f"FFmpeg exited with code {return_code}"
         if ffmpeg_logs:
             LOGGER.error(
@@ -636,7 +729,11 @@ async def process_job(client: httpx.AsyncClient, job: dict) -> None:  # noqa: C9
                 return_code,
                 "\n".join(ffmpeg_logs),
             )
-            message = f"{message}; last log line: {ffmpeg_logs[-1]}"
+            message = (
+                f"{message}; {classification.get('category')}: " f"{classification.get('message')}"
+            )
+        if classification.get("category") == "nvenc_unavailable":
+            NVENC_CAPABILITIES = _probe_nvenc_capabilities()
         await update_job_status(client, job_id, "failed", 0, message)
 
 
