@@ -1,4 +1,4 @@
-FROM nvidia/cuda:12.6.2-devel-ubuntu22.04
+FROM nvidia/cuda:12.9.1-devel-ubuntu24.04
 
 # Install Python runtime and build deps
 RUN apt-get update && apt-get install -y --no-install-recommends \
