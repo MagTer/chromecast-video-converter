@@ -1,4 +1,4 @@
-FROM nvidia/cuda:12.2.0-base-ubuntu22.04
+FROM nvidia/cuda:13.0.2-base-ubuntu24.04
 
 # Install python, curl, and build deps for ffmpeg runtime
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -11,7 +11,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Install NVIDIA-provided FFmpeg build with CUDA filters (tonemap_cuda, scale_cuda, etc.)
 RUN set -eux; \
     FF_VER="6.1.1"; \
-    ARCHIVE="ffmpeg-${FF_VER}-ubuntu2204-x86_64-nvidia.tar.xz"; \
+    DIST="ubuntu2404"; \
+    ARCHIVE="ffmpeg-${FF_VER}-${DIST}-x86_64-nvidia.tar.xz"; \
     URL="https://developer.download.nvidia.com/compute/redist/ffmpeg/${ARCHIVE}"; \
     curl -L "$URL" -o /tmp/ffmpeg.tar.xz; \
     mkdir -p /opt/ffmpeg-nvidia; \
