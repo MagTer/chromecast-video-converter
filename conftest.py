@@ -42,12 +42,6 @@ def _install_redis_stub() -> None:
 
 _install_redis_stub()
 
-PROJECT_ROOT = Path(__file__).resolve().parent
-ORCHESTRATOR_ROOT = PROJECT_ROOT / "services" / "orchestrator"
-GPU_WORKER_ROOT = PROJECT_ROOT / "services" / "gpu-ffmpeg"
-for path in (ORCHESTRATOR_ROOT, GPU_WORKER_ROOT):
-    if str(path) not in sys.path:
-        sys.path.insert(0, str(path))
 
 
 class InMemoryRedis:
