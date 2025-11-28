@@ -16,4 +16,5 @@ COPY app /app/app
 
 ENV PYTHONPATH=/app
 
-CMD ["python3", "-m", "app.worker"]
+ENTRYPOINT ["python3"]
+CMD ["-m", "app.worker"]
