@@ -6,15 +6,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3-pip \
     ca-certificates \
     curl \
+    xz-utils \
     && rm -rf /var/lib/apt/lists/*
 
 # Install NVIDIA-provided FFmpeg build with CUDA filters (tonemap_cuda, scale_cuda, etc.)
 RUN set -eux; \
     FF_VER="6.1.1"; \
-    DIST="ubuntu2404"; \
+    DIST="ubuntu2204"; \
     ARCHIVE="ffmpeg-${FF_VER}-${DIST}-x86_64-nvidia.tar.xz"; \
     URL="https://developer.download.nvidia.com/compute/redist/ffmpeg/${ARCHIVE}"; \
-    curl -L "$URL" -o /tmp/ffmpeg.tar.xz; \
+    curl -fL "$URL" -o /tmp/ffmpeg.tar.xz; \
     mkdir -p /opt/ffmpeg-nvidia; \
     tar -xJf /tmp/ffmpeg.tar.xz -C /opt/ffmpeg-nvidia --strip-components=1; \
     ln -sf /opt/ffmpeg-nvidia/bin/ffmpeg /usr/local/bin/ffmpeg; \
