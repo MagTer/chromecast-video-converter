@@ -16,6 +16,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     cmake \
     build-essential \
     libnuma-dev \
+    cuda-nvcc-13-0 \
+    libnpp-dev-13-0 \
     && rm -rf /var/lib/apt/lists/*
 
 # Build and install nv-codec-headers (required for NVENC/NVDEC)
