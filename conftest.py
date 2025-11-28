@@ -42,7 +42,6 @@ def _install_redis_stub() -> None:
 _install_redis_stub()
 
 
-
 class InMemoryRedis:
     def __init__(self) -> None:
         self._hashes: dict[str, dict[str, str]] = defaultdict(dict)
