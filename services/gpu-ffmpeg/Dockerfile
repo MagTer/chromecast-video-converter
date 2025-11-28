@@ -16,7 +16,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     cmake \
     build-essential \
     libnuma-dev \
-    cuda-nvcc-13-0 \
+    cuda-toolkit-13-0 \
     libnpp-dev-13-0 \
     && rm -rf /var/lib/apt/lists/*
 
@@ -32,6 +32,7 @@ RUN set -eux; \
     git clone --branch n"$FF_VER" https://github.com/FFmpeg/FFmpeg.git /tmp/ffmpeg; \
     cd /tmp/ffmpeg; \
     ln -s /usr/local/cuda-13.0 /usr/local/cuda || true; \
+    /usr/local/cuda-13.0/bin/nvcc -V; \
     export PATH=/usr/local/cuda-13.0/bin:/usr/local/cuda/bin:$PATH; \
     export PKG_CONFIG_PATH=/usr/local/lib/pkgconfig:/usr/lib/pkgconfig; \
     export CUDA_HOME=/usr/local/cuda-13.0; \
