@@ -30,7 +30,12 @@ jobs:
       - name: Run black
         run: black --check .
 
-      - name: Run tests
+      - name: Run Orchestrator tests
         env:
-          PYTHONPATH: "${{ github.workspace }}/services/orchestrator/app:${{ github.workspace }}/services/gpu-ffmpeg"
-        run: pytest
+          PYTHONPATH: "${{ github.workspace }}/services/orchestrator"
+        run: pytest services/orchestrator/tests/
+
+      - name: Run GPU Worker tests
+        env:
+          PYTHONPATH: "${{ github.workspace }}/services/gpu-ffmpeg"
+        run: pytest services/gpu-ffmpeg/tests/ services/gpu-ffmpeg/test_worker.py

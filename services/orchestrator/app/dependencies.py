@@ -14,6 +14,9 @@ from .library_entries import LibraryEntryStore
 from .logs import LogStore
 from .profiles import LibraryConfigStore, ProfileStore
 from .schemas import WorkerTelemetryPayload
+from .utils import (
+    detect_wsl2,
+)
 
 
 # Environment Variables
@@ -60,14 +63,6 @@ job_manager = jobs.JobManager(JOB_QUEUE_URL, visibility_timeout=JOB_VISIBILITY_T
 
 # Global State
 WORKER_TELEMETRY: Dict[str, WorkerTelemetryPayload] = {}
-
-# Constants
-DISPLAY_LIBRARY_PREFIX = "/media"
-LIBRARY_ROOT_PREFIXES = [
-    Path(prefix.strip())
-    for prefix in os.environ.get("LIBRARY_ROOT_PREFIXES", "/watch,/media").split(",")
-    if prefix.strip()
-]
 
 
 # Websocket
@@ -123,16 +118,6 @@ except FileNotFoundError:
 
 def get_library_map() -> Dict[str, Any]:
     return {library.name: library for library in LIBRARY_CONFIG_STORE.list_libraries()}
-
-
-def detect_wsl2() -> bool:
-    try:
-        version = Path("/proc/version").read_text().lower()
-        if "microsoft" in version or "wsl2" in version:
-            return True
-    except OSError:
-        pass
-    return any(os.environ.get(var) for var in ("WSL_DISTRO_NAME", "WSL_INTEROP"))
 
 
 HOST_ENVIRONMENT = {"is_wsl2": detect_wsl2()}

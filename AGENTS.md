@@ -9,12 +9,26 @@ This repository is agent-friendly and expects changes to preserve an operational
 - Prefer incremental, narrowly scoped commits that pair code changes with matching documentation updates.
 - Preserve GPU-only transcoding assumptions and avoid introducing CPU fallbacks.
 
-## Quality gates
+## Quality gates & Verification Strategy
 
-- Run `ruff check .` and `black --check .` before opening a PR; both are mandatory and enforced in review.
-- Run relevant pytest targets when touching APIs/flow: `pytest services/orchestrator/tests/test_api_endpoints.py` at minimum for orchestrator changes. Add/extend tests alongside new endpoints, websocket events, pagination, or watcher behavior.
-- Record any additional verification you run (manual scans, compose smoke tests) in the PR description.
-- Do not mix unrelated refactors with feature or doc updates.
+**The CI pipeline is strict. To avoid failure, you must follow this verification sequence EXACTLY before every submission:**
+
+1.  **Linting (Root Level)**:
+    *   Run `ruff check . --fix` from the repository root. **Do not run on subsets of files**, as this misses cross-file issues or files you forgot you touched.
+    *   Run `black .` from the repository root.
+    *   *If you make any code changes after this step (even one line), you must start over.*
+
+2.  **Testing**:
+    *   Run tests for each service **separately** to avoid namespace collisions (both services use `app` package):
+        *   `pytest services/orchestrator/tests/`
+        *   `pytest services/gpu-ffmpeg/tests/`
+        *   `pytest services/gpu-ffmpeg/test_worker.py`
+    *   Ensure all tests pass locally.
+
+3.  **Final Check**:
+    *   Run `ruff check .` and `black --check .` one last time to ensure no regressions were introduced during fixes.
+
+**Do not submit if any of these steps fail.**
 
 ## Keep these behaviors in sync
 
