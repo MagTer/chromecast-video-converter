@@ -22,7 +22,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Build and install nv-codec-headers (required for NVENC/NVDEC)
 RUN set -eux; \
-    git clone https://github.com/FFmpeg/nv-codec-headers.git /tmp/nv-codec-headers; \
+    git clone --branch sdk/12.2 https://github.com/FFmpeg/nv-codec-headers.git /tmp/nv-codec-headers; \
     make -C /tmp/nv-codec-headers install; \
     rm -rf /tmp/nv-codec-headers
 
