@@ -31,9 +31,10 @@ RUN set -eux; \
     FF_VER="6.1.1"; \
     git clone --branch n"$FF_VER" https://github.com/FFmpeg/FFmpeg.git /tmp/ffmpeg; \
     cd /tmp/ffmpeg; \
-    export PATH=/usr/local/cuda/bin:$PATH; \
+    ln -s /usr/local/cuda-13.0 /usr/local/cuda || true; \
+    export PATH=/usr/local/cuda-13.0/bin:/usr/local/cuda/bin:$PATH; \
     export PKG_CONFIG_PATH=/usr/local/lib/pkgconfig:/usr/lib/pkgconfig; \
-    export CUDA_HOME=/usr/local/cuda; \
+    export CUDA_HOME=/usr/local/cuda-13.0; \
     ./configure \
         --prefix=/opt/ffmpeg \
         --pkg-config-flags="--static" \
