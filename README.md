@@ -1,9 +1,9 @@
 # Chromecast Video Converter
 
 Container-driven pipeline that keeps a media library Chromecast Gen 2/3 ready
-through GPU-only transcoding. The MVP is operational: the orchestrator exposes a
-dashboard and JSON API, a Redis-backed job queue coordinates GPU workers, and an
-Alpine watcher feeds file-system events into the system.
+through GPU-only transcoding. The system is fully operational: the orchestrator exposes a
+dashboard and JSON API, a Redis-backed job queue manages state, and workers pull jobs via HTTP to ensure strict decoupling.
+A Python-based watcher monitors file-system events with optional polling support for Docker robustness.
 
 ## Quick tasks
 
@@ -87,12 +87,10 @@ Alpine watcher feeds file-system events into the system.
 - **Job queue** – Redis-backed queue with pause/resume controls. GPU workers
   pull the next ready job from `/api/jobs/next`, update status back to the API,
   and honor the current profile configuration.
-- **Folder watcher** – Alpine container monitoring bind-mounted `movies` and
-  `series` roots. Streams create/modify/delete events (with file metadata) to
-  the orchestrator with optional buffering and retry backoff so newly added or
-  replaced files are queued immediately and removals are reflected in the
-  library catalog. When the API is unreachable, undelivered batches are written
-  to a local spool file and replayed on the next start to prevent event loss.
+- **Folder watcher** – Python-based service monitoring bind-mounted `movies` and
+  `series` roots. Streams create/modify/delete events to the orchestrator with
+  buffering, retry backoff, and spooling for offline resilience. Supports
+  `WATCH_POLLING=true` for reliable change detection on Docker Desktop/WSL2 bind mounts.
 - **Encoding profiles** – Centralized in a SQLite config store seeded from
   `config/settings.yaml.template` (or an existing `settings.yaml`) and editable
   via `/api/config/encoding`. Profiles target Chromecast Gen 2/3 constraints

@@ -10,11 +10,14 @@ from typing import Any, Dict, List
 import httpx
 from watchdog.events import FileSystemEvent, FileSystemEventHandler
 from watchdog.observers import Observer
+from watchdog.observers.polling import PollingObserver
 
 # Configuration
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
 ORCHESTRATOR_URL = os.environ.get("ORCHESTRATOR_URL", "http://localhost:9000")
 WATCH_ROOTS = os.environ.get("WATCH_ROOTS", "")
+WATCH_POLLING = os.environ.get("WATCH_POLLING", "false").lower() == "true"
+POLLING_INTERVAL = float(os.environ.get("POLLING_INTERVAL", "2.0"))
 EVENT_BUFFER_SECONDS = int(os.environ.get("EVENT_BUFFER_SECONDS", "1"))
 EVENT_RETRY_ATTEMPTS = int(os.environ.get("EVENT_RETRY_ATTEMPTS", "5"))
 EVENT_RETRY_BACKOFF_SECONDS = int(os.environ.get("EVENT_RETRY_BACKOFF_SECONDS", "2"))
@@ -296,7 +299,13 @@ async def main():
         # Start processing queue
         processor_task = asyncio.create_task(event_manager.process_queue())
 
-        observer = Observer()
+        if WATCH_POLLING:
+            observer = PollingObserver(timeout=POLLING_INTERVAL)
+            LOGGER.info("Using PollingObserver with interval %ss", POLLING_INTERVAL)
+        else:
+            observer = Observer()
+            LOGGER.info("Using native Observer")
+
         raw_entries = WATCH_ROOTS.split(",")
 
         for entry in raw_entries:
