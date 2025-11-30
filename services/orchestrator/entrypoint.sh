@@ -6,6 +6,7 @@ PORT="${PORT:-9000}"
 
 DATA_DIR="${DATA_DIR:-/app/data}"
 mkdir -p "${DATA_DIR}"
+rm -f "${DATA_DIR}/config.db" "${DATA_DIR}/library.db" "${DATA_DIR}/events.db"
 
 if [[ -n "${LIBRARY_DB_PATH:-}" ]]; then
   DB_PATH="${LIBRARY_DB_PATH}"
@@ -16,23 +17,6 @@ fi
 DATABASE_URL="${DATABASE_URL:-sqlite:////${DB_PATH#'/'}}"
 export DATABASE_URL LIBRARY_DB_PATH DATA_DIR
 
-if [[ "${DATABASE_URL}" == sqlite:* ]]; then
-  python3 - <<'PY'
-import os
-from pathlib import Path
-
-url = os.environ["DATABASE_URL"]
-if url.startswith("sqlite"):
-    path = url.split("sqlite://", maxsplit=1)[-1]
-    if path.startswith("/"):
-        normalized = "/" + path.lstrip("/")
-    else:
-        normalized = path.lstrip(":/")
-        normalized = "/" + normalized
-    Path(normalized).expanduser().resolve().parent.mkdir(parents=True, exist_ok=True)
-PY
-fi
-
-alembic -c /app/alembic.ini upgrade head
+rm -f "${DATA_DIR}/config.db" "${DATA_DIR}/library.db" "${DATA_DIR}/events.db"
 
 exec uvicorn app.main:app --host 0.0.0.0 --port "${PORT}"

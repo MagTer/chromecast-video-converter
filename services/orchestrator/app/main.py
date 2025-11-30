@@ -2,11 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from pathlib import Path
 from typing import Dict
 
-from alembic import command
-from alembic.config import Config
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -17,7 +14,6 @@ from . import (
     jobs,  # noqa: F401
 )
 from .dependencies import (
-    ENGINE,
     JOB_HISTORY_STORE,  # noqa: F401
     LIBRARY_CONFIG_STORE,
     LIBRARY_STORE,  # noqa: F401
@@ -73,23 +69,6 @@ def configure_logging() -> None:
 configure_logging()
 
 LOGGER = logging.getLogger("orchestrator")
-
-
-def run_migrations(engine) -> None:
-    alembic_ini = (Path(__file__).parent.parent / "alembic.ini").resolve()
-    if not alembic_ini.exists():
-        alembic_ini = Path("/app/alembic.ini")
-
-    if not alembic_ini.exists():
-        LOGGER.warning("alembic.ini not found, skipping migrations")
-        return
-
-    alembic_cfg = Config(str(alembic_ini))
-    alembic_cfg.set_main_option("sqlalchemy.url", str(engine.url))
-    try:
-        command.upgrade(alembic_cfg, "head")
-    except Exception as exc:
-        LOGGER.error("Failed to apply migrations: %s", exc)
 
 
 def seed_profiles_and_libraries(snapshot: config_module.ConfigSnapshot) -> None:
@@ -175,7 +154,6 @@ async def _safe_jellyfin_trigger(jellyfin_cfg: config_module.JellyfinConfig) -> 
 
 @app.on_event("startup")
 async def startup_event() -> None:
-    run_migrations(ENGINE)
     await job_manager.initialize()
     LOGGER.info("Starting initial scan of configured libraries.")
     for library in LIBRARY_CONFIG_STORE.list_libraries():

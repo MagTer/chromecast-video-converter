@@ -130,6 +130,8 @@ def _probe_nvenc_capabilities() -> dict[str, bool]:
 
 HOST_ENVIRONMENT = detect_host_environment()
 NVENC_CAPABILITIES = _probe_nvenc_capabilities()
+FILTER_CAPABILITIES = {"tonemap_cuda": False}
+FILTER_CAPABILITIES: dict[str, bool] = {"tonemap_cuda": True}
 
 CONFIG_PATH = Path(os.environ.get("CONFIG_PATH", "/app/config/settings.yaml"))
 PROFILES: dict = {}
@@ -223,7 +225,7 @@ def _probe_gpu_devices() -> tuple[list[str], list[str]]:
 
 def _probe_ffmpeg_support() -> tuple[dict[str, Any], list[str]]:
     errors: list[str] = []
-    support: dict[str, Any] = {"cuda": False, "nvenc": False}
+    support: dict[str, Any] = {"cuda": False, "nvenc": False, "tonemap_cuda": False}
     try:
         result = subprocess.run(
             ["ffmpeg", "-hide_banner", "-loglevel", "quiet", "-hwaccels"],
@@ -246,12 +248,24 @@ def _probe_ffmpeg_support() -> tuple[dict[str, Any], list[str]]:
     except subprocess.SubprocessError as exc:
         errors.append(f"ffmpeg encoder probe failed: {exc}")
 
+    try:
+        result = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-loglevel", "quiet", "-filters"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        support["tonemap_cuda"] = "tonemap_cuda" in result.stdout
+    except subprocess.SubprocessError as exc:
+        errors.append(f"ffmpeg filter probe failed: {exc}")
+
     return support, errors
 
 
 def snapshot_gpu_state() -> dict[str, Any]:
     devices, device_errors = _probe_gpu_devices()
     ffmpeg_support, ffmpeg_errors = _probe_ffmpeg_support()
+    FILTER_CAPABILITIES["tonemap_cuda"] = bool(ffmpeg_support.get("tonemap_cuda"))
     message_parts = device_errors + ffmpeg_errors
     message = "; ".join(message_parts)
     available = bool(devices) and ffmpeg_support.get("cuda") and ffmpeg_support.get("nvenc")
@@ -264,6 +278,7 @@ def snapshot_gpu_state() -> dict[str, Any]:
         "nvenc_available": bool(ffmpeg_support.get("nvenc")),
         "message": message,
         "checked_at": datetime.now(timezone.utc).isoformat(),
+        "tonemap_cuda_available": bool(ffmpeg_support.get("tonemap_cuda")),
     }
 
 
@@ -378,6 +393,7 @@ def classify_ffmpeg_error(logs: list[str], return_code: int) -> dict[str, str | 
         (r"nvenc.+not available|no capable devices", "nvenc_unavailable", True),
         (r"Invalid data found when processing input", "corrupt_input", False),
         (r"moov atom not found", "incomplete_file", True),
+        (r"No such filter: 'tonemap_cuda'", "unsupported_filter", False),
     ]
     tail = "\n".join(logs[-5:]) if logs else ""
     for pattern, category, retryable in patterns:
@@ -689,6 +705,7 @@ async def process_job(client: httpx.AsyncClient, job: dict) -> None:  # noqa: C9
         NVENC_CAPABILITIES,
         HOST_ENVIRONMENT,
         language_preferences=LANGUAGE_PREFERENCES,
+        filter_capabilities=FILTER_CAPABILITIES,
     )
     try:
         command = builder.build()

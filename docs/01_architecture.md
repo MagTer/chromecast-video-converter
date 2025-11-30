@@ -15,7 +15,7 @@
 | --- | --- | --- |
 | `orchestrator` | Ubuntu LTS | Coordinates workers, applies policy, exposes API/logging, persists state in SQLite. Primary configuration entrypoint and status dashboard. Supports runtime library add/remove, websocket broadcasts, paginated entry queries. |
 | `folder-watcher` | Python + Watchdog | Watches bind-mounted `movies` and `series` folders, emits events to orchestrator via HTTP. Supports `WATCH_POLLING` for Docker Desktop compatibility. Spools undelivered events if API is down. |
-| `gpu-ffmpeg` | Ubuntu + FFmpeg + CUDA/NVIDIA runtime | Executes validation and transcode jobs using NVENC. Pulls jobs via HTTP (`/api/jobs/next`) to ensure decoupling from the backing queue. |
+| `gpu-ffmpeg` | Jellyfin base (CUDA-enabled FFmpeg) + Python worker | Executes validation and transcode jobs using NVENC. Pulls jobs via HTTP (`/api/jobs/next`) to ensure decoupling from the backing queue. |
 | `queue` (optional) | Redis | Buffers work to smooth spikes. |
 
 All containers join a private Docker network. Bind mounts provide the Windows-host media folders and a `config/` directory containing the template/legacy YAML used to seed the SQLite configuration store. NVIDIA Container Toolkit is required so `gpu-ffmpeg` can access the RTX 3060 from WSL2.
@@ -38,6 +38,7 @@ All containers join a private Docker network. Bind mounts provide the Windows-ho
 
 - Optional Jellyfin integration can poll or receive webhooks from the local media server and call its `/Library/Refresh` API so our pipeline stays in sync with the catalog it already maintains.
 - Jellyfin remains a trigger/metadata source; this stack keeps encoding independent so we can keep using GPU-only paths without inheriting Jellyfin’s transcoding engine.
+- With that dependency in mind, we deliberately keep the worker as its own service even though it reuses Jellyfin’s FFmpeg stack. That separation of concerns makes it easy to add a second Jellyfin-based service later—one that exposes the media server/UI while the worker keeps Jellyfin disabled and purely drives FFmpeg tonemapping for the orchestrator.
 
 ## Fault tolerance and recovery
 
