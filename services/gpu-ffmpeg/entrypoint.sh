@@ -24,6 +24,4 @@ if url.startswith("sqlite"):
 PY
 fi
 
-alembic -c /app/alembic.ini upgrade head
 exec python3 worker.py
-

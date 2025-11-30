@@ -8,6 +8,7 @@ from typing import Iterable
 LOGGER = logging.getLogger("gpu-ffmpeg.builder")
 
 SCALING_EXPRESSION = "scale_cuda=-2:720:force_original_aspect_ratio=decrease"
+HW_MAP_FILTER = "hwmap=derive_device=cuda"
 DEFAULT_LANGUAGE_PREFERENCES = ("swe", "eng")
 
 
@@ -81,8 +82,7 @@ class VideoStreamInfo:
                     "hdr_dynamic_metadata",
                 }:
                     return True
-        bit_depth = self.bit_depth() or 8
-        return bit_depth > 8
+        return False
 
 
 @dataclass
@@ -382,17 +382,22 @@ class FFmpegBuilder:
         return flags
 
     # --------------- Filter helpers --------------- #
-    def _scaling_expression(self, profile: TranscodeProfile) -> str:
+    def _scaling_expression(self, profile: TranscodeProfile, cuda: bool = True) -> str:
         resolution = profile.max_resolution or profile.resolution
+        target_height = 720
         if resolution:
             try:
                 _, height_str = resolution.lower().split("x", 1)
                 height = int(height_str)
                 if height > 0:
-                    return f"scale_cuda=-2:{height}:force_original_aspect_ratio=decrease"
+                    target_height = height
             except (ValueError, AttributeError):
                 LOGGER.debug("Invalid resolution %s; falling back to default scale", resolution)
-        return SCALING_EXPRESSION
+        if cuda:
+            return (
+                "scale_cuda=" f"-2:{target_height}:force_original_aspect_ratio=decrease:format=nv12"
+            )
+        return f"scale=-2:{target_height}:force_original_aspect_ratio=decrease"
 
     def _fps_filter_config(self, source_fps: float | None, max_fps: int) -> tuple[float, bool]:
         if source_fps and source_fps > 0:
@@ -403,14 +408,10 @@ class FFmpegBuilder:
 
     def _build_filter_chain(
         self, profile: TranscodeProfile, video_stream: VideoStreamInfo | None
-    ) -> str:
-        filters: list[str] = [self._scaling_expression(profile)]
+    ) -> tuple[str, bool]:
         source_fps = video_stream.frame_rate() if video_stream else None
-        if profile.max_fps > 0:
-            fps_value, needs_filter = self._fps_filter_config(source_fps, profile.max_fps)
-            if needs_filter:
-                filters.append(f"fps={self._format_fps_value(fps_value)}")
-
+        fps_value, needs_filter = self._fps_filter_config(source_fps, profile.max_fps)
+        fps_fragment = f"fps={self._format_fps_value(fps_value)}" if needs_filter else ""
         needs_tonemap = False
         if video_stream and video_stream.is_hdr():
             needs_tonemap = True
@@ -425,21 +426,53 @@ class FFmpegBuilder:
                 },
             )
 
+        filters: list[str] = [
+            HW_MAP_FILTER,
+            self._scaling_expression(profile, cuda=True),
+        ]
+
         if needs_tonemap and profile.allow_tonemap:
             if not self.filter_capabilities.get("tonemap_cuda", True):
                 raise RuntimeError(
                     "HDR detected but tonemap_cuda filter unavailable in ffmpeg build"
                 )
             filters.append("tonemap_cuda=t=bt709:format=nv12")
+            if needs_filter:
+                filters.extend(
+                    [
+                        "hwdownload",
+                        "format=nv12",
+                        fps_fragment,
+                        "hwupload_cuda",
+                    ]
+                )
+            filter_chain = ",".join(filters)
+            LOGGER.debug(
+                "Video filter chain constructed: %s",
+                filter_chain,
+                extra={"event": "filter_chain", "filters": filters},
+            )
+            return filter_chain, needs_filter
 
-        filters.extend(["hwdownload", "format=nv12", "hwupload_cuda"])
+        if needs_filter:
+            filters.extend(
+                [
+                    "hwdownload",
+                    "format=nv12",
+                    fps_fragment,
+                    "hwupload_cuda",
+                ]
+            )
+        # When no FPS adjustment is needed we keep the frames on the GPU,
+        # so there's no separate format conversion filter to append.
+
         filter_chain = ",".join(filters)
         LOGGER.debug(
             "Video filter chain constructed: %s",
             filter_chain,
             extra={"event": "filter_chain", "filters": filters},
         )
-        return filter_chain
+        return filter_chain, needs_filter
 
     # --------------- Misc helpers --------------- #
     def _format_fps_value(self, fps: float) -> str:
@@ -486,7 +519,7 @@ class FFmpegBuilder:
             selected_subtitles, default_sub_idx, "s"
         )
 
-        video_filter = self._build_filter_chain(profile, video_stream)
+        video_filter, needs_filter = self._build_filter_chain(profile, video_stream)
 
         command.extend(
             [
@@ -503,6 +536,7 @@ class FFmpegBuilder:
             ]
         )
         command.extend(["-pix_fmt", "nv12"])
+        # FPS limiting handled inside filter graph; no separate -r flag.
 
         rc_mode = profile.rc_mode
         if rc_mode == "cbr":

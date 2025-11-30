@@ -7,7 +7,7 @@ import pytest
 sys.path.append(str(Path(__file__).parents[1]))
 
 from app import utils
-from app.ffmpeg_builder import FFmpegBuilder
+from app.ffmpeg_builder import HW_MAP_FILTER, FFmpegBuilder
 
 
 def test_detect_host_environment_wsl(monkeypatch):
@@ -201,6 +201,7 @@ def test_build_ffmpeg_command_honors_source_frame_rate(tmp_path):
 
     vf_index = command.index("-vf")
     vf_val = command[vf_index + 1]
+    assert vf_val.startswith(HW_MAP_FILTER)
     assert "fps=" not in vf_val
 
 

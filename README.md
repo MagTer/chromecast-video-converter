@@ -120,6 +120,9 @@ A Python-based watcher monitors file-system events with optional polling support
 - The `gpu-ffmpeg` service now adds the `NVIDIA_VISIBLE_DEVICES=all` and
   `NVIDIA_DRIVER_CAPABILITIES=compute,video,utility` environment variables to
   make the GPU encoder visible inside the container.
+- The worker image now builds on top of `jellyfin/jellyfin:latest`, so it can
+  reuse Jellyfin's CUDA-enabled FFmpeg (including `tonemap_cuda`) without a
+  bespoke compilation step while keeping our Python runtime isolated.
 - Compose also applies cgroup rules (`c 195:* rmw`, `c 508:* rmw`) so the
  container can open `/dev/nvidia*` without hitting permission errors when the
  stack is launched from WSL2 or other constrained environments.
