@@ -31,6 +31,7 @@ from ..services.core import (
     encoding_payload,
     entry_to_response,
     get_library_profile,
+    job_to_response,
     process_event_payload,
     reconcile_library,
 )
@@ -80,6 +81,7 @@ async def create_library(
     root = payload.root.strip()
     if not root:
         raise HTTPException(status_code=400, detail="Library root is required")
+    canonical_root = str(resolve_media_path(root))
 
     depth_value = "max"
     if payload.depth and payload.depth.lower() != "max":
@@ -92,7 +94,7 @@ async def create_library(
     library = LIBRARY_CONFIG_STORE.upsert(
         LibraryData(
             name=normalized_name,
-            root=root,
+            root=canonical_root,
             depth=depth_value,
             profile_id=payload.profile_id,
         )
@@ -173,7 +175,9 @@ async def update_entry_profile(entry_id: int, payload: EntryProfilePayload) -> J
         output_path=entry.output_path,
         original_missing=entry.original_missing,
     )
-    return JSONResponse(jsonable_encoder(entry_to_response(updated)))
+    entry_payload = entry_to_response(updated)
+    await NOTIFIER.broadcast({"type": "entry-update", "entry": entry_payload})
+    return JSONResponse(jsonable_encoder(entry_payload))
 
 
 @router.post("/api/library/entries/{entry_id}/reprocess")
@@ -226,7 +230,11 @@ async def reprocess_entry(
         profile=profile_name,
         profile_id=profile_id,
     )
-    payload = {"entry": entry_to_response(updated), "job": job.model_dump()}
+    entry_payload = entry_to_response(updated)
+    await NOTIFIER.broadcast({"type": "entry-update", "entry": entry_payload})
+    job_payload = job_to_response(job)
+    await NOTIFIER.broadcast({"type": "job-update", "job": job_payload})
+    payload = {"entry": entry_payload, "job": job_payload}
     return JSONResponse(jsonable_encoder(payload))
 
 
@@ -249,7 +257,9 @@ async def remove_original(entry_id: int) -> JSONResponse:
             profile=entry.profile,
             profile_id=entry.profile_id,
         )
-        return JSONResponse(jsonable_encoder({"entry": entry_to_response(updated)}))
+        entry_payload = entry_to_response(updated)
+        await NOTIFIER.broadcast({"type": "entry-update", "entry": entry_payload})
+        return JSONResponse(jsonable_encoder({"entry": entry_payload}))
 
     try:
         source.unlink()
@@ -265,7 +275,9 @@ async def remove_original(entry_id: int) -> JSONResponse:
         profile=entry.profile,
         profile_id=entry.profile_id,
     )
-    return JSONResponse(jsonable_encoder({"entry": entry_to_response(updated)}))
+    entry_payload = entry_to_response(updated)
+    await NOTIFIER.broadcast({"type": "entry-update", "entry": entry_payload})
+    return JSONResponse(jsonable_encoder({"entry": entry_payload}))
 
 
 @router.post("/api/scan")

@@ -8,11 +8,12 @@ from fastapi.responses import JSONResponse
 from redis.exceptions import RedisError
 
 from .. import jobs
-from ..dependencies import job_manager, worker_metrics_summary
+from ..dependencies import NOTIFIER, job_manager, worker_metrics_summary
 from ..schemas import JobAckPayload, JobStatusPayload, QueuePauseRequest
 from ..services.core import (
     JobHistoryStatus,
     LibraryStatus,
+    entry_to_response,
     job_to_response,
     record_job_history,
     sync_entry_from_job,
@@ -21,6 +22,24 @@ from ..services.core import (
 LOGGER = logging.getLogger("orchestrator.jobs")
 router = APIRouter()
 NON_RETRYABLE_CATEGORIES = {"unsupported_bit_depth", "unsupported_pixel_format", "corrupt_input"}
+
+
+async def _broadcast_entry_update(entry) -> None:
+    if not entry:
+        return
+    await NOTIFIER.broadcast({"type": "entry-update", "entry": entry_to_response(entry)})
+
+
+async def _broadcast_job_update(job: jobs.Job) -> dict:
+    payload = job_to_response(job)
+    await NOTIFIER.broadcast({"type": "job-update", "job": payload})
+    return payload
+
+
+async def _respond_with_updates(job: jobs.Job, entry) -> JSONResponse:
+    await _broadcast_entry_update(entry)
+    payload = await _broadcast_job_update(job)
+    return JSONResponse(jsonable_encoder(payload))
 
 
 def classify_ffmpeg_error(logs: list[str], return_code: int) -> dict[str, str | bool | int]:
@@ -86,12 +105,11 @@ async def next_job() -> JSONResponse:
     if claimed is None:
         raise HTTPException(status_code=204, detail="No jobs available")
     delivery_id, job = claimed
-    sync_entry_from_job(job, LibraryStatus.CONVERTING)
+    entry = sync_entry_from_job(job, LibraryStatus.CONVERTING)
+    await _broadcast_entry_update(entry)
     record_job_history(job, JobHistoryStatus.RUNNING)
-    payload = job_to_response(job)
+    payload = await _broadcast_job_update(job)
     payload["delivery_id"] = delivery_id
-    if job.encoding:
-        payload["encoding"] = job.encoding
     return JSONResponse(jsonable_encoder(payload))
 
 
@@ -120,21 +138,23 @@ async def update_job_status(job_id: str, payload: JobStatusPayload) -> JSONRespo
                 f"{retry_pipeline.get('encode_type', 'cpu').upper()} encode"
             )
             job = await job_manager.schedule_retry(job, retry_pipeline, message=retry_message)
-            sync_entry_from_job(job, LibraryStatus.PENDING, retry_message)
+            entry = sync_entry_from_job(job, LibraryStatus.PENDING, retry_message)
             record_job_history(job, JobHistoryStatus.RUNNING, retry_message, completed=False)
-            return JSONResponse(jsonable_encoder(job_to_response(job)))
+            return await _respond_with_updates(job, entry)
         failure_message = payload.message or classification.get("message")
-        sync_entry_from_job(job, LibraryStatus.FAILED, failure_message)
+        entry = sync_entry_from_job(job, LibraryStatus.FAILED, failure_message)
         record_job_history(job, payload.status, failure_message, completed=True)
-        return JSONResponse(jsonable_encoder(job_to_response(job)))
+        return await _respond_with_updates(job, entry)
 
     completed = payload.status == jobs.JobStatus.COMPLETED
+    entry = None
     if payload.status == jobs.JobStatus.RUNNING:
-        sync_entry_from_job(job, LibraryStatus.CONVERTING, payload.message)
+        entry = sync_entry_from_job(job, LibraryStatus.CONVERTING, payload.message)
     elif payload.status == jobs.JobStatus.COMPLETED:
-        sync_entry_from_job(job, LibraryStatus.CONVERTED, payload.message)
+        entry = sync_entry_from_job(job, LibraryStatus.CONVERTED, payload.message)
     record_job_history(job, payload.status, payload.message, completed=completed)
-    return JSONResponse(jsonable_encoder(job_to_response(job)))
+    tracked_entry = entry if completed or payload.status == jobs.JobStatus.RUNNING else None
+    return await _respond_with_updates(job, tracked_entry)
 
 
 @router.post("/api/jobs/{job_id}/ack")

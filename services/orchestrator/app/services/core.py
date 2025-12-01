@@ -11,6 +11,7 @@ from ..dependencies import (
     JOB_HISTORY_STORE,
     LIBRARY_CONFIG_STORE,
     LIBRARY_STORE,
+    NOTIFIER,
     PROFILE_STORE,
     get_library_map,
     job_manager,
@@ -22,6 +23,7 @@ from ..schemas import EventPayload, LibraryEntryResponse
 from ..utils import (
     LIBRARY_ROOT_PREFIXES,
     normalize_display_path,
+    resolve_media_path,
 )
 
 LOGGER = logging.getLogger("orchestrator.core")
@@ -82,14 +84,16 @@ def record_job_history(
         LOGGER.error("Failed to persist job history for %s: %s", job.id[:8], exc)
 
 
-def sync_entry_from_job(job: jobs.Job, status: str, message: Optional[str] = None) -> None:
-    source = Path(job.path)
+def sync_entry_from_job(
+    job: jobs.Job, status: str, message: Optional[str] = None
+) -> Optional[LibraryEntry]:
+    source = resolve_media_path(job.path)
     original_missing = not source.exists()
     final_status = status
     if status == LibraryStatus.CONVERTED and original_missing:
         final_status = LibraryStatus.REMOVED
     pipeline = job.pipeline or (job.encoding or {}).get("pipeline") or {}
-    LIBRARY_STORE.safe_update_status(
+    return LIBRARY_STORE.safe_update_status(
         job.path,
         final_status,
         library=job.library,
@@ -168,35 +172,38 @@ def find_library_for_path(path: str) -> Optional[str]:
     return None
 
 
-def should_track_file(path: Path) -> bool:
+def should_track_file(path: Path | str) -> bool:
+    resolved = resolve_media_path(path)
     return (
-        path.is_file()
-        and path.suffix.lower() in job_manager.video_extensions
-        and "-chromecast" not in path.stem.lower()
+        resolved.is_file()
+        and resolved.suffix.lower() in job_manager.video_extensions
+        and "-chromecast" not in resolved.stem.lower()
     )
 
 
-def entry_status_for_path(path: Path) -> Tuple[str, Path, bool]:
-    output_path = job_manager.output_path(path)
-    if not path.exists():
+def entry_status_for_path(path: Path | str) -> Tuple[str, Path, bool]:
+    resolved = resolve_media_path(path)
+    output_path = job_manager.output_path(resolved)
+    if not resolved.exists():
         return LibraryStatus.REMOVED, output_path, False
-    if job_manager.is_converted(path, log=False):
+    if job_manager.is_converted(resolved, log=False):
         return LibraryStatus.CONVERTED, output_path, True
     return LibraryStatus.PENDING, output_path, True
 
 
 async def record_library_entry(
     library_name: str,
-    path: Path,
+    path: Path | str,
     profile: str,
     profile_id: int,
     *,
     emit_log: bool = True,
 ) -> Tuple[LibraryEntry, Optional[jobs.Job]]:
-    status, output_path, original_exists = entry_status_for_path(path)
+    resolved_path = resolve_media_path(path)
+    status, output_path, original_exists = entry_status_for_path(resolved_path)
     entry = LIBRARY_STORE.upsert(
         EntryUpdate(
-            path=str(path),
+            path=str(resolved_path),
             library=library_name,
             profile=profile,
             profile_id=profile_id,
@@ -207,7 +214,7 @@ async def record_library_entry(
     )
     if status == LibraryStatus.PENDING:
         job = await job_manager.add_job(
-            str(path),
+            str(resolved_path),
             library_name,
             profile,
             profile_id=profile_id,
@@ -239,7 +246,7 @@ async def process_event_payload(payload: EventPayload) -> Optional[Dict[str, Any
         raise HTTPException(status_code=400, detail="Library could not be determined")
     library, profile = get_library_profile(library_name)
 
-    path = Path(payload.path)
+    path = resolve_media_path(payload.path)
     if payload.is_directory:
         LOGGER.debug("Ignoring directory event for %s", path)
         return None
@@ -254,7 +261,9 @@ async def process_event_payload(payload: EventPayload) -> Optional[Dict[str, Any
             output_path=str(job_manager.output_path(path)),
             original_missing=True,
         )
-        return {"entry": entry_to_response(entry), "event": event_type}
+        entry_payload = entry_to_response(entry)
+        await NOTIFIER.broadcast({"type": "entry-update", "entry": entry_payload})
+        return {"entry": entry_payload, "event": event_type}
 
     if not should_track_file(path):
         LOGGER.debug("Ignoring non-media event for %s", path)
@@ -265,14 +274,18 @@ async def process_event_payload(payload: EventPayload) -> Optional[Dict[str, Any
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
 
-    response: Dict[str, Any] = {"entry": entry_to_response(entry), "event": event_type}
+    entry_payload = entry_to_response(entry)
+    await NOTIFIER.broadcast({"type": "entry-update", "entry": entry_payload})
+    response: Dict[str, Any] = {"entry": entry_payload, "event": event_type}
     if job:
-        response["job"] = job.model_dump()
+        job_payload = job_to_response(job)
+        response["job"] = job_payload
+        await NOTIFIER.broadcast({"type": "job-update", "job": job_payload})
     return response
 
 
 async def reconcile_library(library_name: str, root: str, profile: str, profile_id: int) -> None:
-    root_path = Path(root)
+    root_path = resolve_media_path(root)
     if not root_path.exists():
         LOGGER.warning("Library root %s missing; marking entries removed", root_path)
         LIBRARY_STORE.mark_missing(library_name, set())
@@ -283,11 +296,12 @@ async def reconcile_library(library_name: str, root: str, profile: str, profile_
     converted = 0
     tracked_pending = 0
     for entry in root_path.rglob("*.*"):
-        if not should_track_file(entry):
+        resolved_entry = resolve_media_path(entry)
+        if not should_track_file(resolved_entry):
             continue
-        seen.add(str(entry))
+        seen.add(str(resolved_entry))
         library_entry, job = await record_library_entry(
-            library_name, entry, profile, profile_id, emit_log=False
+            library_name, resolved_entry, profile, profile_id, emit_log=False
         )
         if job:
             queued += 1

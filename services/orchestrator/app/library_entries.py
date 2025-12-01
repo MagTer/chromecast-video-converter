@@ -12,8 +12,13 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import sessionmaker
 
 from .db import Base, create_session_factory
+from .utils import resolve_media_path
 
 LOGGER = logging.getLogger("orchestrator.library")
+
+
+def _canonical_path(value: str | Path) -> str:
+    return str(resolve_media_path(value))
 
 
 class LibraryStatus(str):
@@ -136,10 +141,15 @@ class LibraryEntryStore:
 
     def upsert(self, payload: EntryUpdate) -> LibraryEntry:
         with self._lock, self._session() as session:
-            existing = session.scalar(select(LibraryEntry).where(LibraryEntry.path == payload.path))
+            canonical_path = _canonical_path(payload.path)
+            existing = session.scalar(
+                select(LibraryEntry).where(LibraryEntry.path == canonical_path)
+            )
             timestamp = datetime.utcnow()
+            payload_dict = asdict(payload)
+            payload_dict["path"] = canonical_path
             if existing:
-                for key, value in asdict(payload).items():
+                for key, value in payload_dict.items():
                     if key == "profile_id" and value is None:
                         continue
                     setattr(existing, key, value)
@@ -150,7 +160,7 @@ class LibraryEntryStore:
                 return existing
 
             entry = LibraryEntry(
-                path=payload.path,
+                path=canonical_path,
                 library=payload.library,
                 profile=payload.profile,
                 profile_id=payload.profile_id,
@@ -179,7 +189,7 @@ class LibraryEntryStore:
             return entry
 
     def mark_missing(self, library: str, known_paths: Iterable[str]) -> int:
-        known_set = set(known_paths)
+        known_set = {_canonical_path(path) for path in known_paths}
         stmt = select(LibraryEntry).where(LibraryEntry.library == library)
         if known_set:
             stmt = stmt.where(~LibraryEntry.path.in_(known_set))
@@ -210,14 +220,15 @@ class LibraryEntryStore:
         output_path: Optional[str] = None,
         original_missing: bool = False,
     ) -> LibraryEntry:
+        canonical_path = _canonical_path(path)
         with self._lock, self._session() as session:
-            entry = session.scalar(select(LibraryEntry).where(LibraryEntry.path == path))
+            entry = session.scalar(select(LibraryEntry).where(LibraryEntry.path == canonical_path))
             timestamp = datetime.utcnow()
             if entry is None:
                 if not library or not profile:
                     raise KeyError("Library and profile are required for new entries")
                 entry = LibraryEntry(
-                    path=path,
+                    path=canonical_path,
                     library=library,
                     profile=profile,
                     profile_id=profile_id,
