@@ -350,6 +350,57 @@ def test_build_ffmpeg_command_adds_tonemap_for_hdr(tmp_path):
     assert "tonemap_cuda" in vf_val
 
 
+def test_subtitles_force_cpu_filters_but_keep_nvenc(tmp_path):
+    profiles = {
+        "chromecast": {
+            "bitrate": "8M",
+            "max_bitrate": "8M",
+            "bufsize": "16M",
+            "level": "4.1",
+            "profile": "high",
+            "max_fps": 30,
+            "audio": {"codec": "aac", "bitrate": "192k", "channels": 2},
+        }
+    }
+    nvenc_capabilities = {"rc_vbr_hq": True, "multipass_fullres": True}
+    host_env = {"is_wsl2": False}
+    analysis = {
+        "profile": "chromecast",
+        "streams": [
+            {
+                "codec_type": "video",
+                "pix_fmt": "yuv420p10le",
+                "bits_per_raw_sample": "10",
+                "avg_frame_rate": "24000/1001",
+            },
+            {
+                "codec_type": "subtitle",
+                "tags": {"language": "eng"},
+                "disposition": {"default": 1},
+            },
+        ],
+    }
+
+    builder = FFmpegBuilder(
+        analysis,
+        tmp_path / "input.mkv",
+        tmp_path / "output.mp4",
+        profiles,
+        nvenc_capabilities,
+        host_env,
+    )
+    command = builder.build()
+
+    vf_val = command[command.index("-vf") + 1]
+    assert "hwdownload" in vf_val
+    assert "format=p010le" in vf_val
+    assert "hwupload_cuda" in vf_val
+    assert vf_val.endswith("format=nv12")
+    assert "scale_cuda=iw:ih" in vf_val or "scale_npp" in vf_val
+
+    assert "-c:v" in command and command[command.index("-c:v") + 1] == "h264_nvenc"
+
+
 def test_hdr_rejected_when_tonemap_disabled(tmp_path):
     profiles = {
         "hdr": {

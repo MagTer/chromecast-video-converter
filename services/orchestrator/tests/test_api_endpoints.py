@@ -7,18 +7,12 @@ from pathlib import Path
 from unittest.mock import AsyncMock
 
 import pytest
-import yaml
-from app.config import DEFAULT_CONFIG
 from app.library_entries import LibraryStatus
 from fastapi.testclient import TestClient
 from redis.exceptions import ConnectionError
 
 
 def _build_test_app(tmp_path: Path, monkeypatch, fake_redis):
-    template = tmp_path / "settings.yaml.template"
-    template.write_text(yaml.safe_dump(DEFAULT_CONFIG))
-
-    monkeypatch.setenv("CONFIG_TEMPLATE_PATH", str(template))
     monkeypatch.setenv("CONFIG_DB_PATH", str(tmp_path / "config.db"))
     monkeypatch.setenv("LOG_DB_PATH", str(tmp_path / "logs.db"))
     monkeypatch.setenv("LIBRARY_DB_PATH", str(tmp_path / "library.db"))

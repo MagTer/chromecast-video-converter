@@ -10,9 +10,9 @@ This guide walks through prerequisites, configuration, and day-one operation of 
 
 ## Initial setup
 
-1. (Optional) Copy `config/settings.yaml.template` to `config/settings.yaml` and adjust library roots or profiles before the first boot. On startup the orchestrator imports `settings.yaml` into the SQLite config store at `./logs/config.db` (falling back to the template when no overrides exist) and validates it before use.
-2. Keep the left-hand side of the Compose volume mounts aligned with your host paths and use the corresponding `/watch/...` or `/media/...` paths inside the YAML seed so the imported defaults match the container mounts.
-3. Review operational guardrails in the seed (GPU temperature cutoff, disk usage limits, and whether originals are deleted after successful verification); after boot, update future changes through the dashboard so they persist in the database.
+1. Configuration now seeds from built-in defaults defined in `services/orchestrator/app/config.py` (single `chromecast` profile with GPU-first, CPU-fallback settings) and persists to `./logs/config.db` on first boot—no YAML files required.
+2. Keep the left-hand side of the Compose volume mounts aligned with your host paths and use the corresponding `/watch/...` or `/media/...` paths inside the UI so the defaults match container mounts.
+3. Review operational guardrails in the defaults (GPU temperature cutoff, disk usage limits, and whether originals are deleted after successful verification); after boot, update changes through the dashboard so they persist in the database.
 4. Build the stack locally:
    ```bash
    docker compose build

@@ -12,9 +12,12 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
     const logCategory = document.querySelector("#log-category");
     const logLevel = document.querySelector("#log-level");
     const logQuery = document.querySelector("#log-query");
+    const copyLogsButton = document.querySelector("#copy-logs");
     const configResult = document.querySelector("#config-result");
     const logRetention = document.querySelector("#log-retention");
     const logConfigResult = document.querySelector("#log-config-result");
+    const gpuSummary = document.querySelector("#gpu-summary");
+    const cpuSummary = document.querySelector("#cpu-summary");
     const logStats = document.querySelector("#log-stats");
     const profileNameInput = document.querySelector("#profile-name");
     const libraryProfiles = document.querySelector("#library-profiles");
@@ -57,11 +60,25 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
     const profileMaxrateSelect = document.querySelector("#profile-maxrate");
     const profileBufsizeSelect = document.querySelector("#profile-bufsize");
     const audioBitrateSelect = document.querySelector("#profile-audio-bitrate");
+    const cpuProfileTierSelect = document.querySelector("#cpu-profile-tier");
+    const cpuProfileLevelSelect = document.querySelector("#cpu-profile-level");
+    const cpuProfileResolutionSelect = document.querySelector("#cpu-profile-resolution");
+    const cpuProfileFpsSelect = document.querySelector("#cpu-profile-maxfps");
+    const cpuProfilePresetSelect = document.querySelector("#cpu-profile-preset");
+    const cpuProfileRcSelect = document.querySelector("#cpu-profile-rc");
+    const cpuProfileCqSelect = document.querySelector("#cpu-profile-cq");
+    const cpuProfileBitrateSelect = document.querySelector("#cpu-profile-bitrate");
+    const cpuProfileMaxrateSelect = document.querySelector("#cpu-profile-maxrate");
+    const cpuProfileBufsizeSelect = document.querySelector("#cpu-profile-bufsize");
+    const cpuLookaheadInput = document.querySelector("#cpu-profile-lookahead");
+    const cpuLookaheadValue = document.querySelector("#cpu-lookahead-value");
+    const cpuBframesSelect = document.querySelector("#cpu-profile-bframes");
+    const cpuAdaptiveBframesSelect = document.querySelector("#cpu-profile-adaptive-bframes");
+    const cpuAudioBitrateSelect = document.querySelector("#cpu-profile-audio-bitrate");
     const setupWizard = document.querySelector("#setup-wizard");
     const wizardSetupBtn = document.querySelector("#wizard-setup-btn");
     const wizardSkipBtn = document.querySelector("#wizard-skip-btn");
     const refreshHistoryBtn = document.querySelector("#refresh-history");
-    const exportConfigBtn = document.querySelector("#export-config");
     const resetConfigBtn = document.querySelector("#reset-config");
 
     let configCache = null;
@@ -74,6 +91,7 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
     let historyCache = [];
     let liveSocket = null;
     let isWsl2 = false;
+    let logCacheEntries = [];
 
     if (!logLevel.value) {
       logLevel.value = "INFO";
@@ -132,6 +150,32 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
       return segments[segments.length - 1] || normalized;
     }
 
+    function formatPipeline(pipeline) {
+      if (!pipeline) return "GPU/GPU/GPU";
+      const decode = String(pipeline.decode_type || "gpu").toUpperCase();
+      const scale = String(pipeline.scale_type || "gpu").toUpperCase();
+      const encode = String(pipeline.encode_type || "gpu").toUpperCase();
+      const attempt = pipeline.attempt;
+      const maxAttempts = pipeline.max_attempts;
+      const attemptText =
+        Number.isFinite(attempt) && Number.isFinite(maxAttempts) && maxAttempts > 0
+          ? ` (${attempt}/${maxAttempts})`
+          : "";
+      return `${decode}/${scale}/${encode}${attemptText}`;
+    }
+
+    function summarizeProfile(profile, label) {
+      if (!profile) return "—";
+      const resolution = profile.resolution || profile.max_resolution || "1280x720";
+      const fps = profile.max_fps ?? 30;
+      const rc = (profile.rc || "vbr").toUpperCase();
+      const preset = profile.preset || "";
+      const bitrate = profile.bitrate || profile.max_bitrate || "n/a";
+      const maxrate = profile.max_bitrate || profile.bitrate || "n/a";
+      const encoder = label === "CPU" ? "libx264" : "h264_nvenc";
+      return `${label || ""} ${encoder} · ${resolution} @ ${fps}fps\nRC ${rc} · preset ${preset}\nBitrate ${bitrate} (max ${maxrate})`;
+    }
+
     function jobElapsedSeconds(job) {
       if (Number.isFinite(job?.elapsed_seconds)) {
         return job.elapsed_seconds;
@@ -175,28 +219,31 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
       return (notAbovePreferred.pop() ?? sorted[sorted.length - 1]) || sorted[0];
     }
 
-    function enforceLevelConstraints(trigger = "load") {
-      const preferredResolution = profileResolutionSelect.value;
-      const preferredFps = Number(profileFpsSelect.value || "30");
-      const selectedLevel = parseFloat(profileLevelSelect.value || "0") || 0;
+    function enforceLevelConstraintsFor(selects, trigger = "load") {
+      if (!selects) return;
+      const { resolutionSelect, fpsSelect, levelSelect } = selects;
+      if (!resolutionSelect || !fpsSelect || !levelSelect) return;
+      const preferredResolution = resolutionSelect.value;
+      const preferredFps = Number(fpsSelect.value || "30");
+      const selectedLevel = parseFloat(levelSelect.value || "0") || 0;
       const requiredLevel = minimumLevelFor(preferredResolution, preferredFps);
 
       let targetLevel = selectedLevel || requiredLevel;
       if (trigger !== "level" && targetLevel < requiredLevel) {
         targetLevel = requiredLevel;
-        const levelOption = Array.from(profileLevelSelect.options).find(
+        const levelOption = Array.from(levelSelect.options).find(
           (option) => parseFloat(option.value) >= requiredLevel,
         );
         if (levelOption) {
-          profileLevelSelect.value = levelOption.value;
+          levelSelect.value = levelOption.value;
         }
       }
 
-      const fpsOptions = Array.from(profileFpsSelect.options).map((option) => ({
+      const fpsOptions = Array.from(fpsSelect.options).map((option) => ({
         value: Number(option.value),
         option,
       }));
-      const resolutionOptions = Array.from(profileResolutionSelect.options);
+      const resolutionOptions = Array.from(resolutionSelect.options);
 
       const allowedResolutions = resolutionOptions.filter((option) =>
         fpsOptions.some(({ value: fps }) => minimumLevelFor(option.value, fps) <= targetLevel),
@@ -213,7 +260,7 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
             .sort((a, b) => resolutionPixels(b.value) - resolutionPixels(a.value))
             .find(Boolean)?.value || resolution;
         if (resolution) {
-          profileResolutionSelect.value = resolution;
+          resolutionSelect.value = resolution;
         }
       }
 
@@ -230,43 +277,63 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
         const fallbackFps = pickClosestFps(allowedFpsValues, preferredFps);
         if (fallbackFps !== null && fallbackFps !== undefined) {
           fps = fallbackFps;
-          profileFpsSelect.value = String(fps);
+          fpsSelect.value = String(fps);
         }
       }
 
       const minimumLevel = minimumLevelFor(resolution, fps);
-      profileLevelSelect.querySelectorAll("option").forEach((option) => {
+      Array.from(levelSelect.options).forEach((option) => {
         option.disabled = parseFloat(option.value) < minimumLevel;
       });
-      if (parseFloat(profileLevelSelect.value) < minimumLevel) {
+      if (parseFloat(levelSelect.value) < minimumLevel) {
         const bumpedLevel =
-          Array.from(profileLevelSelect.options).find(
+          Array.from(levelSelect.options).find(
             (option) => parseFloat(option.value) >= minimumLevel,
-          )?.value || profileLevelSelect.value;
-        profileLevelSelect.value = bumpedLevel;
+          )?.value || levelSelect.value;
+        levelSelect.value = bumpedLevel;
         targetLevel = parseFloat(bumpedLevel) || targetLevel;
       }
 
-      // If the user explicitly lowered the level, keep resolution/FPS within that cap.
       if (trigger === "level") {
         const stillTooHigh =
-          minimumLevelFor(profileResolutionSelect.value, Number(profileFpsSelect.value || "0")) >
-          targetLevel;
+          minimumLevelFor(resolutionSelect.value, Number(fpsSelect.value || "0")) > targetLevel;
         if (stillTooHigh) {
-          const fallback = pickClosestFps(
-            allowedFpsValues,
-            Number(profileFpsSelect.value || preferredFps),
-          );
+          const fallback = pickClosestFps(allowedFpsValues, Number(fpsSelect.value || preferredFps));
           if (fallback !== null && fallback !== undefined) {
-            profileFpsSelect.value = String(fallback);
+            fpsSelect.value = String(fallback);
           }
         }
       }
     }
 
+    function enforceLevelConstraints(trigger = "load") {
+      enforceLevelConstraintsFor(
+        {
+          resolutionSelect: profileResolutionSelect,
+          fpsSelect: profileFpsSelect,
+          levelSelect: profileLevelSelect,
+        },
+        trigger,
+      );
+    }
+
+    function enforceCpuLevelConstraints(trigger = "load") {
+      enforceLevelConstraintsFor(
+        {
+          resolutionSelect: cpuProfileResolutionSelect,
+          fpsSelect: cpuProfileFpsSelect,
+          levelSelect: cpuProfileLevelSelect,
+        },
+        trigger,
+      );
+    }
+
     function syncLookaheadDisplay() {
-      if (lookaheadValue) {
-        lookaheadValue.textContent = lookaheadInput?.value || "0";
+      if (lookaheadValue && lookaheadInput) {
+        lookaheadValue.textContent = lookaheadInput.value || "0";
+      }
+      if (cpuLookaheadValue && cpuLookaheadInput) {
+        cpuLookaheadValue.textContent = cpuLookaheadInput.value || "0";
       }
     }
 
@@ -281,30 +348,72 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
       setLabelDisabled(aqStrengthWrapper, !enabled);
     }
 
-    function updateBframeState() {
-      const requiresZero = profileTierSelect.value === "baseline";
+    function updateBframeStateFor({
+      tierSelect,
+      bframesSelect: targetBframes,
+      lookaheadInput: targetLookahead,
+      adaptiveSelect,
+    }) {
+      if (!tierSelect || !targetBframes || !targetLookahead || !adaptiveSelect) return;
+      const requiresZero = tierSelect.value === "baseline";
       if (requiresZero) {
-        bframesSelect.value = "0";
+        targetBframes.value = "0";
       }
-      setLabelDisabled(bframesSelect.closest("label"), requiresZero);
+      setLabelDisabled(targetBframes.closest("label"), requiresZero);
 
-      const bframes = Number(bframesSelect.value || "0");
-      const lookahead = Number(lookaheadInput.value || "0");
+      const bframes = Number(targetBframes.value || "0");
+      const lookahead = Number(targetLookahead.value || "0");
       const adaptiveAllowed = lookahead > 0 && bframes > 0;
       if (!adaptiveAllowed) {
-        adaptiveBframesSelect.value = "0";
+        adaptiveSelect.value = "0";
       }
-      setLabelDisabled(adaptiveBframesSelect.closest("label"), !adaptiveAllowed);
+      setLabelDisabled(adaptiveSelect.closest("label"), !adaptiveAllowed);
+    }
+
+    function updateBframeState() {
+      updateBframeStateFor({
+        tierSelect: profileTierSelect,
+        bframesSelect,
+        lookaheadInput,
+        adaptiveSelect: adaptiveBframesSelect,
+      });
+    }
+
+    function updateCpuBframeState() {
+      updateBframeStateFor({
+        tierSelect: cpuProfileTierSelect,
+        bframesSelect: cpuBframesSelect,
+        lookaheadInput: cpuLookaheadInput,
+        adaptiveSelect: cpuAdaptiveBframesSelect,
+      });
+    }
+
+    function updateRateControlStateFor({ rcSelect, group, qualityField }) {
+      if (!rcSelect || !group) return;
+      const rc = rcSelect.value;
+      document.querySelectorAll(`[data-rc-group="${group}"]`).forEach((label) => {
+        const field = label.dataset.rcField;
+        if (!field) return;
+        const enable =
+          (rc === qualityField && field === qualityField) ||
+          (rc !== qualityField && ["bitrate", "maxrate", "bufsize"].includes(field));
+        setLabelDisabled(label, !enable);
+      });
     }
 
     function updateRateControlState() {
-      const rc = profileRcSelect.value;
-      document.querySelectorAll("[data-rc-field]").forEach((label) => {
-        const field = label.dataset.rcField;
-        const enable =
-          (rc === "cq" && field === "cq") ||
-          (rc !== "cq" && ["bitrate", "maxrate", "bufsize"].includes(field));
-        setLabelDisabled(label, !enable);
+      updateRateControlStateFor({
+        rcSelect: profileRcSelect,
+        group: "gpu",
+        qualityField: "cq",
+      });
+    }
+
+    function updateCpuRateControlState() {
+      updateRateControlStateFor({
+        rcSelect: cpuProfileRcSelect,
+        group: "cpu",
+        qualityField: "crf",
       });
     }
 
@@ -569,39 +678,97 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
       if (!configCache) return;
       const profile = findProfile(name);
       if (!profile) return;
+      const gpuProfile = profile.gpu || profile;
+      const cpuProfile = profile.cpu || profile;
       document.querySelector("#profile-select").value = name;
       profileNameInput.value = name;
-      ensureOption(profileTierSelect, profile.profile);
-      ensureOption(profileLevelSelect, profile.level);
-      ensureOption(profileResolutionSelect, profile.max_resolution || profile.resolution);
-      ensureOption(profileFpsSelect, profile.max_fps ?? 30);
-      ensureOption(profilePresetSelect, profile.preset ?? "p7");
-      let rcMode = profile.rc || "vbr";
+      ensureOption(profileTierSelect, gpuProfile.profile);
+      ensureOption(profileLevelSelect, gpuProfile.level);
+      ensureOption(profileResolutionSelect, gpuProfile.resolution || gpuProfile.max_resolution);
+      ensureOption(profileFpsSelect, gpuProfile.max_fps ?? 30);
+      ensureOption(profilePresetSelect, gpuProfile.preset ?? "p7");
+      let rcMode = gpuProfile.rc || "vbr";
       if (rcMode === "cbr") {
         rcMode = "vbr";
       }
       ensureOption(profileRcSelect, rcMode);
-      ensureOption(profileCqSelect, profile.cq ?? 18);
-      ensureOption(profileBitrateSelect, profile.bitrate ?? profile.max_bitrate ?? "5M");
-      ensureOption(profileMaxrateSelect, profile.max_bitrate ?? "10M");
-      ensureOption(profileBufsizeSelect, profile.bufsize ?? "16M");
-      ensureOption(bframesSelect, profile.bframes ?? 2);
-      lookaheadInput.value = profile.lookahead ?? 24;
-      adaptiveBframesSelect.value = profile.adaptive_b_frames ? "1" : "0";
-      aqSelect.value = profile.aq === false ? "0" : "1";
-      spatialAqSelect.value = profile.spatial_aq === false ? "0" : "1";
-      temporalAqSelect.value = profile.temporal_aq === false ? "0" : "1";
+      ensureOption(profileCqSelect, gpuProfile.cq ?? 18);
+      ensureOption(profileBitrateSelect, gpuProfile.bitrate ?? gpuProfile.max_bitrate ?? "5M");
+      ensureOption(profileMaxrateSelect, gpuProfile.max_bitrate ?? "10M");
+      ensureOption(profileBufsizeSelect, gpuProfile.bufsize ?? "16M");
+      ensureOption(bframesSelect, gpuProfile.bframes ?? 2);
+      lookaheadInput.value = gpuProfile.lookahead ?? 24;
+      adaptiveBframesSelect.value = gpuProfile.adaptive_b_frames ? "1" : "0";
+      aqSelect.value = gpuProfile.aq === false ? "0" : "1";
+      spatialAqSelect.value = gpuProfile.spatial_aq === false ? "0" : "1";
+      temporalAqSelect.value = gpuProfile.temporal_aq === false ? "0" : "1";
       if (aqStrengthInput) {
-        const strength = profile.aq_strength ?? 7;
+        const strength = gpuProfile.aq_strength ?? 7;
         aqStrengthInput.value = String(strength);
         aqStrengthValue.textContent = String(strength);
       }
-      ensureOption(audioBitrateSelect, profile.audio?.bitrate ?? "192k");
+      ensureOption(audioBitrateSelect, gpuProfile.audio?.bitrate ?? "192k");
+      if (cpuProfileTierSelect) {
+        ensureOption(cpuProfileTierSelect, cpuProfile.profile || gpuProfile.profile);
+      }
+      if (cpuProfileLevelSelect) {
+        ensureOption(cpuProfileLevelSelect, cpuProfile.level || gpuProfile.level);
+      }
+      if (cpuProfileResolutionSelect) {
+        ensureOption(
+          cpuProfileResolutionSelect,
+          cpuProfile.resolution || cpuProfile.max_resolution || gpuProfile.resolution,
+        );
+      }
+      if (cpuProfileFpsSelect) {
+        ensureOption(cpuProfileFpsSelect, cpuProfile.max_fps ?? gpuProfile.max_fps ?? 30);
+      }
+      if (cpuProfilePresetSelect) {
+        ensureOption(cpuProfilePresetSelect, cpuProfile.preset || "slow");
+      }
+      if (cpuProfileRcSelect) {
+        ensureOption(cpuProfileRcSelect, cpuProfile.rc || "crf");
+      }
+      if (cpuProfileCqSelect) {
+        ensureOption(cpuProfileCqSelect, cpuProfile.cq ?? 20);
+      }
+      if (cpuProfileBitrateSelect) {
+        ensureOption(
+          cpuProfileBitrateSelect,
+          cpuProfile.bitrate || cpuProfile.max_bitrate || gpuProfile.bitrate,
+        );
+      }
+      if (cpuProfileMaxrateSelect) {
+        ensureOption(cpuProfileMaxrateSelect, cpuProfile.max_bitrate || gpuProfile.max_bitrate);
+      }
+      if (cpuProfileBufsizeSelect) {
+        ensureOption(cpuProfileBufsizeSelect, cpuProfile.bufsize || gpuProfile.bufsize);
+      }
+      if (cpuBframesSelect) {
+        ensureOption(cpuBframesSelect, cpuProfile.bframes ?? gpuProfile.bframes ?? 2);
+      }
+      if (cpuLookaheadInput) {
+        cpuLookaheadInput.value = cpuProfile.lookahead ?? 0;
+      }
+      if (cpuAdaptiveBframesSelect) {
+        cpuAdaptiveBframesSelect.value = cpuProfile.adaptive_b_frames ? "1" : "0";
+      }
+      if (cpuAudioBitrateSelect) {
+        ensureOption(
+          cpuAudioBitrateSelect,
+          cpuProfile.audio?.bitrate || gpuProfile.audio?.bitrate || "192k",
+        );
+      }
+      if (gpuSummary) gpuSummary.textContent = summarizeProfile(gpuProfile, "GPU");
+      if (cpuSummary) cpuSummary.textContent = summarizeProfile(cpuProfile, "CPU");
 
       syncLookaheadDisplay();
       enforceLevelConstraints();
+      enforceCpuLevelConstraints();
       updateRateControlState();
+      updateCpuRateControlState();
       updateBframeState();
+      updateCpuBframeState();
       updateAqState();
       updateFfmpegPreview();
     }
@@ -626,6 +793,8 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
         const normalizedPath = normalizeDisplayPath(job.path);
         const fileName = fileNameFromPath(normalizedPath);
         const recordedElapsed = Number(job?.elapsed_seconds ?? Number.NaN);
+        const pipeline = job.pipeline || (job.encoding ? job.encoding.pipeline : null);
+        const pipelineText = formatPipeline(pipeline);
         const elapsedSeconds =
           status === "running"
             ? jobElapsedSeconds(job)
@@ -633,21 +802,24 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
             ? recordedElapsed
             : 0;
         const elapsed = formatElapsed(elapsedSeconds);
+        const truncatedId = job.id ? job.id.slice(0, 8) : "";
         tr.innerHTML = `
           <td>
             <button
               type="button"
               class="link-button job-link"
-              data-job-id="${job.id}"
+              data-job-id="${truncatedId}"
+              data-job-id-full="${job.id}"
               data-job-path="${normalizedPath}"
             >
-              ${job.id.slice(0, 8)}
+              ${truncatedId}
             </button>
           </td>
           <td class="status-${status}">${statusLabel}</td>
           <td>${elapsed}</td>
           <td class="path-cell" title="${normalizedPath}">${fileName}</td>
           <td>${job.profile}</td>
+          <td>${pipelineText}</td>
           <td>${progress}%</td>
         `;
         jobRows.appendChild(tr);
@@ -687,6 +859,7 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
         const normalizedPath = normalizeDisplayPath(job.path);
         const fileName = fileNameFromPath(normalizedPath);
         const finished = job.updated_at ? new Date(job.updated_at).toLocaleString() : "-";
+        const pipelineText = formatPipeline(job.pipeline || (job.encoding ? job.encoding.pipeline : null));
 
         tr.innerHTML = `
           <td>${job.id.slice(0, 8)}</td>
@@ -694,6 +867,7 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
           <td>${finished}</td>
           <td class="path-cell" title="${normalizedPath}">${fileName}</td>
           <td>${job.profile}</td>
+          <td>${pipelineText}</td>
           <td>${job.message || "-"}</td>
         `;
         historyRows.appendChild(tr);
@@ -771,6 +945,7 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
       if (logQuery.value) params.set("query", logQuery.value);
       const response = await fetch(`/api/logs?${params.toString()}`);
       const entries = await response.json();
+      logCacheEntries = entries || [];
       logList.innerHTML = "";
       entries.forEach((entry) => {
         const container = document.createElement("div");
@@ -880,6 +1055,13 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
         const tr = document.createElement("tr");
         const normalizedPath = normalizeDisplayPath(entry.path);
         const fileName = fileNameFromPath(normalizedPath);
+        const encodingLabel = formatPipeline({
+          decode_type: entry.decode_type,
+          scale_type: entry.scale_type,
+          encode_type: entry.encode_type,
+          attempt: entry.attempt,
+          max_attempts: entry.max_attempts,
+        });
 
         let statusHtml = formatStatusChip(entry.status);
         if (entry.status === "converting" && entry.last_job_id) {
@@ -903,6 +1085,7 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
             ${errorHtml}
           </td>
           <td>${formatProfile(entry)}</td>
+          <td>${encodingLabel}</td>
           <td>${formatUpdated(entry.updated_at)}</td>
           <td>
             <div class="row-actions">
@@ -1185,25 +1368,61 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
       updateFfmpegPreview();
     });
 
+    if (cpuProfileRcSelect) {
+      cpuProfileRcSelect.addEventListener("change", () => {
+        updateCpuRateControlState();
+      });
+    }
+
     profileResolutionSelect.addEventListener("change", () => {
       enforceLevelConstraints("resolution");
       updateFfmpegPreview();
     });
+
+    if (cpuProfileResolutionSelect) {
+      cpuProfileResolutionSelect.addEventListener("change", () => {
+        enforceCpuLevelConstraints("resolution");
+      });
+    }
 
     profileFpsSelect.addEventListener("change", () => {
       enforceLevelConstraints("fps");
       updateFfmpegPreview();
     });
 
+    if (cpuProfileFpsSelect) {
+      cpuProfileFpsSelect.addEventListener("change", () => {
+        enforceCpuLevelConstraints("fps");
+      });
+    }
+
+    if (cpuProfileLevelSelect) {
+      cpuProfileLevelSelect.addEventListener("change", () => {
+        enforceCpuLevelConstraints("level");
+      });
+    }
+
     profileTierSelect.addEventListener("change", () => {
       updateBframeState();
       updateFfmpegPreview();
     });
 
+    if (cpuProfileTierSelect) {
+      cpuProfileTierSelect.addEventListener("change", () => {
+        updateCpuBframeState();
+      });
+    }
+
     bframesSelect.addEventListener("change", () => {
       updateBframeState();
       updateFfmpegPreview();
     });
+
+    if (cpuBframesSelect) {
+      cpuBframesSelect.addEventListener("change", () => {
+        updateCpuBframeState();
+      });
+    }
 
     adaptiveBframesSelect.addEventListener("change", updateFfmpegPreview);
 
@@ -1212,6 +1431,13 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
       updateBframeState();
       updateFfmpegPreview();
     });
+
+    if (cpuLookaheadInput) {
+      cpuLookaheadInput.addEventListener("input", () => {
+        syncLookaheadDisplay();
+        updateCpuBframeState();
+      });
+    }
 
     aqSelect.addEventListener("change", () => {
       updateAqState();
@@ -1240,12 +1466,6 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
 
     if (refreshHistoryBtn) {
         refreshHistoryBtn.addEventListener("click", fetchHistory);
-    }
-
-    if (exportConfigBtn) {
-        exportConfigBtn.addEventListener("click", () => {
-            window.open("/api/config/yaml", "_blank");
-        });
     }
 
     if (resetConfigBtn) {
@@ -1320,8 +1540,7 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
         configResult.textContent = "Profile name is required.";
         return;
       }
-      const payload = {
-        name: profileName,
+      const gpuPayload = {
         codec: "h264",
         profile: profileTierSelect.value,
         level: profileLevelSelect.value,
@@ -1340,12 +1559,66 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
         spatial_aq: spatialAqSelect.value === "1",
         temporal_aq: temporalAqSelect.value === "1",
         aq_strength: Number(aqStrengthInput.value || "7"),
+        allow_tonemap: true,
         audio: {
           codec: "aac",
           bitrate: audioBitrateSelect.value,
           channels: 2,
         },
       };
+      const existingProfile = findProfile(profileName) || {};
+      const cpuSource = existingProfile.cpu || existingProfile || {};
+      const cpuLookaheadValue = Math.max(
+        0,
+        Number(cpuLookaheadInput?.value ?? cpuSource.lookahead ?? 0),
+      );
+      const cpuBframesValue = Number(
+        cpuBframesSelect?.value ?? cpuSource.bframes ?? gpuPayload.bframes ?? 2,
+      );
+      const cpuAdaptiveAllowed = cpuLookaheadValue > 0 && cpuBframesValue > 0;
+      const cpuAdaptiveSelected = cpuAdaptiveBframesSelect?.value === "1";
+      const cpuPayload = {
+        codec: cpuSource.codec || "h264",
+        profile: cpuProfileTierSelect?.value || cpuSource.profile || gpuPayload.profile,
+        level: cpuProfileLevelSelect?.value || cpuSource.level || gpuPayload.level,
+        resolution:
+          cpuProfileResolutionSelect?.value ||
+          cpuSource.resolution ||
+          cpuSource.max_resolution ||
+          gpuPayload.resolution,
+        max_fps: Number(
+          cpuProfileFpsSelect?.value || cpuSource.max_fps || gpuPayload.max_fps || 30,
+        ),
+        bitrate:
+          cpuProfileBitrateSelect?.value ||
+          cpuSource.bitrate ||
+          cpuSource.max_bitrate ||
+          gpuPayload.bitrate,
+        max_bitrate:
+          cpuProfileMaxrateSelect?.value || cpuSource.max_bitrate || gpuPayload.max_bitrate,
+        bufsize: cpuProfileBufsizeSelect?.value || cpuSource.bufsize || gpuPayload.bufsize,
+        preset: cpuProfilePresetSelect?.value || cpuSource.preset || "slow",
+        rc: cpuProfileRcSelect?.value || cpuSource.rc || "crf",
+        cq: Number(cpuProfileCqSelect?.value ?? cpuSource.cq ?? 20),
+        bframes: cpuBframesValue,
+        lookahead: cpuLookaheadValue,
+        adaptive_b_frames: cpuAdaptiveAllowed && cpuAdaptiveSelected,
+        aq: cpuSource.aq !== false,
+        spatial_aq: cpuSource.spatial_aq ?? false,
+        temporal_aq: cpuSource.temporal_aq ?? false,
+        aq_strength: Number(cpuSource.aq_strength ?? 7),
+        allow_tonemap: cpuSource.allow_tonemap !== false,
+        audio: {
+          codec: cpuSource.audio?.codec || gpuPayload.audio?.codec || "aac",
+          bitrate:
+            cpuAudioBitrateSelect?.value ||
+            cpuSource.audio?.bitrate ||
+            gpuPayload.audio?.bitrate ||
+            "192k",
+          channels: 2,
+        },
+      };
+      const payload = { name: profileName, gpu: gpuPayload, cpu: cpuPayload };
       configResult.textContent = "Saving...";
       const response = await fetch("/api/config/encoding", {
         method: "POST",
@@ -1475,10 +1748,49 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
       if (!link) return;
       const jobId = link.dataset.jobId || "";
       const jobPath = link.dataset.jobPath || "";
-      logQuery.value = jobPath || jobId;
+      logQuery.value = jobId || jobPath;
       switchPage("logs");
       fetchLogs();
     });
+
+    async function copyLogsToClipboard() {
+      if (!copyLogsButton) return;
+      const entries = logCacheEntries || [];
+      if (!entries.length) {
+        copyLogsButton.textContent = "No logs";
+        setTimeout(() => {
+          copyLogsButton.textContent = "Copy all";
+        }, 1500);
+        return;
+      }
+      const lines = entries.map((entry) => {
+        const severity = entry.severity || entry.level || "INFO";
+        const timestamp = entry.timestamp || "";
+        const source = entry.source || entry.logger || "app";
+        const category = entry.category || "-";
+        const message = entry.message || "";
+        return `[${timestamp}] ${severity} ${source}/${category} ${message}`;
+      });
+      const text = lines.join("\n");
+      try {
+        await navigator.clipboard.writeText(text);
+        copyLogsButton.textContent = "Copied!";
+      } catch (error) {
+        console.error("Clipboard copy failed", error);
+        copyLogsButton.textContent = "Copy failed";
+      } finally {
+        setTimeout(() => {
+          copyLogsButton.textContent = "Copy all";
+        }, 2000);
+      }
+    }
+
+    if (copyLogsButton && navigator?.clipboard) {
+      copyLogsButton.addEventListener("click", copyLogsToClipboard);
+    } else if (copyLogsButton) {
+      copyLogsButton.disabled = true;
+      copyLogsButton.title = "Clipboard API unavailable";
+    }
 
     fetchConfig();
     fetchJobs();

@@ -35,10 +35,6 @@ DATA_DIR = resolve_data_dir()
 
 LOG_DB_PATH = Path(os.environ.get("LOG_DB_PATH", DATA_DIR / "events.db")).resolve()
 CONFIG_DB_PATH = Path(os.environ.get("CONFIG_DB_PATH", DATA_DIR / "config.db")).resolve()
-CONFIG_TEMPLATE_PATH = Path(
-    os.environ.get("CONFIG_TEMPLATE_PATH", "/app/config/settings.yaml.template")
-).resolve()
-LEGACY_CONFIG_PATH = Path(os.environ.get("CONFIG_PATH", "/app/config/settings.yaml")).resolve()
 LIBRARY_DB_PATH = Path(os.environ.get("LIBRARY_DB_PATH", DATA_DIR / "library.db")).resolve()
 JOB_QUEUE_URL = os.environ.get("JOB_QUEUE", "redis://localhost:6379/0")
 JOB_VISIBILITY_TIMEOUT = int(os.environ.get("JOB_VISIBILITY_TIMEOUT", "300"))
@@ -56,9 +52,7 @@ LIBRARY_STORE = LibraryEntryStore(LIBRARY_DB_PATH, session_factory=SESSION_FACTO
 JOB_HISTORY_STORE = JobHistoryStore(SESSION_FACTORY)
 
 # Services
-config_service = config_module.ConfigService(
-    CONFIG_DB_PATH, CONFIG_TEMPLATE_PATH, LEGACY_CONFIG_PATH
-)
+config_service = config_module.ConfigService(CONFIG_DB_PATH)
 job_manager = jobs.JobManager(JOB_QUEUE_URL, visibility_timeout=JOB_VISIBILITY_TIMEOUT)
 
 # Global State

@@ -9,13 +9,6 @@ from fastapi.testclient import TestClient
 client = TestClient(app)
 
 
-def test_export_yaml():
-    response = client.get("/api/config/yaml")
-    assert response.status_code == 200
-    assert "yaml" in response.json()
-    assert "libraries:" in response.json()["yaml"]
-
-
 def test_reset_config():
     # Modify config first
     config_service.update_logging(retention_days=30)
@@ -37,8 +30,8 @@ def test_history_endpoint():
         JobHistoryEntry(
             job_id="test-job-1",
             path="/test/movie.mkv",
-            library="movies",
-            profile="movies",
+            library="chromecast",
+            profile="chromecast",
             status="completed",
             message="Done",
             started_at=datetime.utcnow(),

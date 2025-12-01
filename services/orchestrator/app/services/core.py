@@ -1,3 +1,4 @@
+import json
 import logging
 from datetime import datetime
 from pathlib import Path
@@ -41,6 +42,13 @@ def _job_elapsed_seconds(job: jobs.Job) -> int:
 def job_to_response(job: jobs.Job) -> Dict[str, Any]:
     payload = job.model_dump()
     payload["path"] = normalize_display_path(payload.get("path"))
+    pipeline = payload.get("pipeline") or {}
+    if not pipeline and payload.get("encoding"):
+        pipeline = (payload["encoding"] or {}).get("pipeline") or {}
+    payload["pipeline"] = pipeline or None
+    for field in ("decode_type", "scale_type", "encode_type"):
+        if field not in payload and pipeline.get(field):
+            payload[field] = pipeline.get(field)
     payload["elapsed_seconds"] = _job_elapsed_seconds(job)
     return payload
 
@@ -80,6 +88,7 @@ def sync_entry_from_job(job: jobs.Job, status: str, message: Optional[str] = Non
     final_status = status
     if status == LibraryStatus.CONVERTED and original_missing:
         final_status = LibraryStatus.REMOVED
+    pipeline = job.pipeline or (job.encoding or {}).get("pipeline") or {}
     LIBRARY_STORE.safe_update_status(
         job.path,
         final_status,
@@ -90,6 +99,9 @@ def sync_entry_from_job(job: jobs.Job, status: str, message: Optional[str] = Non
         job_id=job.id,
         output_path=str(job_manager.output_path(source)),
         original_missing=original_missing,
+        decode_type=pipeline.get("decode_type"),
+        scale_type=pipeline.get("scale_type"),
+        encode_type=pipeline.get("encode_type"),
     )
 
 
@@ -97,30 +109,23 @@ def encoding_payload(profile_id: int) -> Dict[str, Any]:
     profile = PROFILE_STORE.get(profile_id)
     if profile is None:
         raise HTTPException(status_code=404, detail="Profile not found")
+    definition = {}
+    try:
+        definition = json.loads(profile.definition or "{}")
+    except json.JSONDecodeError:
+        definition = {}
+    gpu = definition.get("gpu") or profile.to_payload().get("gpu", {})
+    cpu = definition.get("cpu") or gpu
     return {
-        "codec": profile.codec,
-        "profile": profile.profile_tier,
-        "resolution": profile.max_resolution,
-        "max_resolution": profile.max_resolution,
-        "bitrate": profile.bitrate,
-        "max_bitrate": profile.max_bitrate,
-        "bufsize": profile.bufsize,
-        "preset": profile.preset,
-        "cq": profile.cq,
-        "rc": profile.rc,
-        "level": profile.level,
-        "max_fps": profile.max_fps,
-        "bframes": profile.bframes,
-        "lookahead": profile.lookahead,
-        "adaptive_b_frames": profile.adaptive_b_frames,
-        "aq": profile.aq,
-        "aq_strength": getattr(profile, "aq_strength", 7),
-        "spatial_aq": profile.spatial_aq,
-        "temporal_aq": profile.temporal_aq,
-        "audio": {
-            "codec": profile.audio_codec,
-            "bitrate": profile.audio_bitrate,
-            "channels": profile.audio_channels,
+        "name": profile.name,
+        "gpu": gpu,
+        "cpu": cpu,
+        "pipeline": {
+            "decode_type": "gpu",
+            "scale_type": "gpu",
+            "encode_type": "gpu",
+            "attempt": 1,
+            "max_attempts": len(jobs.PIPELINE_SEQUENCE),
         },
     }
 

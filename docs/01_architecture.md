@@ -18,13 +18,13 @@
 | `gpu-ffmpeg` | Jellyfin base (CUDA-enabled FFmpeg) + Python worker | Executes validation and transcode jobs using NVENC. Pulls jobs via HTTP (`/api/jobs/next`) to ensure decoupling from the backing queue. |
 | `queue` (optional) | Redis | Buffers work to smooth spikes. |
 
-All containers join a private Docker network. Bind mounts provide the Windows-host media folders and a `config/` directory containing the template/legacy YAML used to seed the SQLite configuration store. NVIDIA Container Toolkit is required so `gpu-ffmpeg` can access the RTX 3060 from WSL2.
+All containers join a private Docker network. Bind mounts provide the Windows-host media folders and a `config/` directory for persisted SQLite databases. NVIDIA Container Toolkit is required so `gpu-ffmpeg` can access the RTX 3060 from WSL2.
 
 ## Data flow
 
 1. **Change detection** – `folder-watcher` monitors roots and posts create/modify/delete events to `/api/events`; if the API is down, events are written to the spool file and replayed on next start.
 2. **Runtime config** – Libraries and profiles seed from the config DB; operators can **add/remove libraries at runtime** via `/api/libraries` or the dashboard, which triggers background scans and marks removed libraries’ entries as `removed`.
-3. **Policy evaluation** – Orchestrator validates profiles/libraries from the SQLite config store (seeded from `config/settings.yaml` or the template). Config changes remain Chromecast-safe (H.264 High with minimum level 3.1, AAC stereo, GPU-only) and the API normalizes `/watch/...` mounts to `/media/...` when returning data.
+3. **Policy evaluation** – Orchestrator validates profiles/libraries from the SQLite config store (seeded from built-in defaults in `app/config.py`). Config changes remain Chromecast-safe (H.264 High with minimum level 3.1, AAC stereo, GPU-first with CPU fallback) and the API normalizes `/watch/...` mounts to `/media/...` when returning data.
 4. **Job lifecycle** – Events and scans upsert library entries and enqueue jobs in Redis when needed. Workers pull `/api/jobs/next`, report progress via `/api/jobs/{id}/status`, and acknowledgements update catalog status/history.
 5. **Live updates** – Orchestrator broadcasts `job-update`, `entry-update`, and `library-update` over `/ws`; the dashboard and any clients can subscribe instead of polling. Library entries are fetched with paginated `/api/library/entries` (`limit/offset/include_total`) and appended in the UI via “Load more.”
 6. **Observability** – Structured logs persist in SQLite and expose `/api/logs`; metrics include queue depth and worker GPU availability. Telemetry and job history stay aligned with websocket pushes.
@@ -51,7 +51,7 @@ All containers join a private Docker network. Bind mounts provide the Windows-ho
 
 ## Configuration model
 
-The SQLite config store (seeded from `config/settings.yaml` when present) captures:
+The SQLite config store (seeded from built-in defaults) captures:
 
 - Libraries (`movies`, `series`, additional custom roots) with mount paths (full recursive scans enforced) and naming hints.
 - Quality profile per library (resolution cap, bitrate budget, scaling rules, audio layout).
