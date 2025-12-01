@@ -1559,7 +1559,6 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
         spatial_aq: spatialAqSelect.value === "1",
         temporal_aq: temporalAqSelect.value === "1",
         aq_strength: Number(aqStrengthInput.value || "7"),
-        allow_tonemap: true,
         audio: {
           codec: "aac",
           bitrate: audioBitrateSelect.value,
@@ -1607,7 +1606,6 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
         spatial_aq: cpuSource.spatial_aq ?? false,
         temporal_aq: cpuSource.temporal_aq ?? false,
         aq_strength: Number(cpuSource.aq_strength ?? 7),
-        allow_tonemap: cpuSource.allow_tonemap !== false,
         audio: {
           codec: cpuSource.audio?.codec || gpuPayload.audio?.codec || "aac",
           bitrate:

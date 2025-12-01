@@ -71,7 +71,6 @@ class EncodingProfile(Base):
             "spatial_aq": bool(self.spatial_aq),
             "temporal_aq": bool(self.temporal_aq),
             "aq_strength": self.aq_strength,
-            "allow_tonemap": True,
             "audio": {
                 "codec": self.audio_codec,
                 "bitrate": self.audio_bitrate,
@@ -155,7 +154,6 @@ class HardwareProfileData:
     audio_codec: str
     audio_bitrate: str
     audio_channels: int
-    allow_tonemap: bool = True
 
 
 @dataclass

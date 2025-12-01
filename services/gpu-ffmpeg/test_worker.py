@@ -6,7 +6,10 @@ import pytest
 # Ensure we can import from app
 sys.path.append(str(Path(__file__).parent))
 
+from app.capabilities import FfmpegCapabilities
 from app.ffmpeg_builder import AudioStreamInfo, FFmpegBuilder, StreamDisposition
+
+CAPABILITIES = FfmpegCapabilities(skip_detection=True)
 
 
 def test_prefers_non_commentary_when_multiple_streams_share_language():
@@ -26,7 +29,7 @@ def test_prefers_non_commentary_when_multiple_streams_share_language():
     ]
 
     # Mock builder with minimal args
-    builder = FFmpegBuilder({}, Path("."), Path("."), {}, {}, {})
+    builder = FFmpegBuilder({}, Path("."), Path("."), {}, CAPABILITIES, {})
     mapped, default_idx = builder._select_priority_streams(streams)
 
     assert [stream.input_index for stream in mapped] == [1]
@@ -57,7 +60,7 @@ def test_default_prefers_swedish_then_english(languages):
         ),
     ]
 
-    builder = FFmpegBuilder({}, Path("."), Path("."), {}, {}, {})
+    builder = FFmpegBuilder({}, Path("."), Path("."), {}, CAPABILITIES, {})
     mapped, default_idx = builder._select_priority_streams(streams)
 
     assert mapped[0].language == "swe"
@@ -93,7 +96,7 @@ def test_filters_to_preferred_and_original_languages():
             title="German Dub",
         ),
     ]
-    builder = FFmpegBuilder({}, Path("."), Path("."), {}, {}, {})
+    builder = FFmpegBuilder({}, Path("."), Path("."), {}, CAPABILITIES, {})
     mapped, default_idx = builder._select_priority_streams(streams)
     languages = [s.language for s in mapped]
     assert languages == ["swe", "eng", "spa"]  # swe, eng, original only

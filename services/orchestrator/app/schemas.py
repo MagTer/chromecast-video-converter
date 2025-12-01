@@ -113,7 +113,6 @@ class HardwareEncodingPayload(BaseModel):
     spatial_aq: bool = Field(default=True)
     temporal_aq: bool = Field(default=True)
     aq_strength: int = Field(default=7, ge=5, le=10)
-    allow_tonemap: bool = Field(default=True)
     audio: config_module.AudioProfile
 
 

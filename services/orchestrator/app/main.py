@@ -102,7 +102,6 @@ def seed_profiles_and_libraries(snapshot: config_module.ConfigSnapshot) -> None:
                     audio_codec=gpu.audio.codec,
                     audio_bitrate=gpu.audio.bitrate,
                     audio_channels=gpu.audio.channels,
-                    allow_tonemap=getattr(gpu, "allow_tonemap", True),
                 ),
                 cpu=HardwareProfileData(
                     mode="cpu",
@@ -127,7 +126,6 @@ def seed_profiles_and_libraries(snapshot: config_module.ConfigSnapshot) -> None:
                     audio_codec=cpu.audio.codec,
                     audio_bitrate=cpu.audio.bitrate,
                     audio_channels=cpu.audio.channels,
-                    allow_tonemap=getattr(cpu, "allow_tonemap", True),
                 ),
             )
         )

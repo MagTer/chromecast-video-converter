@@ -14,6 +14,7 @@ from typing import Any, Dict, Optional, Tuple
 
 import httpx
 
+from .capabilities import FfmpegCapabilities
 from .ffmpeg_builder import DEFAULT_LANGUAGE_PREFERENCES, FFmpegBuilder
 from .utils import detect_host_environment, resolve_media_path
 
@@ -91,50 +92,98 @@ LOGGER = configure_logging()
 
 POLL_INTERVAL = int(os.environ.get("GPU_POLL_INTERVAL", "5"))
 
+SUPPORTED_TEXT_SUBTITLE_CODECS = {
+    "subrip",
+    "ass",
+    "ssa",
+    "webvtt",
+    "mov_text",
+    "stl",
+    "srt",
+}
 
-def _probe_nvenc_capabilities() -> dict[str, bool]:
-    capabilities = {"rc_vbr_hq": True, "multipass_fullres": True}
+
+def _sanitize_language_tag(language: str | None) -> str:
+    if not language:
+        return "und"
+    cleaned = "".join(ch for ch in language.lower() if ch.isalnum())
+    return cleaned[:8] or "und"
+
+
+def _subtitle_sidecar_path(output_path: Path, stream_index: int, language: str | None) -> Path:
+    name = output_path.stem
+    lang_tag = _sanitize_language_tag(language)
+    return output_path.with_name(f"{name}.{lang_tag}.sub{stream_index}.srt")
+
+
+def _is_text_subtitle(stream: dict) -> bool:
+    codec = (stream.get("codec_name") or "").lower()
+    return codec in SUPPORTED_TEXT_SUBTITLE_CODECS
+
+
+def _extract_subtitle_track(source: Path, stream_index: int, destination: Path) -> bool:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    command = [
+        "ffmpeg",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-y",
+        "-i",
+        str(source),
+        "-map",
+        f"0:{stream_index}",
+        "-c:s",
+        "srt",
+        str(destination),
+    ]
     try:
-        result = subprocess.run(
-            [
-                "ffmpeg",
-                "-hide_banner",
-                "-loglevel",
-                "quiet",
-                "-h",
-                "encoder=h264_nvenc",
-            ],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-    except FileNotFoundError as exc:
-        LOGGER.warning("ffmpeg not found while probing NVENC capabilities: %s", exc)
-        return capabilities
+        subprocess.run(command, check=True, capture_output=True, text=True)
+        LOGGER.info("Extracted subtitle %s to %s", stream_index, destination)
+        return True
     except subprocess.SubprocessError as exc:
-        LOGGER.warning("Unable to probe NVENC encoder capabilities: %s", exc)
-        return capabilities
+        LOGGER.warning(
+            "Failed to extract subtitle %s (%s); %s",
+            stream_index,
+            exc,
+            exc.stderr or exc.stdout,
+        )
+        return False
 
-    output = result.stdout.lower()
-    capabilities["rc_vbr_hq"] = "vbr_hq" in output
-    capabilities["multipass_fullres"] = "fullres" in output
 
-    LOGGER.info(
-        "NVENC capabilities detected (vbr_hq=%s, multipass_fullres=%s)",
-        capabilities["rc_vbr_hq"],
-        capabilities["multipass_fullres"],
-    )
-    return capabilities
+def _extract_embedded_subtitles(
+    source: Path, analysis: dict, output_path: Path
+) -> list[dict[str, str]]:
+    extracted: list[dict[str, str]] = []
+    streams = analysis.get("streams") or []
+    for stream in streams:
+        if stream.get("codec_type") != "subtitle":
+            continue
+        stream_index = stream.get("index")
+        if stream_index is None:
+            continue
+        path = _subtitle_sidecar_path(
+            output_path, stream_index, stream.get("tags", {}).get("language")
+        )
+        LOGGER.debug(
+            "Attempting subtitle extraction index=%s codec=%s",
+            stream_index,
+            stream.get("codec_name"),
+        )
+        if _is_text_subtitle(stream):
+            if _extract_subtitle_track(source, stream_index, path):
+                extracted.append({"stream_index": stream_index, "path": str(path)})
+        else:
+            LOGGER.info(
+                "Skipping subtitle %s (%s) for extraction; codec not text-based",
+                stream_index,
+                stream.get("codec_name"),
+            )
+    return extracted
 
 
 HOST_ENVIRONMENT = detect_host_environment()
-NVENC_CAPABILITIES = _probe_nvenc_capabilities()
-FILTER_CAPABILITIES: dict[str, bool] = {
-    "tonemap_cuda": True,
-    "scale_cuda": True,
-    "scale_npp": False,
-    "hwupload_cuda": True,
-}
+FFMPEG_CAPABILITIES = FfmpegCapabilities()
 
 PROFILES: dict = {}
 OPERATIONAL_CONFIG: dict = {}
@@ -163,7 +212,6 @@ BUILTIN_PROFILE = {
         "spatial_aq": True,
         "temporal_aq": True,
         "aq_strength": 7,
-        "allow_tonemap": True,
         "audio": {"codec": "aac", "bitrate": "192k", "channels": 2},
     },
     "cpu": {
@@ -186,7 +234,6 @@ BUILTIN_PROFILE = {
         "spatial_aq": False,
         "temporal_aq": False,
         "aq_strength": 7,
-        "allow_tonemap": True,
         "audio": {"codec": "aac", "bitrate": "192k", "channels": 2},
     },
     "pipeline": {
@@ -326,10 +373,6 @@ def _probe_ffmpeg_support() -> tuple[dict[str, Any], list[str]]:
 def snapshot_gpu_state() -> dict[str, Any]:
     devices, device_errors = _probe_gpu_devices()
     ffmpeg_support, ffmpeg_errors = _probe_ffmpeg_support()
-    FILTER_CAPABILITIES["tonemap_cuda"] = bool(ffmpeg_support.get("tonemap_cuda"))
-    FILTER_CAPABILITIES["scale_cuda"] = bool(ffmpeg_support.get("scale_cuda", True))
-    FILTER_CAPABILITIES["scale_npp"] = bool(ffmpeg_support.get("scale_npp"))
-    FILTER_CAPABILITIES["hwupload_cuda"] = bool(ffmpeg_support.get("hwupload_cuda", True))
     message_parts = device_errors + ffmpeg_errors
     message = "; ".join(message_parts)
     available = bool(devices) and ffmpeg_support.get("cuda") and ffmpeg_support.get("nvenc")
@@ -756,7 +799,6 @@ async def _maybe_remove_original(source: Path, output_path: Path, expected_durat
 
 
 async def process_job(client: httpx.AsyncClient, job: dict) -> None:  # noqa: C901
-    global NVENC_CAPABILITIES
     job_id = job["id"]
     source = job["path"]
     playback_target = resolve_media_path(source)
@@ -792,6 +834,30 @@ async def process_job(client: httpx.AsyncClient, job: dict) -> None:  # noqa: C9
     if pipeline:
         analysis["pipeline"] = pipeline
 
+    subtitle_streams = [
+        stream
+        for stream in (analysis.get("streams") or [])
+        if stream.get("codec_type") == "subtitle"
+    ]
+    if subtitle_streams:
+        sidecars = await asyncio.to_thread(
+            _extract_embedded_subtitles, playback_target, analysis, output_path
+        )
+        if sidecars:
+            analysis["subtitle_sidecars"] = sidecars
+            LOGGER.info(
+                "Subtitle extraction created %s sidecars for job %s",
+                len(sidecars),
+                job_id[:8],
+            )
+        analysis["skip_embedded_subtitles"] = bool(sidecars)
+        LOGGER.debug(
+            "Job %s subtitle extraction summary: skip_embedded=%s sidecars=%s",
+            job_id[:8],
+            analysis["skip_embedded_subtitles"],
+            analysis.get("subtitle_sidecars"),
+        )
+
     if await _validate_output(output_path, duration):
         message = f"Output already present at {output_path}; skipping encode"
         await update_job_status(client, job_id, "completed", 100, message)
@@ -811,10 +877,9 @@ async def process_job(client: httpx.AsyncClient, job: dict) -> None:  # noqa: C9
         playback_target,
         output_path,
         PROFILES,
-        NVENC_CAPABILITIES,
+        FFMPEG_CAPABILITIES,
         HOST_ENVIRONMENT,
         language_preferences=LANGUAGE_PREFERENCES,
-        filter_capabilities=FILTER_CAPABILITIES,
     )
     try:
         command = builder.build()
@@ -826,12 +891,11 @@ async def process_job(client: httpx.AsyncClient, job: dict) -> None:  # noqa: C9
 
     pipeline_info = analysis.get("pipeline") or {}
     LOGGER.info(
-        "Job %s pipeline: decode=%s scale=%s encode=%s allow_tonemap=%s attempt=%s/%s",
+        "Job %s pipeline: decode=%s scale=%s encode=%s attempt=%s/%s",
         job_id[:8],
         pipeline_info.get("decode_type"),
         pipeline_info.get("scale_type"),
         pipeline_info.get("encode_type"),
-        pipeline_info.get("allow_tonemap"),
         pipeline_info.get("attempt"),
         pipeline_info.get("max_attempts"),
     )
@@ -875,7 +939,7 @@ async def process_job(client: httpx.AsyncClient, job: dict) -> None:  # noqa: C9
                 f"{message}; {classification.get('category')}: " f"{classification.get('message')}"
             )
         if classification.get("category") == "nvenc_unavailable":
-            NVENC_CAPABILITIES = _probe_nvenc_capabilities()
+            FFMPEG_CAPABILITIES.refresh()
         await update_job_status(
             client,
             job_id,

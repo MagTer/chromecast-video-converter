@@ -53,6 +53,7 @@ services:
       - ${PATH_SERIES}:/watch/series
       - ./config:/app/config
     environment:
+      - LOG_LEVEL=DEBUG
       - FFMPEG_LOG_LEVEL=info
       - ORCHESTRATOR_URL=http://orchestrator:9000
       - NVIDIA_VISIBLE_DEVICES=all

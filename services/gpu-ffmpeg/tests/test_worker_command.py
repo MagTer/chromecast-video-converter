@@ -1,13 +1,47 @@
 import sys
 from pathlib import Path
-
-import pytest
+from typing import Iterable
 
 # Add services/gpu-ffmpeg to path so we can import app
 sys.path.append(str(Path(__file__).parents[1]))
 
 from app import utils
-from app.ffmpeg_builder import HW_MAP_FILTER, FFmpegBuilder
+from app.capabilities import EncoderCapabilities, FfmpegCapabilities
+from app.ffmpeg_builder import FFmpegBuilder
+
+
+def make_capabilities(
+    *,
+    rc_modes: Iterable[str] | None = None,
+    multipass_modes: Iterable[str] | None = None,
+    filters: Iterable[str] | None = None,
+    hwaccels: Iterable[str] | None = None,
+    supports_lookahead: bool = True,
+) -> FfmpegCapabilities:
+    rc_modes_set = frozenset(rc_modes or ["vbr", "vbr_hq", "cq", "constqp", "cbr"])
+    multipass_set = frozenset(multipass_modes or ["fullres"])
+    encoder_info = EncoderCapabilities(
+        name="h264_nvenc",
+        rc_modes=rc_modes_set,
+        multipass_modes=multipass_set,
+        supports_lookahead=supports_lookahead,
+    )
+    default_filters = {
+        "tonemap_cuda",
+        "scale_npp",
+        "scale_cuda",
+        "hwupload_cuda",
+        "zscale",
+        "tonemap",
+    }
+    return FfmpegCapabilities(
+        skip_detection=True,
+        filters=set(filters or default_filters),
+        encoders={"h264_nvenc"},
+        decoders=set(),
+        hwaccels=set(hwaccels or ["cuda"]),
+        encoder_capabilities={"h264_nvenc": encoder_info},
+    )
 
 
 def test_detect_host_environment_wsl(monkeypatch):
@@ -63,11 +97,8 @@ def test_build_ffmpeg_command_maps_streams(tmp_path):
         ],
     }
 
-    # Mock capabilities: VBR HQ unavailable to force fallback test?
-    # Original test said: worker.NVENC_CAPABILITIES = {"rc_vbr_hq": False, ...}
-    # And asserted "-rc" in command and "vbr" in command # falls back
-
-    nvenc_capabilities = {"rc_vbr_hq": False, "multipass_fullres": False}
+    # Mock capabilities: VBR HQ unavailable to force fallback test.
+    capabilities = make_capabilities(rc_modes=["vbr", "cbr"])
     host_env = {"is_wsl2": False}
 
     builder = FFmpegBuilder(
@@ -75,7 +106,7 @@ def test_build_ffmpeg_command_maps_streams(tmp_path):
         input_path,
         output_path,
         profiles,
-        nvenc_capabilities,
+        capabilities,
         host_env,
     )
     command = builder.build()
@@ -131,7 +162,7 @@ def test_build_ffmpeg_command_respects_frame_limits(tmp_path):
         }
     }
 
-    nvenc_capabilities = {"rc_vbr_hq": True, "multipass_fullres": True}
+    capabilities = make_capabilities()
     host_env = {"is_wsl2": False}
 
     input_path = tmp_path / "movie.mkv"
@@ -143,7 +174,7 @@ def test_build_ffmpeg_command_respects_frame_limits(tmp_path):
         input_path,
         output_path,
         profiles,
-        nvenc_capabilities,
+        capabilities,
         host_env,
     )
     command = builder.build()
@@ -151,9 +182,7 @@ def test_build_ffmpeg_command_respects_frame_limits(tmp_path):
     vf_index = command.index("-vf")
     vf_val = command[vf_index + 1]
     assert "fps=24" in vf_val
-    assert "scale_cuda=-2:1080:force_original_aspect_ratio=decrease" in vf_val
-    assert "format=nv12" in vf_val
-    assert "hwupload_cuda" in vf_val
+    assert "scale_npp=w=-2:h=1080:format=nv12:force_original_aspect_ratio=decrease" in vf_val
     assert "-pix_fmt" in command and command[command.index("-pix_fmt") + 1] == "nv12"
 
     assert "-rc" in command and command[command.index("-rc") + 1] == "vbr_hq"
@@ -177,7 +206,7 @@ def test_build_ffmpeg_command_honors_source_frame_rate(tmp_path):
         }
     }
 
-    nvenc_capabilities = {"rc_vbr_hq": True, "multipass_fullres": True}
+    capabilities = make_capabilities()
     host_env = {"is_wsl2": False}
 
     input_path = tmp_path / "series.mkv"
@@ -194,14 +223,14 @@ def test_build_ffmpeg_command_honors_source_frame_rate(tmp_path):
         input_path,
         output_path,
         profiles,
-        nvenc_capabilities,
+        capabilities,
         host_env,
     )
     command = builder.build()
 
     vf_index = command.index("-vf")
     vf_val = command[vf_index + 1]
-    assert vf_val.startswith(HW_MAP_FILTER)
+    assert vf_val.startswith("scale_npp")
     assert "fps=" not in vf_val
 
 
@@ -221,7 +250,7 @@ def test_build_ffmpeg_command_clamps_high_frame_rate(tmp_path):
         }
     }
 
-    nvenc_capabilities = {"rc_vbr_hq": True, "multipass_fullres": True}
+    capabilities = make_capabilities()
     host_env = {"is_wsl2": False}
 
     input_path = tmp_path / "series60.mkv"
@@ -238,7 +267,7 @@ def test_build_ffmpeg_command_clamps_high_frame_rate(tmp_path):
         input_path,
         output_path,
         profiles,
-        nvenc_capabilities,
+        capabilities,
         host_env,
     )
     command = builder.build()
@@ -270,7 +299,7 @@ def test_build_ffmpeg_command_respects_profile_level_and_aq(tmp_path):
         "resolution": "1280x720",
     }
 
-    nvenc_capabilities = {"rc_vbr_hq": True, "multipass_fullres": True}
+    capabilities = make_capabilities()
     host_env = {"is_wsl2": False}
 
     input_path = tmp_path / "clip.mkv"
@@ -285,7 +314,7 @@ def test_build_ffmpeg_command_respects_profile_level_and_aq(tmp_path):
         input_path,
         output_path,
         profiles,
-        nvenc_capabilities,
+        capabilities,
         host_env,
     )
     command = builder.build()
@@ -322,7 +351,7 @@ def test_build_ffmpeg_command_adds_tonemap_for_hdr(tmp_path):
             "audio": {"codec": "aac", "bitrate": "192k", "channels": 2},
         }
     }
-    nvenc_capabilities = {"rc_vbr_hq": True, "multipass_fullres": True}
+    capabilities = make_capabilities()
     host_env = {"is_wsl2": False}
     input_path = tmp_path / "hdr.mkv"
     output_path = tmp_path / "hdr.mp4"
@@ -342,7 +371,7 @@ def test_build_ffmpeg_command_adds_tonemap_for_hdr(tmp_path):
         input_path,
         output_path,
         profiles,
-        nvenc_capabilities,
+        capabilities,
         host_env,
     )
     command = builder.build()
@@ -350,7 +379,7 @@ def test_build_ffmpeg_command_adds_tonemap_for_hdr(tmp_path):
     assert "tonemap_cuda" in vf_val
 
 
-def test_subtitles_force_cpu_filters_but_keep_nvenc(tmp_path):
+def test_subtitles_extracted_before_gpu_pipeline(tmp_path):
     profiles = {
         "chromecast": {
             "bitrate": "8M",
@@ -362,7 +391,7 @@ def test_subtitles_force_cpu_filters_but_keep_nvenc(tmp_path):
             "audio": {"codec": "aac", "bitrate": "192k", "channels": 2},
         }
     }
-    nvenc_capabilities = {"rc_vbr_hq": True, "multipass_fullres": True}
+    capabilities = make_capabilities()
     host_env = {"is_wsl2": False}
     analysis = {
         "profile": "chromecast",
@@ -379,6 +408,7 @@ def test_subtitles_force_cpu_filters_but_keep_nvenc(tmp_path):
                 "disposition": {"default": 1},
             },
         ],
+        "skip_embedded_subtitles": True,
     }
 
     builder = FFmpegBuilder(
@@ -386,41 +416,52 @@ def test_subtitles_force_cpu_filters_but_keep_nvenc(tmp_path):
         tmp_path / "input.mkv",
         tmp_path / "output.mp4",
         profiles,
-        nvenc_capabilities,
+        capabilities,
         host_env,
     )
     command = builder.build()
 
     vf_val = command[command.index("-vf") + 1]
-    assert "hwdownload" in vf_val
-    assert "format=p010le" in vf_val
-    assert "hwupload_cuda" in vf_val
-    assert vf_val.endswith("format=nv12")
-    assert "scale_cuda=iw:ih" in vf_val or "scale_npp" in vf_val
+    assert "hwdownload" not in vf_val
+    assert "hwupload_cuda" not in vf_val
+    assert "tonemap_cuda" in vf_val
+    assert "scale_npp" in vf_val
+    assert "0:s" not in command
 
     assert "-c:v" in command and command[command.index("-c:v") + 1] == "h264_nvenc"
 
 
-def test_hdr_rejected_when_tonemap_disabled(tmp_path):
+def test_hdr_uses_cpu_tonemap_when_cuda_missing(tmp_path):
     profiles = {
         "hdr": {
-            "allow_tonemap": False,
             "audio": {"codec": "aac", "bitrate": "192k"},
         }
     }
-    nvenc_capabilities = {"rc_vbr_hq": True, "multipass_fullres": True}
     host_env = {"is_wsl2": False}
     analysis = {
         "profile": "hdr",
-        "streams": [{"codec_type": "video", "pix_fmt": "p010le", "color_transfer": "smpte2084"}],
+        "streams": [
+            {
+                "codec_type": "video",
+                "pix_fmt": "p010le",
+                "color_transfer": "smpte2084",
+                "avg_frame_rate": "30000/1001",
+            }
+        ],
     }
+    capabilities = make_capabilities(
+        filters={"scale_npp", "scale_cuda", "hwupload_cuda", "zscale", "tonemap"}
+    )
     builder = FFmpegBuilder(
         analysis,
         tmp_path / "in.mkv",
         tmp_path / "out.mp4",
         profiles,
-        nvenc_capabilities,
+        capabilities,
         host_env,
     )
-    with pytest.raises(RuntimeError):
-        builder.build()
+    command = builder.build()
+    vf_val = command[command.index("-vf") + 1]
+    assert "tonemap=hable" in vf_val
+    assert "tonemap_cuda" not in vf_val
+    assert "hwdownload" in vf_val

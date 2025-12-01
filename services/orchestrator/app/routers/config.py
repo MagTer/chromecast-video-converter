@@ -61,7 +61,6 @@ def profile_data_from_payload(
             audio_codec=gpu_validated.audio.codec,
             audio_bitrate=gpu_validated.audio.bitrate,
             audio_channels=gpu_validated.audio.channels,
-            allow_tonemap=getattr(gpu_validated, "allow_tonemap", True),
         ),
         cpu=HardwareProfileData(
             mode="cpu",
@@ -86,7 +85,6 @@ def profile_data_from_payload(
             audio_codec=cpu_validated.audio.codec,
             audio_bitrate=cpu_validated.audio.bitrate,
             audio_channels=cpu_validated.audio.channels,
-            allow_tonemap=getattr(cpu_validated, "allow_tonemap", True),
         ),
     )
     return profile_data, profile_set
