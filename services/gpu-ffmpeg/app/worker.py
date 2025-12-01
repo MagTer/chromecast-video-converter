@@ -33,6 +33,8 @@ _ffmpeg_timeout_raw = int(os.environ.get("GPU_FFMPEG_TIMEOUT", "7200"))
 FFMPEG_TIMEOUT = _ffmpeg_timeout_raw if _ffmpeg_timeout_raw > 0 else None
 _ffmpeg_idle_timeout_raw = int(os.environ.get("GPU_FFMPEG_IDLE_TIMEOUT", "600"))
 FFMPEG_IDLE_TIMEOUT = _ffmpeg_idle_timeout_raw if _ffmpeg_idle_timeout_raw > 0 else None
+_subtitle_timeout_raw = int(os.environ.get("GPU_SUBTITLE_TIMEOUT", "180"))
+SUBTITLE_EXTRACTION_TIMEOUT = _subtitle_timeout_raw if _subtitle_timeout_raw > 0 else None
 
 
 def _normalize_level(level: str) -> str:
@@ -143,10 +145,25 @@ def _extract_subtitle_track(source: Path, stream_index: int, destination: Path) 
         "srt",
         str(destination),
     ]
+    run_kwargs = {
+        "check": True,
+        "capture_output": True,
+        "text": True,
+    }
+    if SUBTITLE_EXTRACTION_TIMEOUT is not None:
+        run_kwargs["timeout"] = SUBTITLE_EXTRACTION_TIMEOUT
     try:
-        subprocess.run(command, check=True, capture_output=True, text=True)
+        subprocess.run(command, **run_kwargs)
         LOGGER.info("Extracted subtitle %s to %s", stream_index, destination)
         return True
+    except subprocess.TimeoutExpired as exc:
+        LOGGER.warning(
+            "Timed out extracting subtitle %s after %ss (%s)",
+            stream_index,
+            SUBTITLE_EXTRACTION_TIMEOUT,
+            exc,
+        )
+        return False
     except subprocess.SubprocessError as exc:
         LOGGER.warning(
             "Failed to extract subtitle %s (%s); %s",

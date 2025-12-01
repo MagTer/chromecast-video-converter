@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import os
 import sys
 from pathlib import Path
 from unittest.mock import AsyncMock
@@ -21,6 +22,7 @@ def _build_test_app(tmp_path: Path, monkeypatch, fake_redis):
         "app",
         "app.main",
         "app.jobs",
+        "app.utils",
         "app.profiles",
         "app.library_entries",
         "app.job_history",
@@ -103,6 +105,72 @@ def test_events_ingest_creates_entry(test_app, tmp_path):
     assert items, "Entry should be recorded from watcher events"
     assert items[0]["path"] == str(media_file)
     assert items[0]["status"] in {LibraryStatus.PENDING, LibraryStatus.CONVERTING}
+
+
+def test_event_paths_normalized_to_canonical(tmp_path, monkeypatch, fake_redis):
+    media_root = tmp_path / "canon-root"
+    watch_root = tmp_path / "watch-root"
+    media_root.mkdir(parents=True)
+    try:
+        os.symlink(media_root, watch_root)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks unsupported on this platform")
+
+    monkeypatch.setenv("DISPLAY_LIBRARY_PREFIX", str(media_root))
+    monkeypatch.setenv("LIBRARY_ROOT_PREFIXES", f"{watch_root},{media_root}")
+
+    app, _main = _build_test_app(tmp_path, monkeypatch, fake_redis)
+    client = TestClient(app)
+    profile_id = _first_profile_id(client)
+
+    create_payload = {
+        "name": "mirror",
+        "root": str(media_root),
+        "depth": "max",
+        "profile_id": profile_id,
+    }
+    assert client.post("/api/libraries", json=create_payload).status_code == 201
+
+    media_file = media_root / "dup.mkv"
+    media_file.write_bytes(b"demo")
+    watch_path = watch_root / "dup.mkv"
+
+    event_body = {
+        "events": [
+            {
+                "path": str(watch_path),
+                "library": "mirror",
+                "event": "created",
+                "is_directory": False,
+            }
+        ]
+    }
+    assert client.post("/api/events", json=event_body).status_code == 200
+
+    entries = client.get("/api/library/entries", params={"library": "mirror"}).json()
+    assert len(entries) == 1
+    assert entries[0]["path"] == str(media_file)
+
+    jobs_payload = client.get("/api/jobs").json()
+    assert len(jobs_payload) == 1
+    assert jobs_payload[0]["path"] == str(media_file)
+
+    # Re-send event using canonical path and ensure duplicates are not created.
+    second_event = {
+        "path": str(media_file),
+        "library": "mirror",
+        "event": "created",
+        "is_directory": False,
+    }
+    assert client.post("/api/events", json=second_event).status_code == 200
+
+    entries_after = client.get("/api/library/entries", params={"library": "mirror"}).json()
+    assert len(entries_after) == 1
+    assert entries_after[0]["path"] == str(media_file)
+
+    jobs_after = client.get("/api/jobs").json()
+    assert len(jobs_after) == 1
+    assert jobs_after[0]["path"] == str(media_file)
 
 
 def test_reprocess_endpoint_adds_job(test_app, tmp_path):

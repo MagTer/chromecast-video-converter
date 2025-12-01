@@ -123,6 +123,10 @@ A Python-based watcher monitors file-system events with optional polling support
   `services/gpu-ffmpeg/Dockerfile`) so ffmpeg/ffprobe are compiled with the
   exact NVENC features we rely on (`tonemap_cuda`, `scale_npp`, CUDA 12.9
   libraries) without depending on Jellyfin's upstream image.
+- Long-running probes are capped: `GPU_FFPROBE_TIMEOUT`, `GPU_FFMPEG_TIMEOUT`,
+  `GPU_FFMPEG_IDLE_TIMEOUT`, and the new `GPU_SUBTITLE_TIMEOUT` can be set in
+  `.env` to ensure ffprobe, encoding, and subtitle extraction fail fast rather
+  than wedging the job queue.
 - Compose also applies cgroup rules (`c 195:* rmw`, `c 508:* rmw`) so the
  container can open `/dev/nvidia*` without hitting permission errors when the
  stack is launched from WSL2 or other constrained environments.

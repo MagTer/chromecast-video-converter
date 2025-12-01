@@ -12,6 +12,8 @@ from uuid import uuid4
 import redis.asyncio as redis
 from pydantic import BaseModel, Field
 
+from .utils import resolve_media_path
+
 
 class JobStatus(str):
     PENDING = "pending"
@@ -87,16 +89,21 @@ class JobManager:
         self._depth_key = f"{self._stream}:depth"
         self._ensure_group_lock = asyncio.Lock()
 
+    def _canonical_path(self, path: str | Path) -> str:
+        return str(resolve_media_path(path))
+
     def _output_path(self, source: Path) -> Path:
-        return source.parent / f"{source.stem}-chromecast.mp4"
+        canonical = Path(self._canonical_path(source))
+        return canonical.parent / f"{canonical.stem}-chromecast.mp4"
 
     def _already_converted(self, source: Path, *, log: bool = True) -> bool:
-        output_path = self._output_path(source)
+        canonical_source = Path(self._canonical_path(source))
+        output_path = self._output_path(canonical_source)
         if not output_path.exists():
             return False
         try:
             output_stat = output_path.stat()
-            source_mtime = source.stat().st_mtime
+            source_mtime = canonical_source.stat().st_mtime
         except OSError:
             return True
         if output_stat.st_size == 0:
@@ -105,7 +112,7 @@ class JobManager:
             if log:
                 self._logger.info(
                     "Skipping already converted file %s (output: %s)",
-                    source,
+                    canonical_source,
                     output_path,
                 )
             return True
@@ -116,10 +123,12 @@ class JobManager:
         return set(self._video_extensions)
 
     def output_path(self, source: Path) -> Path:
-        return self._output_path(source)
+        canonical_source = Path(self._canonical_path(source))
+        return self._output_path(canonical_source)
 
     def is_converted(self, source: Path, *, log: bool = False) -> bool:
-        return self._already_converted(source, log=log)
+        canonical_source = Path(self._canonical_path(source))
+        return self._already_converted(canonical_source, log=log)
 
     async def initialize(self) -> None:
         async with self._ensure_group_lock:
@@ -181,7 +190,8 @@ class JobManager:
                 await self._redis.delete(path_key)
 
         if not reserved:
-            self._logger.warning("Unable to reserve job slot for %s; proceeding anyway", path)
+            self._logger.warning("Unable to reserve job slot for %s; forcing reservation", path)
+            await self._redis.set(path_key, job_id)
         return None
 
     def _encode_job(self, job: Job) -> dict[str, str]:
@@ -266,6 +276,7 @@ class JobManager:
         emit_log: bool = True,
     ) -> Job:
         await self.initialize()
+        path = self._canonical_path(path)
         source = Path(path)
         if source.suffix.lower() not in self._video_extensions:
             raise ValueError("Unsupported media extension")
@@ -574,20 +585,21 @@ class JobManager:
         profile_id: Optional[int] = None,
         encoding: Optional[Dict[str, Any]] = None,
     ) -> List[Job]:
-        root_path = Path(root)
+        root_path = Path(self._canonical_path(root))
         if not root_path.exists():
             return []
         jobs_added: List[Job] = []
         entries = list(root_path.rglob("*.*"))
         for entry in entries:
-            if entry.suffix.lower() not in self._video_extensions:
+            canonical_entry = Path(self._canonical_path(entry))
+            if canonical_entry.suffix.lower() not in self._video_extensions:
                 continue
-            if "-chromecast" in entry.stem.lower():
+            if "-chromecast" in canonical_entry.stem.lower():
                 continue
-            if self._already_converted(entry):
+            if self._already_converted(canonical_entry):
                 continue
             job = await self.add_job(
-                str(entry),
+                str(canonical_entry),
                 library,
                 profile,
                 profile_id=profile_id,
