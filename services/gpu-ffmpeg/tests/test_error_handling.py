@@ -1,9 +1,12 @@
 # Add services/gpu-ffmpeg to path so we can import app
+import asyncio
+import subprocess
 import sys
 from pathlib import Path
 
 sys.path.append(str(Path(__file__).parents[1]))
 
+from app import worker  # type: ignore  # noqa: E402
 from app.worker import (  # type: ignore  # noqa: E402
     _augment_analysis_with_video_metadata,
     classify_ffmpeg_error,
@@ -39,3 +42,27 @@ def test_augment_analysis_adds_hdr_metadata():
     enriched = _augment_analysis_with_video_metadata(analysis)
     assert enriched["streams"][0]["is_hdr"] is True
     assert enriched["streams"][0]["bit_depth"] == 10
+
+
+def test_probe_file_handles_timeout(monkeypatch, tmp_path):
+    target = tmp_path / "movie.mkv"
+    target.write_bytes(b"fake")
+
+    def fake_run(*args, **kwargs):  # noqa: ARG001
+        raise subprocess.TimeoutExpired(cmd="ffprobe", timeout=worker.FFPROBE_TIMEOUT)
+
+    monkeypatch.setattr(worker.subprocess, "run", fake_run)
+
+    result = worker.probe_file(target)
+    assert result == {}
+
+
+def test_run_conversion_handles_missing_binary(monkeypatch):
+    async def fake_create(*args, **kwargs):  # noqa: ARG001
+        raise FileNotFoundError("ffmpeg not found")
+
+    monkeypatch.setattr(worker.asyncio, "create_subprocess_exec", fake_create)
+    code, logs = asyncio.run(worker.run_conversion(["ffmpeg"], lambda _: None))
+
+    assert code == 127
+    assert logs == ["ffmpeg not found"]

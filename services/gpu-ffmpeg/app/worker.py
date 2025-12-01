@@ -6,6 +6,7 @@ import re
 import shlex
 import subprocess
 import time
+from asyncio.subprocess import PIPE, STDOUT, Process
 from collections import deque
 from contextlib import suppress
 from datetime import datetime, timezone
@@ -27,6 +28,11 @@ ORCHESTRATOR_URL = os.environ.get("ORCHESTRATOR_URL", "http://localhost:9000")
 JOB_VISIBILITY_TIMEOUT = int(os.environ.get("JOB_VISIBILITY_TIMEOUT", "300"))
 STREAM_READER_LIMIT = int(os.environ.get("GPU_STREAM_READER_LIMIT", "1000000"))
 WORKER_ID = os.environ.get("WORKER_ID", f"worker-{os.getpid()}")
+FFPROBE_TIMEOUT = max(1, int(os.environ.get("GPU_FFPROBE_TIMEOUT", "120")))
+_ffmpeg_timeout_raw = int(os.environ.get("GPU_FFMPEG_TIMEOUT", "7200"))
+FFMPEG_TIMEOUT = _ffmpeg_timeout_raw if _ffmpeg_timeout_raw > 0 else None
+_ffmpeg_idle_timeout_raw = int(os.environ.get("GPU_FFMPEG_IDLE_TIMEOUT", "600"))
+FFMPEG_IDLE_TIMEOUT = _ffmpeg_idle_timeout_raw if _ffmpeg_idle_timeout_raw > 0 else None
 
 
 def _normalize_level(level: str) -> str:
@@ -451,6 +457,7 @@ def probe_file(filepath: str | Path) -> dict:
                 check=True,
                 capture_output=True,
                 text=True,
+                timeout=FFPROBE_TIMEOUT,
             )
             try:
                 raw = json.loads(result.stdout)
@@ -458,6 +465,13 @@ def probe_file(filepath: str | Path) -> dict:
             except json.JSONDecodeError:
                 LOGGER.warning("Failed to parse ffprobe output for %s", filepath)
                 return {}
+        except subprocess.TimeoutExpired:
+            LOGGER.error(
+                "ffprobe analysis timed out after %ss for %s",
+                FFPROBE_TIMEOUT,
+                target_path,
+            )
+            return {}
         except subprocess.CalledProcessError as exc:
             stderr = (exc.stderr or "").strip()
             lowered = stderr.lower()
@@ -550,41 +564,82 @@ def classify_ffmpeg_error(logs: list[str], return_code: int) -> dict[str, str | 
     }
 
 
-def run_conversion(command: list[str], progress_callback) -> tuple[int, list[str]]:
+async def _terminate_process(process: Process, reason: str, ffmpeg_logs: deque[str]) -> None:
+    if reason:
+        ffmpeg_logs.append(reason)
+    try:
+        process.terminate()
+    except ProcessLookupError:
+        return
+    try:
+        await asyncio.wait_for(process.wait(), timeout=5)
+    except asyncio.TimeoutError:
+        try:
+            process.kill()
+        except ProcessLookupError:
+            return
+        await process.wait()
+
+
+async def run_conversion(
+    command: list[str],
+    progress_callback,
+    *,
+    timeout: int | None = None,
+    idle_timeout: int | None = None,
+) -> tuple[int, list[str]]:
     LOGGER.info("Starting FFmpeg with command: %s", _loggable_command(command))
     ffmpeg_logs: deque[str] = deque(maxlen=100)
     try:
-        process = subprocess.Popen(
-            command,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
+        process = await asyncio.create_subprocess_exec(
+            *command,
+            stdout=PIPE,
+            stderr=STDOUT,
         )
     except FileNotFoundError as exc:
         LOGGER.error("FFmpeg binary not found: %s", exc)
         return 127, ["ffmpeg not found"]
+
+    loop = asyncio.get_running_loop()
+    start = loop.time()
+    last_output = start
+
     assert process.stdout is not None
-    try:
-        while True:
-            line = process.stdout.readline(STREAM_READER_LIMIT)
-            if line == "" and process.poll() is not None:
-                break
-            if not line:
+    while True:
+        try:
+            line = await asyncio.wait_for(process.stdout.readline(), timeout=1.0)
+        except asyncio.TimeoutError:
+            now = loop.time()
+            if timeout and now - start > timeout:
+                await _terminate_process(
+                    process,
+                    f"FFmpeg timed out after {timeout}s",
+                    ffmpeg_logs,
+                )
+                return -9, list(ffmpeg_logs)
+            if idle_timeout and now - last_output > idle_timeout:
+                await _terminate_process(
+                    process,
+                    f"FFmpeg produced no output for {idle_timeout}s",
+                    ffmpeg_logs,
+                )
+                return -9, list(ffmpeg_logs)
+            continue
+        if not line:
+            break
+        last_output = loop.time()
+        text_line = line.decode("utf-8", errors="replace").strip()
+        if text_line.startswith("out_time_ms="):
+            try:
+                out_time_ms = int(text_line.split("=", 1)[1])
+            except ValueError:
                 continue
-            text_line = line.strip()
-            if text_line.startswith("out_time_ms="):
-                try:
-                    out_time_ms = int(text_line.split("=", 1)[1])
-                except ValueError:
-                    continue
-                progress_callback(out_time_ms)
-            else:
-                LOGGER.debug("ffmpeg: %s", text_line)
-                ffmpeg_logs.append(text_line)
-    finally:
-        return_code = process.wait()
+            progress_callback(out_time_ms)
+        else:
+            LOGGER.debug("ffmpeg: %s", text_line)
+            ffmpeg_logs.append(text_line)
+
+    return_code = await process.wait()
     return return_code, list(ffmpeg_logs)
 
 
@@ -907,7 +962,12 @@ async def process_job(client: httpx.AsyncClient, job: dict) -> None:  # noqa: C9
     loop = asyncio.get_running_loop()
     progress_callback, _, _ = _progress_callback_factory(duration, loop, client, job_id)
 
-    return_code, ffmpeg_logs = await asyncio.to_thread(run_conversion, command, progress_callback)
+    return_code, ffmpeg_logs = await run_conversion(
+        command,
+        progress_callback,
+        timeout=FFMPEG_TIMEOUT,
+        idle_timeout=FFMPEG_IDLE_TIMEOUT,
+    )
 
     if return_code == 0:
         message = f"Encoding finished to {output_path}"
@@ -948,7 +1008,7 @@ async def process_job(client: httpx.AsyncClient, job: dict) -> None:  # noqa: C9
             message,
             return_code=return_code,
             logs=ffmpeg_logs,
-            pipeline=pipeline,
+            pipeline=pipeline_info or pipeline,
         )
 
 
