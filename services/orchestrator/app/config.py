@@ -52,7 +52,6 @@ DEFAULT_CONFIG: Dict[str, Any] = {
                 "spatial_aq": True,
                 "temporal_aq": True,
                 "aq_strength": 7,
-                "allow_tonemap": True,
                 "audio": {
                     "codec": "aac",
                     "bitrate": "192k",
@@ -79,7 +78,6 @@ DEFAULT_CONFIG: Dict[str, Any] = {
                 "spatial_aq": False,
                 "temporal_aq": False,
                 "aq_strength": 7,
-                "allow_tonemap": True,
                 "audio": {
                     "codec": "aac",
                     "bitrate": "192k",
@@ -355,7 +353,6 @@ class HardwareProfile(BaseModel):
     spatial_aq: bool = Field(default=True)
     temporal_aq: bool = Field(default=True)
     aq_strength: int = Field(default=7, ge=5, le=10)
-    allow_tonemap: bool = Field(default=True)
     audio: AudioProfile
 
     @model_validator(mode="after")

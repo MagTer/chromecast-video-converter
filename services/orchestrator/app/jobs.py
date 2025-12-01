@@ -4,7 +4,7 @@ import asyncio
 import json
 import logging
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
@@ -41,31 +41,11 @@ class Job(BaseModel):
 
 
 PIPELINE_SEQUENCE: list[Dict[str, Any]] = [
-    {"decode_type": "gpu", "scale_type": "gpu", "encode_type": "gpu", "allow_tonemap": True},
-    {
-        "decode_type": "gpu",
-        "scale_type": "gpu",
-        "encode_type": "gpu",
-        "allow_tonemap": False,
-    },
-    {
-        "decode_type": "cpu",
-        "scale_type": "gpu",
-        "encode_type": "gpu",
-        "allow_tonemap": False,
-    },
-    {
-        "decode_type": "cpu",
-        "scale_type": "cpu",
-        "encode_type": "gpu",
-        "allow_tonemap": False,
-    },
-    {
-        "decode_type": "cpu",
-        "scale_type": "cpu",
-        "encode_type": "cpu",
-        "allow_tonemap": True,
-    },
+    {"decode_type": "gpu", "scale_type": "gpu", "encode_type": "gpu"},
+    {"decode_type": "gpu", "scale_type": "gpu", "encode_type": "gpu"},
+    {"decode_type": "cpu", "scale_type": "gpu", "encode_type": "gpu"},
+    {"decode_type": "cpu", "scale_type": "cpu", "encode_type": "gpu"},
+    {"decode_type": "cpu", "scale_type": "cpu", "encode_type": "cpu"},
 ]
 
 
@@ -87,6 +67,10 @@ class JobStatusUpdate(BaseModel):
 
 
 class JobManager:
+    _PATH_RESERVATION_ATTEMPTS = 4
+    _JOB_FETCH_RETRIES = 8
+    _JOB_FETCH_DELAY = 0.05
+
     def __init__(self, redis_url: str, *, visibility_timeout: int = 300) -> None:
         self._logger = logging.getLogger(__name__)
         self._video_extensions = {".mp4", ".m4v", ".mov", ".mkv", ".ts", ".flv"}
@@ -150,6 +134,55 @@ class JobManager:
 
     def _path_key(self, path: str) -> str:
         return f"{self._path_lookup_prefix}:{path}"
+
+    async def _fetch_existing_job(self, job_id: Optional[str]) -> Optional[Job]:
+        if not job_id:
+            return None
+        job_key = self._job_key(job_id)
+        for _ in range(self._JOB_FETCH_RETRIES):
+            data = await self._redis.hgetall(job_key)
+            if data:
+                return self._decode_job(data)
+            await asyncio.sleep(self._JOB_FETCH_DELAY)
+        return None
+
+    async def _set_nx(self, key: str, value: str) -> bool:
+        try:
+            return await self._redis.set(key, value, nx=True)
+        except TypeError:
+            exists = await self._redis.get(key)
+            if exists:
+                return False
+            await self._redis.set(key, value)
+            return True
+        except redis.ResponseError:
+            return False
+
+    async def _reserve_path_for_job(self, path: str, job_id: str, *, force: bool) -> Optional[Job]:
+        path_key = self._path_key(path)
+        if force:
+            await self._redis.set(path_key, job_id)
+            return None
+
+        reserved = False
+        for attempt in range(self._PATH_RESERVATION_ATTEMPTS):
+            reserved = await self._set_nx(path_key, job_id)
+            if reserved:
+                break
+            existing_job_id = await self._redis.get(path_key)
+            existing_job = await self._fetch_existing_job(existing_job_id)
+            if existing_job:
+                self._logger.debug("Job already tracked for %s", path)
+                return existing_job
+            if attempt < self._PATH_RESERVATION_ATTEMPTS - 1:
+                self._logger.warning(
+                    "Clearing stale reservation for %s (job=%s)", path, existing_job_id
+                )
+                await self._redis.delete(path_key)
+
+        if not reserved:
+            self._logger.warning("Unable to reserve job slot for %s; proceeding anyway", path)
+        return None
 
     def _encode_job(self, job: Job) -> dict[str, str]:
         payload = job.model_dump()
@@ -241,13 +274,6 @@ class JobManager:
         if self._already_converted(source, log=emit_log):
             raise ValueError(f"Output already exists for {path}")
 
-        existing_job_id = await self._redis.get(self._path_key(path))
-        if existing_job_id and not force:
-            data = await self._redis.hgetall(self._job_key(existing_job_id))
-            if data:
-                self._logger.debug("Job already tracked for %s", path)
-                return self._decode_job(data)
-
         pipeline = encoding.get("pipeline") if encoding else None
         max_attempts = 5
         attempt = 1
@@ -270,6 +296,9 @@ class JobManager:
             attempt=attempt,
             max_attempts=max_attempts,
         )
+        existing_job = await self._reserve_path_for_job(path, job.id, force=force)
+        if existing_job:
+            return existing_job
         encoded = self._encode_job(job)
         await self._redis.hset(self._job_key(job.id), mapping=encoded)
         await self._redis.zadd(self._job_index, {job.id: job.updated_at.timestamp()})
@@ -289,8 +318,88 @@ class JobManager:
             )
         return job
 
+    STALE_RUNNING_TIMEOUT = 300  # seconds
+
+    async def _pending_message_map(self) -> dict[str, str]:
+        pending_map: dict[str, str] = {}
+        message_ids: list[str] = []
+        if hasattr(self._redis, "xpending_range"):
+            try:
+                entries = await self._redis.xpending_range(
+                    self._stream, self._group, "-", "+", 1000
+                )
+                for entry in entries:
+                    if isinstance(entry, dict):
+                        message_ids.append(entry.get("message_id", ""))
+                    elif isinstance(entry, tuple):
+                        message_ids.append(entry[0])
+            except TypeError:
+                pass
+        else:
+            message_ids = await self._pending_message_ids_from_xpending()
+        for message_id in message_ids:
+            if not message_id:
+                continue
+            records = await self._redis.xrange(self._stream, message_id, message_id)
+            if not records:
+                continue
+            _, fields = records[0]
+            payload = json.loads(fields.get("payload", "{}"))
+            job_id = payload.get("id")
+            if job_id:
+                pending_map[job_id] = message_id
+        return pending_map
+
+    async def _pending_message_ids_from_xpending(self) -> list[str]:
+        try:
+            entries = await self._redis.xpending(self._stream, self._group, "-", "+", 1000)
+        except Exception:
+            return []
+        message_ids: list[str] = []
+        for entry in entries or []:
+            if isinstance(entry, (list, tuple)) and entry:
+                message_ids.append(entry[0])
+        return message_ids
+
+    async def _ack_pending_message(self, message_id: str) -> None:
+        if not message_id:
+            return
+        await self._redis.xack(self._stream, self._group, message_id)
+        await self._redis.xdel(self._stream, message_id)
+
+    async def _handle_stale_job(self, job_id: str, job: Job, pending_map: dict[str, str]) -> None:
+        threshold = datetime.utcnow() - timedelta(seconds=self.STALE_RUNNING_TIMEOUT)
+        if not job.updated_at or job.updated_at > threshold:
+            return
+        self._logger.warning("Stale job detected: %s (status=%s)", job_id[:8], job.status)
+        if job.attempt < job.max_attempts:
+            pipeline = job.pipeline or {}
+            await self.schedule_retry(job, pipeline, message="Worker lost; retrying automatically")
+            message_id = pending_map.get(job_id)
+            await self._ack_pending_message(message_id)
+        else:
+            job.status = JobStatus.FAILED
+            job.progress = 0
+            job.message = "Worker unavailable; job marked failed"
+            job.updated_at = datetime.utcnow()
+            await self._redis.hset(self._job_key(job_id), mapping=self._encode_job(job))
+            await self._redis.zadd(self._job_index, {job_id: job.updated_at.timestamp()})
+            self._logger.warning("Marked job %s as failed after missing worker", job_id[:8])
+
+    async def _cleanup_stale_jobs(self, limit: int = 200) -> None:
+        job_ids = await self._redis.zrange(self._job_index, 0, limit - 1)
+        pending_map = await self._pending_message_map()
+        for job_id in job_ids:
+            data = await self._redis.hgetall(self._job_key(job_id))
+            if not data:
+                continue
+            job = self._decode_job(data)
+            if job.status == JobStatus.RUNNING:
+                await self._handle_stale_job(job_id, job, pending_map)
+
     async def list_jobs(self, limit: int = 200) -> List[Job]:
         await self.initialize()
+        await self._cleanup_stale_jobs(limit=limit)
         job_ids = await self._redis.zrevrange(self._job_index, 0, limit - 1)
         jobs: List[Job] = []
         for job_id in job_ids:
