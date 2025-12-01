@@ -56,12 +56,10 @@ A Python-based watcher monitors file-system events with optional polling support
    the repository root (for example, `./media/movies`), while absolute paths
    work for mounted drives such as `/mnt/storage/Movies` or `D:\\Media\\Movies`
    on Windows.
-3. To preconfigure profiles before first boot, copy
-   `config/settings.yaml.template` to `config/settings.yaml` and adjust library
-   profiles or operational limits. On startup, the orchestrator will import an
-   existing `settings.yaml` (or fall back to the template) into a SQLite config
-   store at `./logs/config.db`, validate it, and ignore the YAML files after the
-   initial seed.
+3. Configuration now seeds directly from the built-in defaults in
+   `services/orchestrator/app/config.py` (single `chromecast` profile with GPU
+   primary and CPU fallback). The orchestrator persists everything to
+   `./logs/config.db` on first boot—no YAML copies or templates are needed.
 4. Run `docker compose build` to create the orchestrator, watcher, and
    `gpu-ffmpeg` images locally.
 5. Start the stack with `docker compose up`. The orchestrator mounts
@@ -92,11 +90,12 @@ A Python-based watcher monitors file-system events with optional polling support
   buffering, retry backoff, and spooling for offline resilience. Supports
   `WATCH_POLLING=true` for reliable change detection on Docker Desktop/WSL2 bind mounts.
 - **Encoding profiles** – Centralized in a SQLite config store seeded from
-  `config/settings.yaml.template` (or an existing `settings.yaml`) and editable
-  via `/api/config/encoding`. Profiles target Chromecast Gen 2/3 constraints
-  (H.264 High, level 4.1, 720p, capped bitrate) with AAC stereo audio and
-  dropdowns for NVENC presets, CQ targets, and a 30 fps ceiling that keeps
-  every audio track mapped as stereo AAC.
+  built-in defaults (single `chromecast` profile that pairs GPU settings with a
+  CPU fallback). Editable via `/api/config/encoding` with Chromecast-safe
+  constraints (H.264 High, <=1080p, AAC stereo). The dashboard now exposes a
+  dedicated CPU fallback section so x264 preset, CRF/VBR/CBR selection, and
+  fallback bitrates can diverge from the NVENC values while keeping audio locked
+  to AAC stereo.
 - **Verification hooks** – After startup, the orchestrator scans configured
   libraries and preloads jobs for anything not already compliant. On success,
   progress is reflected in the dashboard and metrics endpoint.

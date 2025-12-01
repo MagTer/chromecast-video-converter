@@ -24,7 +24,7 @@ from .dependencies import (
     job_manager,
 )
 from .logs import SQLiteLogHandler, StructuredLogFilter
-from .profiles import LibraryData, ProfileData
+from .profiles import HardwareProfileData, LibraryData, ProfileData
 from .routers import (
     config as config_router,
 )
@@ -74,30 +74,61 @@ LOGGER = logging.getLogger("orchestrator")
 def seed_profiles_and_libraries(snapshot: config_module.ConfigSnapshot) -> None:
     name_to_id: Dict[str, int] = {}
     for name, profile in snapshot.config.profiles.items():
+        gpu = profile.gpu
+        cpu = profile.cpu
         record = PROFILE_STORE.upsert(
             ProfileData(
                 name=name,
-                codec=profile.codec,
-                profile_tier=profile.profile,
-                max_resolution=profile.resolution,
-                bitrate=profile.bitrate,
-                max_bitrate=profile.max_bitrate,
-                bufsize=profile.bufsize,
-                preset=profile.preset,
-                cq=profile.cq,
-                rc=profile.rc,
-                level=profile.level,
-                max_fps=profile.max_fps,
-                bframes=profile.bframes,
-                lookahead=profile.lookahead,
-                adaptive_b_frames=profile.adaptive_b_frames,
-                aq=profile.aq,
-                spatial_aq=profile.spatial_aq,
-                temporal_aq=profile.temporal_aq,
-                aq_strength=getattr(profile, "aq_strength", 7),
-                audio_codec=profile.audio.codec,
-                audio_bitrate=profile.audio.bitrate,
-                audio_channels=profile.audio.channels,
+                gpu=HardwareProfileData(
+                    mode="gpu",
+                    codec=gpu.codec,
+                    profile=gpu.profile,
+                    level=gpu.level,
+                    resolution=gpu.resolution,
+                    max_fps=gpu.max_fps,
+                    bitrate=gpu.bitrate,
+                    max_bitrate=gpu.max_bitrate,
+                    bufsize=gpu.bufsize,
+                    preset=gpu.preset,
+                    cq=gpu.cq,
+                    rc=gpu.rc,
+                    bframes=gpu.bframes,
+                    lookahead=gpu.lookahead,
+                    adaptive_b_frames=gpu.adaptive_b_frames,
+                    aq=gpu.aq,
+                    spatial_aq=gpu.spatial_aq,
+                    temporal_aq=gpu.temporal_aq,
+                    aq_strength=getattr(gpu, "aq_strength", 7),
+                    audio_codec=gpu.audio.codec,
+                    audio_bitrate=gpu.audio.bitrate,
+                    audio_channels=gpu.audio.channels,
+                    allow_tonemap=getattr(gpu, "allow_tonemap", True),
+                ),
+                cpu=HardwareProfileData(
+                    mode="cpu",
+                    codec=cpu.codec,
+                    profile=cpu.profile,
+                    level=cpu.level,
+                    resolution=cpu.resolution,
+                    max_fps=cpu.max_fps,
+                    bitrate=cpu.bitrate,
+                    max_bitrate=cpu.max_bitrate,
+                    bufsize=cpu.bufsize,
+                    preset=cpu.preset,
+                    cq=cpu.cq,
+                    rc=cpu.rc,
+                    bframes=cpu.bframes,
+                    lookahead=cpu.lookahead,
+                    adaptive_b_frames=cpu.adaptive_b_frames,
+                    aq=cpu.aq,
+                    spatial_aq=cpu.spatial_aq,
+                    temporal_aq=cpu.temporal_aq,
+                    aq_strength=getattr(cpu, "aq_strength", 7),
+                    audio_codec=cpu.audio.codec,
+                    audio_bitrate=cpu.audio.bitrate,
+                    audio_channels=cpu.audio.channels,
+                    allow_tonemap=getattr(cpu, "allow_tonemap", True),
+                ),
             )
         )
         name_to_id[name] = record.id

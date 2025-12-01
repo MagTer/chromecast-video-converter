@@ -7,9 +7,8 @@ from typing import Iterable
 
 LOGGER = logging.getLogger("gpu-ffmpeg.builder")
 
-SCALING_EXPRESSION = "scale_cuda=-2:720:force_original_aspect_ratio=decrease"
-HW_MAP_FILTER = "hwmap=derive_device=cuda"
 DEFAULT_LANGUAGE_PREFERENCES = ("swe", "eng")
+HW_MAP_FILTER = "hwmap=derive_device=cuda"
 
 
 @dataclass
@@ -213,14 +212,35 @@ class FFmpegBuilder:
         return code
 
     # --------------- Profile helpers --------------- #
-    def _resolve_profile(self) -> TranscodeProfile:
+    def _resolve_profile(self) -> tuple[TranscodeProfile, dict]:
         profile_id = self.analysis.get("profile")
-        raw_profile = self.analysis.get("encoding") or self.profiles.get(profile_id, {})
+        encoding = self.analysis.get("encoding") or self.profiles.get(profile_id, {})
+        pipeline = (
+            self.analysis.get("pipeline")
+            or (encoding.get("pipeline") if isinstance(encoding, dict) else {})
+            or {}
+        )
+        encode_type = (pipeline.get("encode_type") or "gpu").lower()
+        profile_key = "cpu" if encode_type == "cpu" else "gpu"
+        raw_profile: dict = {}
+        if isinstance(encoding, dict):
+            raw_profile = encoding.get(profile_key) or encoding.get("gpu") or encoding
         try:
-            return TranscodeProfile.from_dict(raw_profile, name=str(profile_id))
+            profile = TranscodeProfile.from_dict(raw_profile, name=str(profile_id))
         except ValueError as exc:
             LOGGER.warning("Profile %s invalid (%s); using defaults", profile_id, exc)
-            return TranscodeProfile.from_dict({}, name=str(profile_id))
+            profile = TranscodeProfile.from_dict({}, name=str(profile_id))
+
+        if not pipeline:
+            pipeline = {
+                "decode_type": "gpu",
+                "scale_type": "gpu",
+                "encode_type": encode_type,
+                "allow_tonemap": getattr(profile, "allow_tonemap", True),
+            }
+        if "allow_tonemap" not in pipeline:
+            pipeline["allow_tonemap"] = getattr(profile, "allow_tonemap", True)
+        return profile, pipeline
 
     # --------------- Stream parsing --------------- #
     def _parse_streams(
@@ -382,23 +402,6 @@ class FFmpegBuilder:
         return flags
 
     # --------------- Filter helpers --------------- #
-    def _scaling_expression(self, profile: TranscodeProfile, cuda: bool = True) -> str:
-        resolution = profile.max_resolution or profile.resolution
-        target_height = 720
-        if resolution:
-            try:
-                _, height_str = resolution.lower().split("x", 1)
-                height = int(height_str)
-                if height > 0:
-                    target_height = height
-            except (ValueError, AttributeError):
-                LOGGER.debug("Invalid resolution %s; falling back to default scale", resolution)
-        if cuda:
-            return (
-                "scale_cuda=" f"-2:{target_height}:force_original_aspect_ratio=decrease:format=nv12"
-            )
-        return f"scale=-2:{target_height}:force_original_aspect_ratio=decrease"
-
     def _fps_filter_config(self, source_fps: float | None, max_fps: int) -> tuple[float, bool]:
         if source_fps and source_fps > 0:
             if source_fps > max_fps + 0.01:
@@ -406,65 +409,106 @@ class FFmpegBuilder:
             return float(source_fps), False
         return float(max_fps), True
 
-    def _build_filter_chain(
-        self, profile: TranscodeProfile, video_stream: VideoStreamInfo | None
+    def _build_filter_chain(  # noqa: C901
+        self,
+        profile: TranscodeProfile,
+        video_stream: VideoStreamInfo | None,
+        pipeline: dict,
+        subtitles_present: bool,
     ) -> tuple[str, bool]:
+        decode_type = (pipeline.get("decode_type") or "gpu").lower()
+        scale_type = (pipeline.get("scale_type") or "gpu").lower()
+        encode_type = (pipeline.get("encode_type") or "gpu").lower()
+        allow_tonemap = pipeline.get("allow_tonemap")
+        if allow_tonemap is None:
+            allow_tonemap = profile.allow_tonemap
+
         source_fps = video_stream.frame_rate() if video_stream else None
         fps_value, needs_filter = self._fps_filter_config(source_fps, profile.max_fps)
         fps_fragment = f"fps={self._format_fps_value(fps_value)}" if needs_filter else ""
-        needs_tonemap = False
-        if video_stream and video_stream.is_hdr():
-            needs_tonemap = True
-            LOGGER.warning(
-                "HDR stream detected (pix_fmt=%s, transfer=%s); tonemapping to SDR",
-                video_stream.pix_fmt,
-                video_stream.color_transfer,
-                extra={
-                    "event": "tonemap",
-                    "pix_fmt": video_stream.pix_fmt,
-                    "color_transfer": video_stream.color_transfer,
-                },
-            )
 
-        filters: list[str] = [
-            HW_MAP_FILTER,
-            self._scaling_expression(profile, cuda=True),
-        ]
+        is_high_bit_depth = bool(video_stream and (video_stream.bit_depth() or 8) > 8)
+        supports_tonemap_cuda = self.filter_capabilities.get("tonemap_cuda", True)
+        supports_scale_cuda = self.filter_capabilities.get("scale_cuda", True)
+        supports_scale_npp = self.filter_capabilities.get("scale_npp", False)
+        supports_hwupload = self.filter_capabilities.get("hwupload_cuda", True)
 
-        if needs_tonemap and profile.allow_tonemap:
-            if not self.filter_capabilities.get("tonemap_cuda", True):
-                raise RuntimeError(
-                    "HDR detected but tonemap_cuda filter unavailable in ffmpeg build"
-                )
-            filters.append("tonemap_cuda=t=bt709:format=nv12")
-            if needs_filter:
+        resolution_hint = profile.max_resolution or profile.resolution
+        target_height = resolution_hint.split("x")[1] if isinstance(resolution_hint, str) else "720"
+
+        can_gpu_hdr = (
+            is_high_bit_depth
+            and allow_tonemap
+            and encode_type == "gpu"
+            and decode_type == "gpu"
+            and scale_type == "gpu"
+            and not subtitles_present
+            and supports_tonemap_cuda
+        )
+
+        force_cpu_path = (
+            subtitles_present
+            or decode_type != encode_type
+            or scale_type != encode_type
+            or (is_high_bit_depth and not can_gpu_hdr)
+        )
+
+        if encode_type == "gpu" and not supports_hwupload:
+            force_cpu_path = True
+        if encode_type == "gpu" and not (supports_scale_cuda or supports_scale_npp):
+            force_cpu_path = True
+
+        filters: list[str] = []
+
+        if force_cpu_path:
+            if decode_type == "gpu":
+                filters.append("hwdownload")
+                if is_high_bit_depth:
+                    filters.append("format=p010le")
+                else:
+                    filters.append("format=yuv420p")
+            if video_stream and video_stream.is_hdr() and allow_tonemap:
                 filters.extend(
                     [
-                        "hwdownload",
-                        "format=nv12",
-                        fps_fragment,
-                        "hwupload_cuda",
+                        "zscale=t=linear:npl=100",
+                        "tonemap=hable:desat=0",
+                        "zscale=p=bt709:t=bt709:m=bt709:r=tv",
                     ]
                 )
-            filter_chain = ",".join(filters)
-            LOGGER.debug(
-                "Video filter chain constructed: %s",
-                filter_chain,
-                extra={"event": "filter_chain", "filters": filters},
-            )
-            return filter_chain, needs_filter
+                needs_filter = True
 
-        if needs_filter:
-            filters.extend(
-                [
-                    "hwdownload",
-                    "format=nv12",
-                    fps_fragment,
-                    "hwupload_cuda",
-                ]
-            )
-        # When no FPS adjustment is needed we keep the frames on the GPU,
-        # so there's no separate format conversion filter to append.
+            filters.append(f"scale=-2:{target_height}:force_original_aspect_ratio=decrease")
+            if fps_fragment:
+                filters.append(fps_fragment)
+            if encode_type == "gpu":
+                filters.append("format=nv12")
+                if supports_hwupload:
+                    filters.append("hwupload_cuda")
+                    if supports_scale_npp:
+                        filters.append("scale_npp=w=iw:h=ih:format=nv12")
+                        filters.append("format=nv12")
+                    elif supports_scale_cuda:
+                        filters.append("scale_cuda=iw:ih")
+                        filters.append("format=nv12")
+                else:
+                    filters.append("format=nv12")
+            else:
+                filters.append("format=yuv420p")
+        else:
+            filters.append(HW_MAP_FILTER)
+            if can_gpu_hdr:
+                filters.append("tonemap_cuda")
+            if supports_scale_npp:
+                filters.append(
+                    f"scale_npp=w=-2:h={target_height}:format=nv12:force_original_aspect_ratio=decrease"
+                )
+            else:
+                filters.append(
+                    f"scale_cuda=-2:{target_height}:force_original_aspect_ratio=decrease"
+                )
+            if fps_fragment:
+                filters.append(fps_fragment)
+            filters.extend(["hwupload_cuda", "format=nv12"])
 
         filter_chain = ",".join(filters)
         LOGGER.debug(
@@ -472,7 +516,7 @@ class FFmpegBuilder:
             filter_chain,
             extra={"event": "filter_chain", "filters": filters},
         )
-        return filter_chain, needs_filter
+        return filter_chain, needs_filter or bool(filters)
 
     # --------------- Misc helpers --------------- #
     def _format_fps_value(self, fps: float) -> str:
@@ -480,33 +524,38 @@ class FFmpegBuilder:
             return str(int(fps))
         return f"{fps:.3f}".rstrip("0").rstrip(".")
 
-    def _ffmpeg_base_command(self) -> list[str]:
-        return [
-            "ffmpeg",
-            "-y",
-            "-hwaccel",
-            "cuda",
-            "-hwaccel_output_format",
-            "cuda",
-            "-i",
-            str(self.input_path),
-        ]
+    def _ffmpeg_base_command(self, decode_type: str) -> list[str]:
+        command = ["ffmpeg", "-y"]
+        if decode_type == "gpu":
+            command.extend(
+                [
+                    "-hwaccel",
+                    "cuda",
+                    "-hwaccel_output_format",
+                    "cuda",
+                ]
+            )
+        command.extend(["-i", str(self.input_path)])
+        return command
 
     # --------------- Build --------------- #
     def build(self) -> list[str]:  # noqa: C901
-        profile = self._resolve_profile()
+        profile, pipeline = self._resolve_profile()
+        decode_type = (pipeline.get("decode_type") or "gpu").lower()
+        encode_type = (pipeline.get("encode_type") or "gpu").lower()
 
         streams = self.analysis.get("streams", []) or []
         video_streams, audio_streams, subtitle_streams = self._parse_streams(streams)
         video_stream = video_streams[0] if video_streams else None
 
-        if video_stream and video_stream.is_hdr() and not profile.allow_tonemap:
+        allow_tonemap = pipeline.get("allow_tonemap", profile.allow_tonemap)
+        if video_stream and video_stream.is_hdr() and not allow_tonemap:
             raise RuntimeError("HDR content detected but tonemapping is disabled in profile")
 
         selected_audio, default_audio_idx = self._select_priority_streams(audio_streams)
         selected_subtitles, default_sub_idx = self._select_priority_streams(subtitle_streams)
 
-        command: list[str] = self._ffmpeg_base_command()
+        command: list[str] = self._ffmpeg_base_command(decode_type)
         if video_streams:
             command.extend(["-map", "0:v"])
         for audio_stream in selected_audio:
@@ -519,94 +568,124 @@ class FFmpegBuilder:
             selected_subtitles, default_sub_idx, "s"
         )
 
-        video_filter, needs_filter = self._build_filter_chain(profile, video_stream)
-
-        command.extend(
-            [
-                "-vf",
-                video_filter,
-                "-c:v",
-                "h264_nvenc",
-                "-preset",
-                profile.preset,
-                "-profile:v",
-                profile.h264_profile,
-                "-level",
-                profile.level,
-            ]
+        subtitles_present = bool(selected_subtitles)
+        video_filter, _needs_filter = self._build_filter_chain(
+            profile, video_stream, pipeline, subtitles_present
         )
-        command.extend(["-pix_fmt", "nv12"])
-        # FPS limiting handled inside filter graph; no separate -r flag.
 
-        rc_mode = profile.rc_mode
-        if rc_mode == "cbr":
-            rc_mode = "vbr"
+        command.extend(["-vf", video_filter])
+
         h264_profile_lower = profile.h264_profile.lower()
-        bframes = profile.bframes
-        if h264_profile_lower == "baseline":
-            bframes = 0
-        lookahead = profile.lookahead
-        adaptive_b_frames = profile.adaptive_b_frames and lookahead > 0 and bframes > 0
-        if h264_profile_lower == "baseline":
-            adaptive_b_frames = False
-        aq_enabled = profile.aq_enabled
-        spatial_aq = aq_enabled and profile.spatial_aq
-        temporal_aq = aq_enabled and profile.temporal_aq
-        aq_strength = max(1, min(15, profile.aq_strength))
-        multipass_mode: str | None = None
-        if rc_mode == "vbr_hq":
-            multipass_mode = "fullres"
+        bframes = profile.bframes if h264_profile_lower != "baseline" else 0
 
-        if rc_mode == "vbr_hq" and not self.nvenc_capabilities.get("rc_vbr_hq", True):
-            LOGGER.warning(
-                "Requested rc mode vbr_hq is unavailable; falling back to vbr (WSL2=%s)",
-                self.host_environment.get("is_wsl2"),
+        if encode_type == "gpu":
+            command.extend(
+                [
+                    "-c:v",
+                    "h264_nvenc",
+                    "-preset",
+                    profile.preset,
+                    "-profile:v",
+                    profile.h264_profile,
+                    "-level",
+                    profile.level,
+                ]
             )
-            rc_mode = "vbr"
-            multipass_mode = None
+            command.extend(["-pix_fmt", "nv12"])
+            rc_mode = profile.rc_mode
+            if rc_mode == "cbr":
+                rc_mode = "vbr"
+            lookahead = profile.lookahead
+            adaptive_b_frames = profile.adaptive_b_frames and lookahead > 0 and bframes > 0
+            if h264_profile_lower == "baseline":
+                adaptive_b_frames = False
+            aq_enabled = profile.aq_enabled
+            spatial_aq = aq_enabled and profile.spatial_aq
+            temporal_aq = aq_enabled and profile.temporal_aq
+            aq_strength = max(1, min(15, profile.aq_strength))
+            multipass_mode: str | None = None
+            if rc_mode == "vbr_hq":
+                multipass_mode = "fullres"
 
-        if multipass_mode and not self.nvenc_capabilities.get("multipass_fullres", True):
-            LOGGER.warning(
-                "NVENC multipass fullres mode is unavailable; continuing without multipass",
+            if rc_mode == "vbr_hq" and not self.nvenc_capabilities.get("rc_vbr_hq", True):
+                LOGGER.warning(
+                    "Requested rc mode vbr_hq is unavailable; falling back to vbr (WSL2=%s)",
+                    self.host_environment.get("is_wsl2"),
+                )
+                rc_mode = "vbr"
+                multipass_mode = None
+
+            if multipass_mode and not self.nvenc_capabilities.get("multipass_fullres", True):
+                LOGGER.warning(
+                    "NVENC multipass fullres mode is unavailable; continuing without multipass",
+                )
+                multipass_mode = None
+
+            if rc_mode == "cq":
+                command.extend(["-rc", "constqp", "-qp", profile.cq])
+            else:
+                command.extend(
+                    [
+                        "-rc",
+                        rc_mode,
+                        "-b:v",
+                        profile.bitrate,
+                        "-maxrate",
+                        profile.max_bitrate,
+                        "-bufsize",
+                        profile.bufsize,
+                    ]
+                )
+                if multipass_mode:
+                    command.extend(["-multipass", multipass_mode])
+
+            command.extend(["-bf", str(bframes)])
+
+            if lookahead > 0:
+                command.extend(["-rc-lookahead", str(lookahead)])
+            else:
+                command.extend(["-rc-lookahead", "0"])
+
+            command.extend(["-b_adapt", "1" if adaptive_b_frames else "0"])
+            command.extend(
+                [
+                    "-spatial_aq",
+                    "1" if spatial_aq else "0",
+                    "-temporal_aq",
+                    "1" if temporal_aq else "0",
+                ]
             )
-            multipass_mode = None
-
-        if rc_mode == "cq":
-            command.extend(["-rc", "constqp", "-qp", profile.cq])
+            if aq_enabled:
+                command.extend(["-aq-strength", str(aq_strength)])
         else:
             command.extend(
                 [
-                    "-rc",
-                    rc_mode,
-                    "-b:v",
-                    profile.bitrate,
-                    "-maxrate",
-                    profile.max_bitrate,
-                    "-bufsize",
-                    profile.bufsize,
+                    "-c:v",
+                    "libx264",
+                    "-preset",
+                    profile.preset,
+                    "-profile:v",
+                    profile.h264_profile,
+                    "-level",
+                    profile.level,
+                    "-pix_fmt",
+                    "yuv420p",
                 ]
             )
-            if multipass_mode:
-                command.extend(["-multipass", multipass_mode])
-
-        command.extend(["-bf", str(bframes)])
-
-        if lookahead > 0:
-            command.extend(["-rc-lookahead", str(lookahead)])
-        else:
-            command.extend(["-rc-lookahead", "0"])
-
-        command.extend(["-b_adapt", "1" if adaptive_b_frames else "0"])
-        command.extend(
-            [
-                "-spatial_aq",
-                "1" if spatial_aq else "0",
-                "-temporal_aq",
-                "1" if temporal_aq else "0",
-            ]
-        )
-        if aq_enabled:
-            command.extend(["-aq-strength", str(aq_strength)])
+            if profile.rc_mode == "crf":
+                command.extend(["-crf", str(profile.cq)])
+            else:
+                command.extend(
+                    [
+                        "-b:v",
+                        profile.bitrate,
+                        "-maxrate",
+                        profile.max_bitrate,
+                        "-bufsize",
+                        profile.bufsize,
+                    ]
+                )
+            command.extend(["-bf", str(bframes)])
         command.extend(["-movflags", "+faststart"])
 
         if selected_audio:

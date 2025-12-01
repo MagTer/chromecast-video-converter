@@ -1,4 +1,5 @@
 import logging
+import re
 from functools import wraps
 
 from fastapi import APIRouter, HTTPException
@@ -19,6 +20,34 @@ from ..services.core import (
 
 LOGGER = logging.getLogger("orchestrator.jobs")
 router = APIRouter()
+NON_RETRYABLE_CATEGORIES = {"unsupported_bit_depth", "unsupported_pixel_format", "corrupt_input"}
+
+
+def classify_ffmpeg_error(logs: list[str], return_code: int) -> dict[str, str | bool | int]:
+    patterns = [
+        (r"10[- ]?bit|yuv420p10", "unsupported_bit_depth", False),
+        (r"pix_fmt [^ ]+ is not supported", "unsupported_pixel_format", False),
+        (r"device busy|resource temporarily unavailable", "device_busy", True),
+        (r"nvenc.+not available|no capable devices", "nvenc_unavailable", True),
+        (r"Invalid data found when processing input", "corrupt_input", False),
+        (r"moov atom not found", "incomplete_file", True),
+        (r"No such filter: 'tonemap_cuda'", "unsupported_filter", False),
+    ]
+    tail = "\n".join(logs[-5:]) if logs else ""
+    for pattern, category, retryable in patterns:
+        if re.search(pattern, tail, re.IGNORECASE):
+            return {
+                "category": category,
+                "retryable": retryable,
+                "message": tail.splitlines()[-1] if tail else "",
+                "return_code": return_code,
+            }
+    return {
+        "category": "unknown",
+        "retryable": False,
+        "message": logs[-1] if logs else "",
+        "return_code": return_code,
+    }
 
 
 def guard_job_queue_errors(func):
@@ -73,13 +102,37 @@ async def update_job_status(job_id: str, payload: JobStatusPayload) -> JSONRespo
         job = await job_manager.update_job(job_id, jobs.JobStatusUpdate(**payload.model_dump()))
     except KeyError:
         raise HTTPException(status_code=404, detail="Job not found")
-    completed = payload.status in {jobs.JobStatus.COMPLETED, jobs.JobStatus.FAILED}
+    if payload.status == jobs.JobStatus.FAILED:
+        classification = classify_ffmpeg_error(payload.logs or [], payload.return_code or -1)
+        retry_pipeline = None
+        if (
+            job.attempt < job.max_attempts
+            and classification.get("category") not in NON_RETRYABLE_CATEGORIES
+        ):
+            retry_pipeline = jobs.pipeline_for_attempt(
+                job.attempt + 1, max_attempts=job.max_attempts
+            )
+        if retry_pipeline:
+            retry_message = (
+                f"Retry {job.attempt + 1}/{job.max_attempts}: "
+                f"{retry_pipeline.get('decode_type', 'cpu').upper()} decode / "
+                f"{retry_pipeline.get('scale_type', 'cpu').upper()} scale / "
+                f"{retry_pipeline.get('encode_type', 'cpu').upper()} encode"
+            )
+            job = await job_manager.schedule_retry(job, retry_pipeline, message=retry_message)
+            sync_entry_from_job(job, LibraryStatus.PENDING, retry_message)
+            record_job_history(job, JobHistoryStatus.RUNNING, retry_message, completed=False)
+            return JSONResponse(jsonable_encoder(job_to_response(job)))
+        failure_message = payload.message or classification.get("message")
+        sync_entry_from_job(job, LibraryStatus.FAILED, failure_message)
+        record_job_history(job, payload.status, failure_message, completed=True)
+        return JSONResponse(jsonable_encoder(job_to_response(job)))
+
+    completed = payload.status == jobs.JobStatus.COMPLETED
     if payload.status == jobs.JobStatus.RUNNING:
         sync_entry_from_job(job, LibraryStatus.CONVERTING, payload.message)
     elif payload.status == jobs.JobStatus.COMPLETED:
         sync_entry_from_job(job, LibraryStatus.CONVERTED, payload.message)
-    elif payload.status == jobs.JobStatus.FAILED:
-        sync_entry_from_job(job, LibraryStatus.FAILED, payload.message)
     record_job_history(job, payload.status, payload.message, completed=completed)
     return JSONResponse(jsonable_encoder(job_to_response(job)))
 

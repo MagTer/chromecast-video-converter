@@ -70,6 +70,7 @@
               <th>Elapsed</th>
               <th>File</th>
               <th>Profile</th>
+              <th>Pipeline</th>
               <th>Progress</th>
             </tr>
           </thead>
@@ -97,6 +98,7 @@
               <th>Finished</th>
               <th>File</th>
               <th>Profile</th>
+              <th>Pipeline</th>
               <th>Details</th>
             </tr>
           </thead>
@@ -139,6 +141,7 @@
             <input id="log-query" placeholder="Path, job id, or message text" />
           </label>
           <button id="refresh-logs" type="button">Filter</button>
+          <button id="copy-logs" type="button" class="secondary">Copy all</button>
         </div>
       </header>
       <div class="panel">
@@ -196,6 +199,7 @@
               <th>Library</th>
               <th>Path</th>
               <th>Profile</th>
+              <th>Encoding</th>
               <th>Updated</th>
               <th>Actions</th>
             </tr>
@@ -217,7 +221,6 @@
           <p class="subtitle">Values are constrained to Chromecast Gen 2 capabilities.</p>
         </div>
         <div style="display:flex; gap:0.5rem; align-items:center;">
-          <button id="export-config" type="button" class="secondary">Export YAML</button>
           <button id="reset-config" type="button" class="secondary danger">Reset to Defaults</button>
         </div>
       </header>
@@ -247,7 +250,7 @@
                 <option value="vbr_hq">VBR HQ (2-pass, CUDA only)</option>
               </select>
             </label>
-            <label data-rc-field="cq">
+            <label data-rc-group="gpu" data-rc-field="cq">
               Constant quality (CQ)
               <select id="profile-cq">
                 <option value="16">16</option>
@@ -259,7 +262,7 @@
                 <option value="28">28</option>
               </select>
             </label>
-            <label data-rc-field="bitrate">
+            <label data-rc-group="gpu" data-rc-field="bitrate">
               Bitrate (target)
               <select id="profile-bitrate">
                 <option value="4M">4M</option>
@@ -269,7 +272,7 @@
                 <option value="10M">10M</option>
               </select>
             </label>
-            <label data-rc-field="maxrate">
+            <label data-rc-group="gpu" data-rc-field="maxrate">
               Max bitrate (<=12M)
               <select id="profile-maxrate">
                 <option value="6M">6M</option>
@@ -278,7 +281,7 @@
                 <option value="12M">12M</option>
               </select>
             </label>
-            <label data-rc-field="bufsize">
+            <label data-rc-group="gpu" data-rc-field="bufsize">
               Buffer size (<=24M)
               <select id="profile-bufsize">
                 <option value="12M">12M</option>
@@ -473,11 +476,168 @@
               </select>
             </label>
           </div>
+          <div style="margin-top:1.5rem; padding-top:1.25rem; border-top:1px solid var(--border-color, #e5e7eb);">
+            <div style="margin-bottom:0.75rem;">
+              <h4 style="margin:0">CPU fallback (libx264)</h4>
+              <p class="hint" style="margin:0">Used automatically when NVENC is unavailable or fails.</p>
+            </div>
+            <div class="grid-two">
+              <label>
+                <div class="label-title">
+                  Rate control
+                  <span
+                    class="info-icon"
+                    title="CRF targets quality, while VBR/CBR follow bitrate caps for CPU fallback jobs."
+                    aria-label="CPU rate control help"
+                  >ⓘ</span>
+                </div>
+                <select id="cpu-profile-rc">
+                  <option value="crf" selected>CRF (quality first)</option>
+                  <option value="vbr">VBR</option>
+                  <option value="cbr">CBR</option>
+                </select>
+              </label>
+              <label data-rc-group="cpu" data-rc-field="crf">
+                CPU quality (CRF)
+                <select id="cpu-profile-cq">
+                  <option value="18">18</option>
+                  <option value="20" selected>20</option>
+                  <option value="22">22</option>
+                  <option value="24">24</option>
+                  <option value="26">26</option>
+                  <option value="28">28</option>
+                  <option value="30">30</option>
+                </select>
+              </label>
+              <label data-rc-group="cpu" data-rc-field="bitrate">
+                Bitrate (target)
+                <select id="cpu-profile-bitrate">
+                  <option value="4M">4M</option>
+                  <option value="5M" selected>5M</option>
+                  <option value="6M">6M</option>
+                  <option value="8M">8M</option>
+                </select>
+              </label>
+              <label data-rc-group="cpu" data-rc-field="maxrate">
+                Max bitrate (<=12M)
+                <select id="cpu-profile-maxrate">
+                  <option value="6M">6M</option>
+                  <option value="8M" selected>8M</option>
+                  <option value="10M">10M</option>
+                  <option value="12M">12M</option>
+                </select>
+              </label>
+              <label data-rc-group="cpu" data-rc-field="bufsize">
+                Buffer size (<=24M)
+                <select id="cpu-profile-bufsize">
+                  <option value="12M">12M</option>
+                  <option value="16M" selected>16M</option>
+                  <option value="20M">20M</option>
+                  <option value="24M">24M</option>
+                </select>
+              </label>
+              <label>
+                <div class="label-title">
+                  x264 preset (CPU-only)
+                  <span
+                    class="info-icon"
+                    title="Fast presets reduce quality but keep fallback transcodes short."
+                    aria-label="CPU preset help"
+                  >ⓘ</span>
+                </div>
+                <select id="cpu-profile-preset">
+                  <option value="ultrafast">ultrafast</option>
+                  <option value="superfast">superfast</option>
+                  <option value="veryfast">veryfast</option>
+                  <option value="faster">faster</option>
+                  <option value="fast">fast</option>
+                  <option value="medium">medium</option>
+                  <option value="slow" selected>slow</option>
+                  <option value="slower">slower</option>
+                  <option value="veryslow">veryslow</option>
+                </select>
+              </label>
+              <label>
+                H.264 profile
+                <select id="cpu-profile-tier">
+                  <option value="baseline">Baseline</option>
+                  <option value="main">Main</option>
+                  <option value="high" selected>High</option>
+                </select>
+              </label>
+              <label>
+                Level
+                <select id="cpu-profile-level">
+                  <option value="3.1">3.1</option>
+                  <option value="4.0">4.0</option>
+                  <option value="4.1">4.1</option>
+                  <option value="4.2">4.2</option>
+                </select>
+              </label>
+              <label>
+                Resolution
+                <select id="cpu-profile-resolution">
+                  <option value="1280x720" selected>1280x720</option>
+                  <option value="1920x1080">1920x1080</option>
+                </select>
+              </label>
+              <label>
+                Max FPS
+                <select id="cpu-profile-maxfps">
+                  <option value="24">24</option>
+                  <option value="30" selected>30</option>
+                  <option value="60">60</option>
+                </select>
+              </label>
+              <label>
+                B-frames (0–3)
+                <select id="cpu-profile-bframes">
+                  <option value="0">0</option>
+                  <option value="1">1</option>
+                  <option value="2" selected>2</option>
+                  <option value="3">3</option>
+                </select>
+              </label>
+              <label>
+                Lookahead (0–32)
+                <div class="slider-row">
+                  <input id="cpu-profile-lookahead" type="range" min="0" max="32" value="0" />
+                  <span id="cpu-lookahead-value" class="hint">0</span>
+                </div>
+              </label>
+              <label>
+                Adaptive B-frames
+                <select id="cpu-profile-adaptive-bframes">
+                  <option value="0" selected>Off</option>
+                  <option value="1">On</option>
+                </select>
+              </label>
+              <label>
+                Audio bitrate (AAC stereo)
+                <select id="cpu-profile-audio-bitrate">
+                  <option value="160k">160k</option>
+                  <option value="192k" selected>192k</option>
+                  <option value="224k">224k</option>
+                  <option value="256k">256k</option>
+                </select>
+              </label>
+            </div>
+          </div>
           <div style="margin-top:1rem; display:flex; gap:0.5rem; align-items:center;">
             <button type="submit">Save encoding profile</button>
             <span id="config-result" class="hint"></span>
           </div>
           <pre id="ffmpeg-preview" class="ffmpeg-preview" aria-label="ffmpeg preview"></pre>
+          <div class="grid-two" style="margin-top:1rem;">
+            <div>
+              <h4 style="margin:0 0 0.25rem 0;">GPU Encoding Settings</h4>
+              <p id="gpu-summary" class="hint" style="white-space:pre-line;">Loading…</p>
+            </div>
+            <div>
+              <h4 style="margin:0 0 0.25rem 0;">CPU Fallback Settings</h4>
+              <p id="cpu-summary" class="hint" style="white-space:pre-line;">Loading…</p>
+            </div>
+          </div>
         </form>
       </div>
       <div class="panel">

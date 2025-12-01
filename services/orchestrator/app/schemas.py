@@ -30,6 +30,9 @@ class JobStatusPayload(BaseModel):
     status: str
     progress: Optional[int] = None
     message: Optional[str] = None
+    return_code: Optional[int] = None
+    logs: Optional[list] = None
+    pipeline: Optional[dict] = None
 
 
 class JobAckPayload(BaseModel):
@@ -75,6 +78,9 @@ class LibraryEntryResponse(BaseModel):
     library: str
     profile: str
     profile_id: Optional[int] = None
+    decode_type: Optional[str] = None
+    scale_type: Optional[str] = None
+    encode_type: Optional[str] = None
     status: str
     output_path: Optional[str] = None
     last_error: Optional[str] = None
@@ -88,8 +94,7 @@ class LibraryEntryResponse(BaseModel):
     )
 
 
-class EncodingUpdatePayload(BaseModel):
-    name: str = Field(description="Profile name to upsert")
+class HardwareEncodingPayload(BaseModel):
     codec: str
     profile: str
     level: str
@@ -99,7 +104,7 @@ class EncodingUpdatePayload(BaseModel):
     max_bitrate: str
     bufsize: str
     preset: str
-    cq: int = Field(ge=0, le=30)
+    cq: int = Field(ge=0, le=40)
     rc: str
     bframes: int = Field(default=2, ge=0, le=3)
     lookahead: int = Field(default=24, ge=0, le=32)
@@ -108,7 +113,14 @@ class EncodingUpdatePayload(BaseModel):
     spatial_aq: bool = Field(default=True)
     temporal_aq: bool = Field(default=True)
     aq_strength: int = Field(default=7, ge=5, le=10)
+    allow_tonemap: bool = Field(default=True)
     audio: config_module.AudioProfile
+
+
+class EncodingUpdatePayload(BaseModel):
+    name: str = Field(description="Profile name to upsert")
+    gpu: HardwareEncodingPayload
+    cpu: HardwareEncodingPayload
 
 
 class LoggingUpdatePayload(BaseModel):

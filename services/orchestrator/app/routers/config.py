@@ -1,7 +1,6 @@
 import logging
 from typing import Dict
 
-import yaml
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import JSONResponse
 
@@ -13,7 +12,7 @@ from ..dependencies import (
     PROFILE_STORE,
     config_service,
 )
-from ..profiles import ProfileData
+from ..profiles import HardwareProfileData, ProfileData
 from ..schemas import EncodingUpdatePayload, LoggingUpdatePayload
 
 LOGGER = logging.getLogger("orchestrator.config")
@@ -29,54 +28,68 @@ def cache_headers(snapshot: config_module.ConfigSnapshot) -> Dict[str, str]:
 
 def profile_data_from_payload(
     payload: EncodingUpdatePayload,
-) -> tuple[ProfileData, config_module.Profile]:
-    validated = config_module.Profile(
-        codec=payload.codec,
-        profile=payload.profile,
-        level=payload.level,
-        resolution=payload.resolution,
-        max_fps=payload.max_fps,
-        bitrate=payload.bitrate,
-        max_bitrate=payload.max_bitrate,
-        bufsize=payload.bufsize,
-        preset=payload.preset,
-        cq=payload.cq,
-        rc=payload.rc,
-        bframes=payload.bframes,
-        lookahead=payload.lookahead,
-        adaptive_b_frames=payload.adaptive_b_frames,
-        aq=payload.aq,
-        spatial_aq=payload.spatial_aq,
-        temporal_aq=payload.temporal_aq,
-        aq_strength=payload.aq_strength,
-        audio=payload.audio,
-    )
+) -> tuple[ProfileData, config_module.ProfileSet]:
+    gpu_raw = payload.gpu.model_dump()
+    gpu_raw["mode"] = "gpu"
+    cpu_raw = payload.cpu.model_dump()
+    cpu_raw["mode"] = "cpu"
+    gpu_validated = config_module.HardwareProfile(**gpu_raw)
+    cpu_validated = config_module.HardwareProfile(**cpu_raw)
+    profile_set = config_module.ProfileSet(gpu=gpu_validated, cpu=cpu_validated)
     profile_data = ProfileData(
         name=payload.name,
-        codec=validated.codec,
-        definition="{}",
-        profile_tier=validated.profile,
-        max_resolution=validated.resolution,
-        bitrate=validated.bitrate,
-        max_bitrate=validated.max_bitrate,
-        bufsize=validated.bufsize,
-        preset=validated.preset,
-        cq=validated.cq,
-        rc=validated.rc,
-        level=validated.level,
-        max_fps=validated.max_fps,
-        bframes=validated.bframes,
-        lookahead=validated.lookahead,
-        adaptive_b_frames=validated.adaptive_b_frames,
-        aq=validated.aq,
-        spatial_aq=validated.spatial_aq,
-        temporal_aq=validated.temporal_aq,
-        aq_strength=validated.aq_strength,
-        audio_codec=validated.audio.codec,
-        audio_bitrate=validated.audio.bitrate,
-        audio_channels=validated.audio.channels,
+        gpu=HardwareProfileData(
+            mode="gpu",
+            codec=gpu_validated.codec,
+            profile=gpu_validated.profile,
+            level=gpu_validated.level,
+            resolution=gpu_validated.resolution,
+            max_fps=gpu_validated.max_fps,
+            bitrate=gpu_validated.bitrate,
+            max_bitrate=gpu_validated.max_bitrate,
+            bufsize=gpu_validated.bufsize,
+            preset=gpu_validated.preset,
+            cq=gpu_validated.cq,
+            rc=gpu_validated.rc,
+            bframes=gpu_validated.bframes,
+            lookahead=gpu_validated.lookahead,
+            adaptive_b_frames=gpu_validated.adaptive_b_frames,
+            aq=gpu_validated.aq,
+            spatial_aq=gpu_validated.spatial_aq,
+            temporal_aq=gpu_validated.temporal_aq,
+            aq_strength=getattr(gpu_validated, "aq_strength", 7),
+            audio_codec=gpu_validated.audio.codec,
+            audio_bitrate=gpu_validated.audio.bitrate,
+            audio_channels=gpu_validated.audio.channels,
+            allow_tonemap=getattr(gpu_validated, "allow_tonemap", True),
+        ),
+        cpu=HardwareProfileData(
+            mode="cpu",
+            codec=cpu_validated.codec,
+            profile=cpu_validated.profile,
+            level=cpu_validated.level,
+            resolution=cpu_validated.resolution,
+            max_fps=cpu_validated.max_fps,
+            bitrate=cpu_validated.bitrate,
+            max_bitrate=cpu_validated.max_bitrate,
+            bufsize=cpu_validated.bufsize,
+            preset=cpu_validated.preset,
+            cq=cpu_validated.cq,
+            rc=cpu_validated.rc,
+            bframes=cpu_validated.bframes,
+            lookahead=cpu_validated.lookahead,
+            adaptive_b_frames=cpu_validated.adaptive_b_frames,
+            aq=cpu_validated.aq,
+            spatial_aq=cpu_validated.spatial_aq,
+            temporal_aq=cpu_validated.temporal_aq,
+            aq_strength=getattr(cpu_validated, "aq_strength", 7),
+            audio_codec=cpu_validated.audio.codec,
+            audio_bitrate=cpu_validated.audio.bitrate,
+            audio_channels=cpu_validated.audio.channels,
+            allow_tonemap=getattr(cpu_validated, "allow_tonemap", True),
+        ),
     )
-    return profile_data, validated
+    return profile_data, profile_set
 
 
 @router.get("/api/config")
@@ -183,16 +196,6 @@ async def update_logging(payload: LoggingUpdatePayload) -> JSONResponse:
         },
         headers=cache_headers(snapshot),
     )
-
-
-@router.get("/api/config/yaml")
-async def export_config_yaml() -> JSONResponse:
-    """Export the current configuration as YAML."""
-    snapshot = config_service.snapshot
-    # We dump the current configuration model to a dict, then to YAML string
-    config_dict = snapshot.config.model_dump()
-    yaml_str = yaml.dump(config_dict, sort_keys=False)
-    return JSONResponse({"yaml": yaml_str})
 
 
 @router.post("/api/config/reset")

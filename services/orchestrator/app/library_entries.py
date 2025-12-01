@@ -32,6 +32,9 @@ class LibraryEntry(Base):
     library = Column(String, nullable=False)
     profile = Column(String, nullable=False)
     profile_id = Column(Integer, ForeignKey("encoding_profiles.id"), nullable=True, index=True)
+    decode_type = Column(String, nullable=True)
+    scale_type = Column(String, nullable=True)
+    encode_type = Column(String, nullable=True)
     status = Column(String, nullable=False, default=LibraryStatus.PENDING)
     output_path = Column(String, nullable=True)
     last_error = Column(String, nullable=True)
@@ -47,6 +50,9 @@ class LibraryEntry(Base):
             "library": self.library,
             "profile": self.profile,
             "profile_id": self.profile_id,
+            "decode_type": self.decode_type,
+            "scale_type": self.scale_type,
+            "encode_type": self.encode_type,
             "status": self.status,
             "output_path": self.output_path,
             "last_error": self.last_error,
@@ -64,6 +70,9 @@ class EntryUpdate:
     profile: str
     status: str
     profile_id: Optional[int] = None
+    decode_type: Optional[str] = None
+    scale_type: Optional[str] = None
+    encode_type: Optional[str] = None
     output_path: Optional[str] = None
     last_error: Optional[str] = None
     last_job_id: Optional[str] = None
@@ -193,6 +202,9 @@ class LibraryEntryStore:
         library: Optional[str] = None,
         profile: Optional[str] = None,
         profile_id: Optional[int] = None,
+        decode_type: Optional[str] = None,
+        scale_type: Optional[str] = None,
+        encode_type: Optional[str] = None,
         message: Optional[str] = None,
         job_id: Optional[str] = None,
         output_path: Optional[str] = None,
@@ -217,6 +229,12 @@ class LibraryEntryStore:
                 entry.profile = profile
             if profile_id is not None:
                 entry.profile_id = profile_id
+            if decode_type is not None:
+                entry.decode_type = decode_type
+            if scale_type is not None:
+                entry.scale_type = scale_type
+            if encode_type is not None:
+                entry.encode_type = encode_type
             entry.output_path = output_path or entry.output_path
             entry.last_error = message if status == LibraryStatus.FAILED else None
             entry.last_job_id = job_id or entry.last_job_id

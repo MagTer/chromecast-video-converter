@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import json
 import logging
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import datetime
 from threading import RLock
 from typing import List, Optional
@@ -45,20 +46,24 @@ class EncodingProfile(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     def to_payload(self) -> dict:
-        return {
-            "id": self.id,
-            "name": self.name,
+        definition = {}
+        try:
+            definition = json.loads(self.definition or "{}")
+        except json.JSONDecodeError:
+            definition = {}
+        gpu = definition.get("gpu") or {
+            "mode": "gpu",
             "codec": self.codec,
             "profile": self.profile_tier,
-            "max_resolution": self.max_resolution,
+            "level": self.level,
+            "resolution": self.max_resolution,
+            "max_fps": self.max_fps,
             "bitrate": self.bitrate,
             "max_bitrate": self.max_bitrate,
             "bufsize": self.bufsize,
             "preset": self.preset,
-            "cq": self.cq,
             "rc": self.rc,
-            "level": self.level,
-            "max_fps": self.max_fps,
+            "cq": self.cq,
             "bframes": self.bframes,
             "lookahead": self.lookahead,
             "adaptive_b_frames": bool(self.adaptive_b_frames),
@@ -66,13 +71,40 @@ class EncodingProfile(Base):
             "spatial_aq": bool(self.spatial_aq),
             "temporal_aq": bool(self.temporal_aq),
             "aq_strength": self.aq_strength,
+            "allow_tonemap": True,
             "audio": {
                 "codec": self.audio_codec,
                 "bitrate": self.audio_bitrate,
                 "channels": self.audio_channels,
             },
+        }
+        cpu = definition.get("cpu") or gpu
+        return {
+            "id": self.id,
+            "name": self.name,
+            "gpu": gpu,
+            "cpu": cpu,
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+            "codec": gpu.get("codec"),
+            "profile": gpu.get("profile"),
+            "max_resolution": gpu.get("resolution"),
+            "bitrate": gpu.get("bitrate"),
+            "max_bitrate": gpu.get("max_bitrate"),
+            "bufsize": gpu.get("bufsize"),
+            "preset": gpu.get("preset"),
+            "cq": gpu.get("cq"),
+            "rc": gpu.get("rc"),
+            "level": gpu.get("level"),
+            "max_fps": gpu.get("max_fps"),
+            "bframes": gpu.get("bframes"),
+            "lookahead": gpu.get("lookahead"),
+            "adaptive_b_frames": gpu.get("adaptive_b_frames"),
+            "aq": gpu.get("aq"),
+            "spatial_aq": gpu.get("spatial_aq"),
+            "temporal_aq": gpu.get("temporal_aq"),
+            "aq_strength": gpu.get("aq_strength"),
+            "audio": gpu.get("audio", {}),
         }
 
 
@@ -100,19 +132,19 @@ class LibraryConfig(Base):
 
 
 @dataclass
-class ProfileData:
-    name: str
+class HardwareProfileData:
+    mode: str
     codec: str
-    profile_tier: str
-    max_resolution: str
+    profile: str
+    level: str
+    resolution: str
+    max_fps: int
     bitrate: str
     max_bitrate: str
     bufsize: str
     preset: str
     cq: int
     rc: str
-    level: str
-    max_fps: int
     bframes: int
     lookahead: int
     adaptive_b_frames: bool
@@ -123,7 +155,14 @@ class ProfileData:
     audio_codec: str
     audio_bitrate: str
     audio_channels: int
-    definition: str = "{}"
+    allow_tonemap: bool = True
+
+
+@dataclass
+class ProfileData:
+    name: str
+    gpu: HardwareProfileData
+    cpu: HardwareProfileData
 
 
 @dataclass
@@ -161,27 +200,28 @@ class ProfileStore:
             now = datetime.utcnow()
             profile = EncodingProfile(
                 name=data.name,
-                codec=data.codec,
-                profile_tier=data.profile_tier,
-                max_resolution=data.max_resolution,
-                bitrate=data.bitrate,
-                max_bitrate=data.max_bitrate,
-                bufsize=data.bufsize,
-                preset=data.preset,
-                cq=data.cq,
-                rc=data.rc,
-                level=data.level,
-                max_fps=data.max_fps,
-                bframes=data.bframes,
-                lookahead=data.lookahead,
-                adaptive_b_frames=data.adaptive_b_frames,
-                aq=data.aq,
-                spatial_aq=data.spatial_aq,
-                temporal_aq=data.temporal_aq,
-                aq_strength=data.aq_strength,
-                audio_codec=data.audio_codec,
-                audio_bitrate=data.audio_bitrate,
-                audio_channels=data.audio_channels,
+                codec=data.gpu.codec,
+                profile_tier=data.gpu.profile,
+                max_resolution=data.gpu.resolution,
+                bitrate=data.gpu.bitrate,
+                max_bitrate=data.gpu.max_bitrate,
+                bufsize=data.gpu.bufsize,
+                preset=data.gpu.preset,
+                cq=data.gpu.cq,
+                rc=data.gpu.rc,
+                level=data.gpu.level,
+                max_fps=data.gpu.max_fps,
+                bframes=data.gpu.bframes,
+                lookahead=data.gpu.lookahead,
+                adaptive_b_frames=data.gpu.adaptive_b_frames,
+                aq=data.gpu.aq,
+                spatial_aq=data.gpu.spatial_aq,
+                temporal_aq=data.gpu.temporal_aq,
+                aq_strength=data.gpu.aq_strength,
+                audio_codec=data.gpu.audio_codec,
+                audio_bitrate=data.gpu.audio_bitrate,
+                audio_channels=data.gpu.audio_channels,
+                definition=json.dumps({"gpu": asdict(data.gpu), "cpu": asdict(data.cpu)}),
                 created_at=now,
                 updated_at=now,
             )
@@ -196,8 +236,29 @@ class ProfileStore:
             profile = session.get(EncodingProfile, profile_id)
             if profile is None:
                 raise KeyError(profile_id)
-            for key, value in data.__dict__.items():
-                setattr(profile, key, value)
+            profile.name = data.name
+            profile.codec = data.gpu.codec
+            profile.profile_tier = data.gpu.profile
+            profile.max_resolution = data.gpu.resolution
+            profile.bitrate = data.gpu.bitrate
+            profile.max_bitrate = data.gpu.max_bitrate
+            profile.bufsize = data.gpu.bufsize
+            profile.preset = data.gpu.preset
+            profile.cq = data.gpu.cq
+            profile.rc = data.gpu.rc
+            profile.level = data.gpu.level
+            profile.max_fps = data.gpu.max_fps
+            profile.bframes = data.gpu.bframes
+            profile.lookahead = data.gpu.lookahead
+            profile.adaptive_b_frames = data.gpu.adaptive_b_frames
+            profile.aq = data.gpu.aq
+            profile.spatial_aq = data.gpu.spatial_aq
+            profile.temporal_aq = data.gpu.temporal_aq
+            profile.aq_strength = data.gpu.aq_strength
+            profile.audio_codec = data.gpu.audio_codec
+            profile.audio_bitrate = data.gpu.audio_bitrate
+            profile.audio_channels = data.gpu.audio_channels
+            profile.definition = json.dumps({"gpu": asdict(data.gpu), "cpu": asdict(data.cpu)})
             profile.updated_at = datetime.utcnow()
             session.add(profile)
             session.commit()

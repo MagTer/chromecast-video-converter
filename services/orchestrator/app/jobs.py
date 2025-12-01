@@ -27,6 +27,9 @@ class Job(BaseModel):
     profile: str
     profile_id: Optional[int] = None
     encoding: Optional[Dict[str, Any]] = None
+    pipeline: Optional[Dict[str, Any]] = None
+    attempt: int = Field(default=1, ge=1)
+    max_attempts: int = Field(default=5, ge=1)
     status: str = JobStatus.PENDING
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
@@ -37,10 +40,50 @@ class Job(BaseModel):
         json_encoders = {datetime: lambda value: value.isoformat()}
 
 
+PIPELINE_SEQUENCE: list[Dict[str, Any]] = [
+    {"decode_type": "gpu", "scale_type": "gpu", "encode_type": "gpu", "allow_tonemap": True},
+    {
+        "decode_type": "gpu",
+        "scale_type": "gpu",
+        "encode_type": "gpu",
+        "allow_tonemap": False,
+    },
+    {
+        "decode_type": "cpu",
+        "scale_type": "gpu",
+        "encode_type": "gpu",
+        "allow_tonemap": False,
+    },
+    {
+        "decode_type": "cpu",
+        "scale_type": "cpu",
+        "encode_type": "gpu",
+        "allow_tonemap": False,
+    },
+    {
+        "decode_type": "cpu",
+        "scale_type": "cpu",
+        "encode_type": "cpu",
+        "allow_tonemap": True,
+    },
+]
+
+
+def pipeline_for_attempt(attempt: int, *, max_attempts: int = 5) -> Dict[str, Any]:
+    idx = min(max(attempt - 1, 0), len(PIPELINE_SEQUENCE) - 1)
+    base = dict(PIPELINE_SEQUENCE[idx])
+    base["attempt"] = attempt
+    base["max_attempts"] = max_attempts
+    return base
+
+
 class JobStatusUpdate(BaseModel):
     status: str
     progress: Optional[int] = None
     message: Optional[str] = None
+    return_code: Optional[int] = None
+    logs: Optional[list] = None
+    pipeline: Optional[Dict[str, Any]] = None
 
 
 class JobManager:
@@ -133,7 +176,7 @@ class JobManager:
                 parsed[key] = int(value) if value else 0
             elif key == "profile_id":
                 parsed[key] = int(value) if value else None
-            elif key == "encoding":
+            elif key in {"encoding", "pipeline"}:
                 parsed[key] = json.loads(value) if value else None
             else:
                 parsed[key] = value or None
@@ -205,12 +248,27 @@ class JobManager:
                 self._logger.debug("Job already tracked for %s", path)
                 return self._decode_job(data)
 
+        pipeline = encoding.get("pipeline") if encoding else None
+        max_attempts = 5
+        attempt = 1
+        if isinstance(pipeline, dict):
+            max_attempts = int(pipeline.get("max_attempts", max_attempts) or max_attempts)
+            attempt = int(pipeline.get("attempt", attempt) or attempt)
+        else:
+            pipeline = pipeline_for_attempt(attempt, max_attempts=max_attempts)
+            if encoding is None:
+                encoding = {}
+            encoding["pipeline"] = pipeline
+
         job = Job(
             path=path,
             library=library,
             profile=profile,
             profile_id=profile_id,
             encoding=encoding,
+            pipeline=pipeline,
+            attempt=attempt,
+            max_attempts=max_attempts,
         )
         encoded = self._encode_job(job)
         await self._redis.hset(self._job_key(job.id), mapping=encoded)
@@ -312,18 +370,60 @@ class JobManager:
             job.progress = update.progress
         if update.message:
             job.message = update.message
+        if update.pipeline:
+            job.pipeline = update.pipeline
+            if isinstance(update.pipeline, dict):
+                job.attempt = int(update.pipeline.get("attempt", job.attempt) or job.attempt)
+                job.max_attempts = int(
+                    update.pipeline.get("max_attempts", job.max_attempts) or job.max_attempts
+                )
         job.updated_at = datetime.utcnow()
         await self._redis.hset(self._job_key(job_id), mapping=self._encode_job(job))
         await self._redis.zadd(self._job_index, {job_id: job.updated_at.timestamp()})
-        if job.status in {JobStatus.COMPLETED, JobStatus.FAILED}:
-            await self._redis.srem(self._path_index, job.path)
-            await self._redis.delete(self._path_key(job.path))
         self._logger.debug(
             "Job %s updated: status=%s progress=%s message=%s",
             job_id[:8],
             job.status,
             job.progress,
             job.message,
+        )
+        return job
+
+    async def schedule_retry(
+        self, job: Job, pipeline: Dict[str, Any], message: Optional[str] = None
+    ) -> Job:
+        await self.initialize()
+        next_attempt = job.attempt + 1
+        if pipeline:
+            pipeline = dict(pipeline)
+            pipeline["attempt"] = next_attempt
+            pipeline["max_attempts"] = job.max_attempts
+        else:
+            pipeline = pipeline_for_attempt(next_attempt, max_attempts=job.max_attempts)
+        job.attempt = next_attempt
+        job.status = JobStatus.PENDING
+        job.progress = 0
+        job.message = message
+        job.pipeline = pipeline
+        job.updated_at = datetime.utcnow()
+        if job.encoding is None:
+            job.encoding = {}
+        job.encoding["pipeline"] = pipeline
+        payload = self._encode_job(job)
+        await self._redis.hset(self._job_key(job.id), mapping=payload)
+        await self._redis.zadd(self._job_index, {job.id: datetime.utcnow().timestamp()})
+        await self._redis.xadd(
+            self._stream, {"payload": json.dumps(payload)}, maxlen=10_000, approximate=True
+        )
+        await self._redis.incr(self._depth_key)
+        await self._redis.sadd(self._path_index, job.path)
+        await self._redis.set(self._path_key(job.path), job.id)
+        self._logger.info(
+            "Retrying job %s (attempt %s/%s) with pipeline %s",
+            job.id[:8],
+            job.attempt,
+            job.max_attempts,
+            pipeline,
         )
         return job
 
@@ -336,8 +436,9 @@ class JobManager:
             data = await self._redis.hgetall(self._job_key(job_id))
             if data:
                 job = self._decode_job(data)
-                await self._redis.srem(self._path_index, job.path)
-                await self._redis.delete(self._path_key(job.path))
+                if job.status in {JobStatus.COMPLETED, JobStatus.FAILED}:
+                    await self._redis.srem(self._path_index, job.path)
+                    await self._redis.delete(self._path_key(job.path))
 
     async def clear_processed(self) -> int:
         await self.initialize()

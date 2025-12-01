@@ -10,7 +10,6 @@ from pathlib import Path
 from threading import RLock
 from typing import Any, Dict, Optional
 
-import yaml
 from pydantic import BaseModel, Field, ValidationError, model_validator
 
 LOGGER = logging.getLogger("orchestrator.config")
@@ -21,67 +20,73 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "movies": {
             "root": "/watch/movies",
             "depth": "max",
-            "profile": "movies",
+            "profile": "chromecast",
             "profile_id": 1,
         },
         "series": {
             "root": "/watch/series",
             "depth": "max",
-            "profile": "series",
-            "profile_id": 2,
+            "profile": "chromecast",
+            "profile_id": 1,
         },
     },
     "profiles": {
-        "movies": {
-            "codec": "h264",
-            "profile": "high",
-            "level": "3.1",
-            "resolution": "1280x720",
-            "max_fps": 30,
-            "bitrate": "5M",
-            "max_bitrate": "10M",
-            "bufsize": "16M",
-            "preset": "p7",
-            "rc": "vbr",
-            "cq": 18,
-            "bframes": 2,
-            "lookahead": 24,
-            "adaptive_b_frames": True,
-            "aq": True,
-            "spatial_aq": True,
-            "temporal_aq": True,
-            "aq_strength": 7,
-            "audio": {
-                "codec": "aac",
-                "bitrate": "192k",
-                "channels": 2,
+        "chromecast": {
+            "gpu": {
+                "mode": "gpu",
+                "codec": "h264",
+                "profile": "high",
+                "level": "3.1",
+                "resolution": "1280x720",
+                "max_fps": 30,
+                "bitrate": "5M",
+                "max_bitrate": "10M",
+                "bufsize": "16M",
+                "preset": "p7",
+                "rc": "vbr",
+                "cq": 18,
+                "bframes": 2,
+                "lookahead": 24,
+                "adaptive_b_frames": True,
+                "aq": True,
+                "spatial_aq": True,
+                "temporal_aq": True,
+                "aq_strength": 7,
+                "allow_tonemap": True,
+                "audio": {
+                    "codec": "aac",
+                    "bitrate": "192k",
+                    "channels": 2,
+                },
             },
-        },
-        "series": {
-            "codec": "h264",
-            "profile": "high",
-            "level": "3.1",
-            "resolution": "1280x720",
-            "max_fps": 30,
-            "bitrate": "5M",
-            "max_bitrate": "10M",
-            "bufsize": "16M",
-            "preset": "p7",
-            "rc": "vbr",
-            "cq": 18,
-            "bframes": 2,
-            "lookahead": 24,
-            "adaptive_b_frames": True,
-            "aq": True,
-            "spatial_aq": True,
-            "temporal_aq": True,
-            "aq_strength": 7,
-            "audio": {
-                "codec": "aac",
-                "bitrate": "192k",
-                "channels": 2,
+            "cpu": {
+                "mode": "cpu",
+                "codec": "h264",
+                "profile": "high",
+                "level": "3.1",
+                "resolution": "1280x720",
+                "max_fps": 30,
+                "bitrate": "5M",
+                "max_bitrate": "8M",
+                "bufsize": "16M",
+                "preset": "slow",
+                "rc": "crf",
+                "cq": 20,
+                "bframes": 2,
+                "lookahead": 0,
+                "adaptive_b_frames": False,
+                "aq": False,
+                "spatial_aq": False,
+                "temporal_aq": False,
+                "aq_strength": 7,
+                "allow_tonemap": True,
+                "audio": {
+                    "codec": "aac",
+                    "bitrate": "192k",
+                    "channels": 2,
+                },
             },
-        },
+        }
     },
     "operational": {
         "max_concurrent_jobs": 1,
@@ -200,7 +205,7 @@ def _validate_bitrates(bitrate: str, max_bitrate: str, bufsize: str, audio_bitra
         raise ValueError("Target bitrate must not exceed the configured maxrate.")
 
 
-def _sanitize_profiles(raw: dict) -> dict:
+def _sanitize_profiles(raw: dict) -> dict:  # noqa: C901
     profiles = raw.get("profiles")
     if not isinstance(profiles, dict):
         return raw
@@ -208,27 +213,32 @@ def _sanitize_profiles(raw: dict) -> dict:
     for name, profile in profiles.items():
         if not isinstance(profile, dict):
             continue
-        bitrate = profile.get("bitrate")
-        maxrate = profile.get("max_bitrate")
-        if maxrate is None:
-            continue
-        try:
-            maxrate_int = _bitrate_to_int(str(maxrate))
-        except Exception:  # noqa: BLE001
-            continue
+        for variant_key in ("gpu", "cpu"):
+            variant = profile.get(variant_key)
+            if not isinstance(variant, dict):
+                continue
+            bitrate = variant.get("bitrate")
+            maxrate = variant.get("max_bitrate")
+            if maxrate is None:
+                continue
+            try:
+                maxrate_int = _bitrate_to_int(str(maxrate))
+            except Exception:  # noqa: BLE001
+                continue
 
-        if bitrate is None:
-            profile["bitrate"] = str(maxrate)
-            continue
+            if bitrate is None:
+                variant["bitrate"] = str(maxrate)
+                continue
 
-        try:
-            bitrate_int = _bitrate_to_int(str(bitrate))
-        except Exception:  # noqa: BLE001
-            profile["bitrate"] = str(maxrate)
-            continue
+            try:
+                bitrate_int = _bitrate_to_int(str(bitrate))
+            except Exception:  # noqa: BLE001
+                variant["bitrate"] = str(maxrate)
+                continue
 
-        if bitrate_int > maxrate_int:
-            profile["bitrate"] = str(maxrate)
+            if bitrate_int > maxrate_int:
+                variant["bitrate"] = str(maxrate)
+            profile[variant_key] = variant
 
     raw["profiles"] = profiles
     return raw
@@ -256,6 +266,7 @@ def _validate_aq_flags(aq: bool, spatial_aq: bool, temporal_aq: bool) -> None:
 
 
 def _validate_encoding_options(
+    mode: str,
     preset: str,
     cq: int,
     rc_mode: str,
@@ -269,24 +280,44 @@ def _validate_encoding_options(
     temporal_aq: bool,
     profile: str,
 ) -> None:
-    allowed_presets = {"p4", "p5", "p6", "p7"}
-    if preset.lower() not in allowed_presets:
-        raise ValueError("NVENC preset must be one of p4–p7 for Chromecast-safe outputs.")
-
-    if cq < 0 or cq > 30:
-        raise ValueError(
-            "NVENC CQ must be between 0 and 30 for stable quality on Gen 2 Chromecasts."
-        )
-
-    allowed_rc_modes = {"cq", "vbr", "vbr_hq"}
-    if rc_mode.lower() not in allowed_rc_modes:
-        raise ValueError("Rate control must be cq, vbr, or vbr_hq for Chromecast-safe outputs.")
-
     if max_fps <= 0 or max_fps > 60:
         raise ValueError("Frame rate must be between 1 and 60 fps.")
 
     if audio_channels != 2:
         raise ValueError("Audio must remain stereo (2 channels) for Chromecast Gen 2.")
+
+    if mode == "gpu":
+        allowed_presets = {"p4", "p5", "p6", "p7"}
+        if preset.lower() not in allowed_presets:
+            raise ValueError("NVENC preset must be one of p4–p7 for Chromecast-safe outputs.")
+
+        if cq < 0 or cq > 30:
+            raise ValueError(
+                "NVENC CQ must be between 0 and 30 for stable quality on Gen 2 Chromecasts."
+            )
+
+        allowed_rc_modes = {"cq", "vbr", "vbr_hq"}
+        if rc_mode.lower() not in allowed_rc_modes:
+            raise ValueError("Rate control must be cq, vbr, or vbr_hq for Chromecast-safe outputs.")
+    else:
+        allowed_presets = {
+            "ultrafast",
+            "superfast",
+            "veryfast",
+            "faster",
+            "fast",
+            "medium",
+            "slow",
+            "slower",
+            "veryslow",
+        }
+        if preset.lower() not in allowed_presets:
+            raise ValueError("x264 preset must be a standard CPU preset (e.g. slow, medium).")
+        if cq < 0 or cq > 40:
+            raise ValueError("CRF must be between 0 and 40 for CPU fallback encodes.")
+        allowed_rc_modes = {"crf", "vbr", "cbr"}
+        if rc_mode.lower() not in allowed_rc_modes:
+            raise ValueError("CPU fallback rate control must be crf, vbr, or cbr.")
 
     _validate_bframe_chain(profile, bframes, lookahead, adaptive_b_frames)
     _validate_aq_flags(aq, spatial_aq, temporal_aq)
@@ -304,7 +335,8 @@ class AudioProfile(BaseModel):
         return self
 
 
-class Profile(BaseModel):
+class HardwareProfile(BaseModel):
+    mode: str = Field(default="gpu")
     codec: str
     profile: str
     level: str
@@ -323,21 +355,25 @@ class Profile(BaseModel):
     spatial_aq: bool = Field(default=True)
     temporal_aq: bool = Field(default=True)
     aq_strength: int = Field(default=7, ge=5, le=10)
+    allow_tonemap: bool = Field(default=True)
     audio: AudioProfile
 
     @model_validator(mode="after")
     def validate_codecs(cls, values):
+        mode = (values.mode or "gpu").lower()
+        values.mode = mode
         _validate_codecs(values.codec, values.audio.codec)
         _validate_profile(values.profile, values.level, values.resolution, values.max_fps)
         _validate_resolution(values.resolution)
         _validate_bitrates(values.bitrate, values.max_bitrate, values.bufsize, values.audio.bitrate)
 
         rc_mode = values.rc.lower()
-        if rc_mode == "cbr":
+        if mode == "gpu" and rc_mode == "cbr":
             rc_mode = "vbr"
         values.rc = rc_mode
 
         _validate_encoding_options(
+            mode,
             values.preset,
             values.cq,
             rc_mode,
@@ -357,6 +393,17 @@ class Profile(BaseModel):
             values.temporal_aq = False
 
         return values
+
+
+class ProfileSet(BaseModel):
+    gpu: HardwareProfile
+    cpu: HardwareProfile
+
+    @model_validator(mode="after")
+    def ensure_modes(self):
+        self.gpu.mode = "gpu"
+        self.cpu.mode = "cpu"
+        return self
 
 
 class LibraryConfig(BaseModel):
@@ -385,20 +432,20 @@ class LoggingConfig(BaseModel):
 
 class QualityConfig(BaseModel):
     libraries: Dict[str, LibraryConfig]
-    profiles: Dict[str, Profile]
+    profiles: Dict[str, ProfileSet]
     operational: OperationConfig
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
     notifiers: Dict[str, dict] = Field(default_factory=dict)
     jellyfin: Optional[JellyfinConfig] = None
 
-    def profile_for(self, library_name: str) -> Profile:
+    def profile_for(self, library_name: str) -> ProfileSet:
         library = self.libraries[library_name]
         profile_name = library.profile
         if profile_name not in self.profiles:
             raise ValueError(f"Profile {profile_name} is not defined.")
         return self.profiles[profile_name]
 
-    def profile_named(self, profile_name: str) -> Profile:
+    def profile_named(self, profile_name: str) -> ProfileSet:
         if profile_name not in self.profiles:
             raise ValueError(f"Profile {profile_name} is not defined.")
         return self.profiles[profile_name]
@@ -411,12 +458,8 @@ class ConfigSnapshot:
 
 
 class ConfigStore:
-    def __init__(
-        self, db_path: Path, template_path: Path, legacy_path: Optional[Path] = None
-    ) -> None:
+    def __init__(self, db_path: Path) -> None:
         self.db_path = db_path
-        self.template_path = template_path
-        self.legacy_path = legacy_path
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = RLock()
         self._conn = sqlite3.connect(self.db_path, check_same_thread=False)
@@ -450,19 +493,9 @@ class ConfigStore:
             if cursor.fetchone()[0] > 0:
                 return
 
-        source_path = self.legacy_path if self.legacy_path and self.legacy_path.exists() else None
-        if source_path:
-            LOGGER.info("Seeding configuration database from legacy file %s", source_path)
-            raw = yaml.safe_load(source_path.read_text()) or {}
-            seed_source = str(source_path)
-        elif self.template_path and self.template_path.exists():
-            LOGGER.info("Seeding configuration database from template %s", self.template_path)
-            raw = yaml.safe_load(self.template_path.read_text()) or {}
-            seed_source = str(self.template_path)
-        else:
-            LOGGER.info("Seeding configuration database from built-in defaults")
-            raw = copy.deepcopy(DEFAULT_CONFIG)
-            seed_source = "builtin"
+        LOGGER.info("Seeding configuration database from built-in defaults")
+        raw = copy.deepcopy(DEFAULT_CONFIG)
+        seed_source = "builtin"
 
         snapshot = self.save_config(QualityConfig(**raw), source=seed_source)
         LOGGER.info(
@@ -505,10 +538,8 @@ class ConfigStore:
 
 
 class ConfigService:
-    def __init__(
-        self, db_path: Path, template_path: Path, legacy_path: Optional[Path] = None
-    ) -> None:
-        self.store = ConfigStore(db_path, template_path, legacy_path)
+    def __init__(self, db_path: Path) -> None:
+        self.store = ConfigStore(db_path)
         self._snapshot: Optional[ConfigSnapshot] = None
 
     @property
@@ -522,7 +553,7 @@ class ConfigService:
         return self._snapshot
 
     def update_profile(self, name: str, data: dict) -> ConfigSnapshot:
-        profile = Profile(**data)
+        profile = ProfileSet(**data)
         config = self.snapshot.config
         config.profiles[name] = profile
         LOGGER.info("Updated encoding profile '%s' for Chromecast-safe settings.", name)

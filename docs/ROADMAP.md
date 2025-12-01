@@ -13,9 +13,9 @@ touch points, minimize moving parts, and keep operational work predictable.
   runtime library add/remove (`/api/libraries`), websocket push channel (`/ws`),
   and an HTML dashboard with live updates.
 - **Config-driven profiles** – Profiles are persisted in the SQLite config
-  store (seeded from `config/settings.yaml` or the template) and validated for
+  store (seeded from the built-in defaults in `app/config.py`) and validated for
   Chromecast-safe codec, profile, level, resolution, and bitrate limits before
-  use.
+  use. GPU-first with CPU fallback is modeled as a single `chromecast` profile.
 - **Job ingestion and scans** – The orchestrator loads configured libraries at
   startup, runs recursive scans, ingests watcher events, and supports on-demand
   rescans. Library entries and job history are persisted for auditability.

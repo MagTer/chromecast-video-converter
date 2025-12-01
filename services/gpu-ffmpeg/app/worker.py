@@ -13,7 +13,6 @@ from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
 import httpx
-import yaml
 
 from .ffmpeg_builder import DEFAULT_LANGUAGE_PREFERENCES, FFmpegBuilder
 from .utils import detect_host_environment, resolve_media_path
@@ -130,15 +129,74 @@ def _probe_nvenc_capabilities() -> dict[str, bool]:
 
 HOST_ENVIRONMENT = detect_host_environment()
 NVENC_CAPABILITIES = _probe_nvenc_capabilities()
-FILTER_CAPABILITIES = {"tonemap_cuda": False}
-FILTER_CAPABILITIES: dict[str, bool] = {"tonemap_cuda": True}
+FILTER_CAPABILITIES: dict[str, bool] = {
+    "tonemap_cuda": True,
+    "scale_cuda": True,
+    "scale_npp": False,
+    "hwupload_cuda": True,
+}
 
-CONFIG_PATH = Path(os.environ.get("CONFIG_PATH", "/app/config/settings.yaml"))
 PROFILES: dict = {}
 OPERATIONAL_CONFIG: dict = {}
 REMOVE_ORIGINAL = False
 GPU_TELEMETRY_INTERVAL = int(os.environ.get("GPU_TELEMETRY_INTERVAL", "30"))
 LANGUAGE_PREFERENCES: tuple[str, ...] = DEFAULT_LANGUAGE_PREFERENCES
+BUILTIN_PROFILE = {
+    "name": "chromecast",
+    "gpu": {
+        "mode": "gpu",
+        "codec": "h264",
+        "profile": "high",
+        "level": "3.1",
+        "resolution": "1280x720",
+        "max_fps": 30,
+        "bitrate": "5M",
+        "max_bitrate": "10M",
+        "bufsize": "16M",
+        "preset": "p7",
+        "rc": "vbr",
+        "cq": 18,
+        "bframes": 2,
+        "lookahead": 24,
+        "adaptive_b_frames": True,
+        "aq": True,
+        "spatial_aq": True,
+        "temporal_aq": True,
+        "aq_strength": 7,
+        "allow_tonemap": True,
+        "audio": {"codec": "aac", "bitrate": "192k", "channels": 2},
+    },
+    "cpu": {
+        "mode": "cpu",
+        "codec": "h264",
+        "profile": "high",
+        "level": "3.1",
+        "resolution": "1280x720",
+        "max_fps": 30,
+        "bitrate": "5M",
+        "max_bitrate": "8M",
+        "bufsize": "16M",
+        "preset": "slow",
+        "rc": "crf",
+        "cq": 20,
+        "bframes": 2,
+        "lookahead": 0,
+        "adaptive_b_frames": True,
+        "aq": False,
+        "spatial_aq": False,
+        "temporal_aq": False,
+        "aq_strength": 7,
+        "allow_tonemap": True,
+        "audio": {"codec": "aac", "bitrate": "192k", "channels": 2},
+    },
+    "pipeline": {
+        "decode_type": "gpu",
+        "scale_type": "gpu",
+        "encode_type": "gpu",
+        "attempt": 1,
+        "max_attempts": 5,
+    },
+}
 
 
 def _hydrate_config(raw: dict) -> None:
@@ -170,21 +228,9 @@ def _load_config_from_api() -> bool:
     return True
 
 
-def _load_config_from_disk() -> None:
-    try:
-        with CONFIG_PATH.open("r", encoding="utf-8") as fh:
-            raw = yaml.safe_load(fh) or {}
-    except FileNotFoundError:
-        LOGGER.warning("No settings config present at %s; using defaults", CONFIG_PATH)
-        return
-    _hydrate_config(raw)
-    LOGGER.info(
-        "Loaded settings config from %s (%s profiles available)", CONFIG_PATH, len(PROFILES)
-    )
-
-
 if not _load_config_from_api():
-    _load_config_from_disk()
+    _hydrate_config({"profiles": {"chromecast": BUILTIN_PROFILE}})
+    LOGGER.info("Loaded built-in fallback profile (chromecast) because API was unreachable")
 FFPROBE_ANALYSIS_CMD = [
     "ffprobe",
     "-hide_banner",
@@ -225,7 +271,14 @@ def _probe_gpu_devices() -> tuple[list[str], list[str]]:
 
 def _probe_ffmpeg_support() -> tuple[dict[str, Any], list[str]]:
     errors: list[str] = []
-    support: dict[str, Any] = {"cuda": False, "nvenc": False, "tonemap_cuda": False}
+    support: dict[str, Any] = {
+        "cuda": False,
+        "nvenc": False,
+        "tonemap_cuda": False,
+        "scale_cuda": False,
+        "scale_npp": False,
+        "hwupload_cuda": False,
+    }
     try:
         result = subprocess.run(
             ["ffmpeg", "-hide_banner", "-loglevel", "quiet", "-hwaccels"],
@@ -255,7 +308,15 @@ def _probe_ffmpeg_support() -> tuple[dict[str, Any], list[str]]:
             capture_output=True,
             text=True,
         )
-        support["tonemap_cuda"] = "tonemap_cuda" in result.stdout
+        filters: set[str] = set()
+        for line in result.stdout.splitlines():
+            parts = line.split()
+            if len(parts) >= 2 and parts[0].startswith(" "):
+                filters.add(parts[1])
+        support["tonemap_cuda"] = "tonemap_cuda" in filters
+        support["scale_cuda"] = "scale_cuda" in filters
+        support["scale_npp"] = "scale_npp" in filters
+        support["hwupload_cuda"] = "hwupload_cuda" in filters
     except subprocess.SubprocessError as exc:
         errors.append(f"ffmpeg filter probe failed: {exc}")
 
@@ -266,6 +327,9 @@ def snapshot_gpu_state() -> dict[str, Any]:
     devices, device_errors = _probe_gpu_devices()
     ffmpeg_support, ffmpeg_errors = _probe_ffmpeg_support()
     FILTER_CAPABILITIES["tonemap_cuda"] = bool(ffmpeg_support.get("tonemap_cuda"))
+    FILTER_CAPABILITIES["scale_cuda"] = bool(ffmpeg_support.get("scale_cuda", True))
+    FILTER_CAPABILITIES["scale_npp"] = bool(ffmpeg_support.get("scale_npp"))
+    FILTER_CAPABILITIES["hwupload_cuda"] = bool(ffmpeg_support.get("hwupload_cuda", True))
     message_parts = device_errors + ffmpeg_errors
     message = "; ".join(message_parts)
     available = bool(devices) and ffmpeg_support.get("cuda") and ffmpeg_support.get("nvenc")
@@ -382,6 +446,37 @@ def probe_file(filepath: str | Path) -> dict:
 
 def _loggable_command(command: list[str]) -> str:
     return " ".join(shlex.quote(arg) for arg in command)
+
+
+def _media_summary(analysis: dict) -> dict:
+    streams = analysis.get("streams") or []
+    video = next((s for s in streams if s.get("codec_type") == "video"), {}) or {}
+    audio_streams = [s for s in streams if s.get("codec_type") == "audio"]
+    subtitle_streams = [s for s in streams if s.get("codec_type") == "subtitle"]
+    return {
+        "video_codec": video.get("codec_name"),
+        "pix_fmt": video.get("pix_fmt"),
+        "bit_depth": video.get("bit_depth") or video.get("bits_per_raw_sample"),
+        "is_hdr": video.get("is_hdr"),
+        "avg_frame_rate": video.get("avg_frame_rate"),
+        "resolution": (
+            f"{video.get('width')}x{video.get('height')}"
+            if video.get("width") and video.get("height")
+            else None
+        ),
+        "audio_streams": len(audio_streams),
+        "subtitle_streams": len(subtitle_streams),
+    }
+
+
+def _extract_filter_chain(command: list[str]) -> str | None:
+    if "-vf" not in command:
+        return None
+    try:
+        index = command.index("-vf")
+        return command[index + 1]
+    except (ValueError, IndexError):
+        return None
 
 
 def classify_ffmpeg_error(logs: list[str], return_code: int) -> dict[str, str | bool | int]:
@@ -547,10 +642,20 @@ async def update_job_status(
     status: str,
     progress: int,
     message: str | None = None,
+    *,
+    return_code: int | None = None,
+    logs: list[str] | None = None,
+    pipeline: dict | None = None,
 ) -> None:
     payload = {"status": status, "progress": progress}
     if message:
         payload["message"] = message
+    if return_code is not None:
+        payload["return_code"] = return_code
+    if logs is not None:
+        payload["logs"] = logs
+    if pipeline is not None:
+        payload["pipeline"] = pipeline
     try:
         response = await client.post(f"/api/jobs/{job_id}/status", json=payload)
         response.raise_for_status()
@@ -669,6 +774,7 @@ async def process_job(client: httpx.AsyncClient, job: dict) -> None:  # noqa: C9
     analysis = await asyncio.to_thread(probe_file, playback_target)
     analysis = analysis or {}
     duration = _extract_duration(analysis)
+    LOGGER.info("Media analysis for %s: %s", job_id[:8], _media_summary(analysis))
     if duration == 0:
         LOGGER.warning("Duration probe for %s returned 0 seconds", playback_target)
 
@@ -679,9 +785,12 @@ async def process_job(client: httpx.AsyncClient, job: dict) -> None:  # noqa: C9
             "No encoding settings supplied for profile %s; using defaults.",
             job.get("profile"),
         )
+    pipeline = encoding.get("pipeline") if isinstance(encoding, dict) else None
 
     analysis["encoding"] = encoding
     analysis["profile"] = job.get("profile")
+    if pipeline:
+        analysis["pipeline"] = pipeline
 
     if await _validate_output(output_path, duration):
         message = f"Output already present at {output_path}; skipping encode"
@@ -714,6 +823,22 @@ async def process_job(client: httpx.AsyncClient, job: dict) -> None:  # noqa: C9
         LOGGER.error("%s", message)
         await update_job_status(client, job_id, "failed", 0, message)
         return
+
+    pipeline_info = analysis.get("pipeline") or {}
+    LOGGER.info(
+        "Job %s pipeline: decode=%s scale=%s encode=%s allow_tonemap=%s attempt=%s/%s",
+        job_id[:8],
+        pipeline_info.get("decode_type"),
+        pipeline_info.get("scale_type"),
+        pipeline_info.get("encode_type"),
+        pipeline_info.get("allow_tonemap"),
+        pipeline_info.get("attempt"),
+        pipeline_info.get("max_attempts"),
+    )
+
+    filter_chain = _extract_filter_chain(command)
+    if filter_chain:
+        LOGGER.info("Job %s video filters: %s", job_id[:8], filter_chain)
 
     loop = asyncio.get_running_loop()
     progress_callback, _, _ = _progress_callback_factory(duration, loop, client, job_id)
@@ -751,7 +876,16 @@ async def process_job(client: httpx.AsyncClient, job: dict) -> None:  # noqa: C9
             )
         if classification.get("category") == "nvenc_unavailable":
             NVENC_CAPABILITIES = _probe_nvenc_capabilities()
-        await update_job_status(client, job_id, "failed", 0, message)
+        await update_job_status(
+            client,
+            job_id,
+            "failed",
+            0,
+            message,
+            return_code=return_code,
+            logs=ffmpeg_logs,
+            pipeline=pipeline,
+        )
 
 
 async def main() -> None:
