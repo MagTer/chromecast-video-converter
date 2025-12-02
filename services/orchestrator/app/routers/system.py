@@ -7,8 +7,8 @@ from ..dependencies import (
     INDEX_HTML,
     NOTIFIER,
     WORKER_TELEMETRY,
+    get_app_dependencies,
     get_library_map,
-    job_manager,
     worker_metrics_summary,
 )
 from ..schemas import WorkerTelemetryPayload
@@ -51,7 +51,7 @@ async def ingest_worker_telemetry(payload: WorkerTelemetryPayload) -> JSONRespon
 
 @router.get("/api/metrics")
 async def metrics() -> JSONResponse:
-    jobs_list = await job_manager.list_jobs()
+    jobs_list = await get_app_dependencies().job_manager.list_jobs()
     count_by_status: Dict[str, int] = {}
     for job in jobs_list:
         count_by_status[job.status] = count_by_status.get(job.status, 0) + 1

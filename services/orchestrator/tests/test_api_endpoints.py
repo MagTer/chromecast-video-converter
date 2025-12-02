@@ -48,6 +48,15 @@ def _build_test_app(tmp_path: Path, monkeypatch, fake_redis):
     import app.main as main
 
     importlib.reload(main)
+    
+    # Ensure config is seeded
+    from app.dependencies import get_app_dependencies
+    from app.main import seed_profiles_and_libraries
+    
+    config_service = get_app_dependencies().config_service
+    snapshot = config_service.reload()
+    seed_profiles_and_libraries(snapshot)
+    
     return main.app, main
 
 
@@ -216,6 +225,7 @@ def test_purge_inactive_jobs_endpoint(test_app, tmp_path):
 
 def test_reprocess_endpoint_adds_job(test_app, tmp_path):
     client, main = test_app
+    from app.dependencies import get_app_dependencies
 
     # Ensure cleanup
     client.delete("/api/libraries/runtime")
@@ -235,14 +245,14 @@ def test_reprocess_endpoint_adds_job(test_app, tmp_path):
 
     source = media_root / "movie.mkv"
     source.write_bytes(b"content")
-    entry = main.LIBRARY_STORE.update_status(
+    entry = get_app_dependencies().library_entry_store.update_status(
         str(source),
         LibraryStatus.CONVERTED,
         library="runtime",
         profile=profile_name,
         profile_id=profile_id,
         job_id="seed-job",
-        output_path=str(main.job_manager.output_path(source)),
+        output_path=str(get_app_dependencies().job_manager.output_path(source)),
         original_missing=False,
     )
 
@@ -318,6 +328,8 @@ def test_websocket_pushes_library_update(test_app, tmp_path):
 def test_clear_jobs_endpoint_removes_completed_jobs(test_app, tmp_path):
     client, main = test_app
     import app.jobs as jobs_module
+    from app.dependencies import get_app_dependencies
+    from app.services.core import encoding_payload
 
     profile_id = _first_profile_id(client)
     profile_name = _first_profile_name(client)
@@ -335,17 +347,17 @@ def test_clear_jobs_endpoint_removes_completed_jobs(test_app, tmp_path):
     source.write_bytes(b"data")
 
     job = asyncio.run(
-        main.job_manager.add_job(
+        get_app_dependencies().job_manager.add_job(
             str(source),
             "clear-lib",
             profile_name,
             profile_id=profile_id,
-            encoding=main.encoding_payload(profile_id),
+            encoding=encoding_payload(profile_id),
         )
     )
 
     asyncio.run(
-        main.job_manager.update_job(
+        get_app_dependencies().job_manager.update_job(
             job.id,
             jobs_module.JobStatusUpdate(status=jobs_module.JobStatus.COMPLETED, progress=100),
         )
@@ -362,7 +374,7 @@ def test_clear_jobs_endpoint_removes_completed_jobs(test_app, tmp_path):
 def test_next_job_reports_queue_outage(test_app, monkeypatch):
     client, _main = test_app
     failure = AsyncMock(side_effect=ConnectionError("offline"))
-    monkeypatch.setattr("app.routers.jobs.job_manager.queue_state", failure)
+    monkeypatch.setattr("app.jobs.JobManager.queue_state", failure)
 
     response = client.get("/api/jobs/next")
     assert response.status_code == 503

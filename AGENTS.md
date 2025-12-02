@@ -35,7 +35,7 @@ Do not submit a PR if any command fails.
 
 ## Documentation Expectations
 
-- Root `README.md` stays minimal; direct readers to `docs/README.md` and `docs/architecture/README.md`.
+- Root `README.md` is end-user focused; direct readers to `docs/README.md` and `docs/architecture/README.md`.
 - Update user docs whenever behavior changes:
   - `docs/user/01_getting_started.md` (setup/run instructions)
   - `docs/user/02_configuration.md` (env vars, watcher/worker tuning, queue controls)

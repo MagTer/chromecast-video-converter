@@ -8,13 +8,9 @@ from fastapi import HTTPException
 
 from .. import jobs
 from ..dependencies import (
-    JOB_HISTORY_STORE,
-    LIBRARY_CONFIG_STORE,
-    LIBRARY_STORE,
     NOTIFIER,
-    PROFILE_STORE,
+    get_app_dependencies,
     get_library_map,
-    job_manager,
 )
 from ..job_history import JobHistoryEntry, JobHistoryStatus
 from ..library_entries import EntryUpdate, LibraryEntry, LibraryStatus
@@ -68,7 +64,7 @@ def record_job_history(
 ) -> None:
     completed_at = datetime.utcnow() if completed else None
     try:
-        JOB_HISTORY_STORE.record(
+        get_app_dependencies().job_history_store.record(
             JobHistoryEntry(
                 job_id=job.id,
                 path=job.path,
@@ -93,7 +89,7 @@ def sync_entry_from_job(
     if status == LibraryStatus.CONVERTED and original_missing:
         final_status = LibraryStatus.REMOVED
     pipeline = job.pipeline or (job.encoding or {}).get("pipeline") or {}
-    return LIBRARY_STORE.safe_update_status(
+    return get_app_dependencies().library_entry_store.safe_update_status(
         job.path,
         final_status,
         library=job.library,
@@ -101,7 +97,7 @@ def sync_entry_from_job(
         profile_id=job.profile_id,
         message=message,
         job_id=job.id,
-        output_path=str(job_manager.output_path(source)),
+        output_path=str(get_app_dependencies().job_manager.output_path(source)),
         original_missing=original_missing,
         decode_type=pipeline.get("decode_type"),
         scale_type=pipeline.get("scale_type"),
@@ -110,7 +106,7 @@ def sync_entry_from_job(
 
 
 def encoding_payload(profile_id: int) -> Dict[str, Any]:
-    profile = PROFILE_STORE.get(profile_id)
+    profile = get_app_dependencies().profile_store.get(profile_id)
     if profile is None:
         raise HTTPException(status_code=404, detail="Profile not found")
     definition = {}
@@ -176,17 +172,17 @@ def should_track_file(path: Path | str) -> bool:
     resolved = resolve_media_path(path)
     return (
         resolved.is_file()
-        and resolved.suffix.lower() in job_manager.video_extensions
+        and resolved.suffix.lower() in get_app_dependencies().job_manager.video_extensions
         and "-chromecast" not in resolved.stem.lower()
     )
 
 
 def entry_status_for_path(path: Path | str) -> Tuple[str, Path, bool]:
     resolved = resolve_media_path(path)
-    output_path = job_manager.output_path(resolved)
+    output_path = get_app_dependencies().job_manager.output_path(resolved)
     if not resolved.exists():
         return LibraryStatus.REMOVED, output_path, False
-    if job_manager.is_converted(resolved, log=False):
+    if get_app_dependencies().job_manager.is_converted(resolved, log=False):
         return LibraryStatus.CONVERTED, output_path, True
     return LibraryStatus.PENDING, output_path, True
 
@@ -201,7 +197,7 @@ async def record_library_entry(
 ) -> Tuple[LibraryEntry, Optional[jobs.Job]]:
     resolved_path = resolve_media_path(path)
     status, output_path, original_exists = entry_status_for_path(resolved_path)
-    entry = LIBRARY_STORE.upsert(
+    entry = get_app_dependencies().library_entry_store.upsert(
         EntryUpdate(
             path=str(resolved_path),
             library=library_name,
@@ -213,7 +209,7 @@ async def record_library_entry(
         ),
     )
     if status == LibraryStatus.PENDING:
-        job = await job_manager.add_job(
+        job = await get_app_dependencies().job_manager.add_job(
             str(resolved_path),
             library_name,
             profile,
@@ -221,17 +217,17 @@ async def record_library_entry(
             encoding=encoding_payload(profile_id),
             emit_log=emit_log,
         )
-        LIBRARY_STORE.attach_job(entry.id, job.id)
+        get_app_dependencies().library_entry_store.attach_job(entry.id, job.id)
         record_job_history(job, JobHistoryStatus.PENDING)
         return entry, job
     return entry, None
 
 
 def get_library_profile(library_name: str) -> Tuple[LibraryConfig, EncodingProfile]:
-    library = LIBRARY_CONFIG_STORE.get(library_name)
+    library = get_app_dependencies().library_config_store.get(library_name)
     if library is None:
         raise HTTPException(status_code=404, detail="Library not found")
-    profile = PROFILE_STORE.get(library.profile_id)
+    profile = get_app_dependencies().profile_store.get(library.profile_id)
     if profile is None:
         raise HTTPException(status_code=404, detail="Profile not found for library")
     return library, profile
@@ -252,13 +248,13 @@ async def process_event_payload(payload: EventPayload) -> Optional[Dict[str, Any
         return None
 
     if event_type == "deleted":
-        entry = LIBRARY_STORE.update_status(
+        entry = get_app_dependencies().library_entry_store.update_status(
             str(path),
             LibraryStatus.REMOVED,
             library=library.name,
             profile=profile.name,
             profile_id=profile.id,
-            output_path=str(job_manager.output_path(path)),
+            output_path=str(get_app_dependencies().job_manager.output_path(path)),
             original_missing=True,
         )
         entry_payload = entry_to_response(entry)
@@ -288,7 +284,7 @@ async def reconcile_library(library_name: str, root: str, profile: str, profile_
     root_path = resolve_media_path(root)
     if not root_path.exists():
         LOGGER.warning("Library root %s missing; marking entries removed", root_path)
-        LIBRARY_STORE.mark_missing(library_name, set())
+        get_app_dependencies().library_entry_store.mark_missing(library_name, set())
         return
 
     seen: Set[str] = set()
@@ -309,7 +305,7 @@ async def reconcile_library(library_name: str, root: str, profile: str, profile_
             converted += 1
         elif library_entry.status == LibraryStatus.PENDING:
             tracked_pending += 1
-    removed = LIBRARY_STORE.mark_missing(library_name, seen)
+    removed = get_app_dependencies().library_entry_store.mark_missing(library_name, seen)
     LOGGER.info(
         (
             "Completed scan for %s: %s media files, queued %s, %s already converted, "

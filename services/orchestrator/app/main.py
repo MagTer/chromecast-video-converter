@@ -14,15 +14,9 @@ from . import (
     jobs,  # noqa: F401
 )
 from .dependencies import (
-    JOB_HISTORY_STORE,  # noqa: F401
-    LIBRARY_CONFIG_STORE,
-    LIBRARY_STORE,  # noqa: F401
-    LOG_STORE,
-    PROFILE_STORE,
     STATIC_DIR,
     WORKER_TELEMETRY,
-    config_service,
-    job_manager,
+    get_app_dependencies, # Added this import
 )
 from .logs import SQLiteLogHandler, StructuredLogFilter
 from .profiles import HardwareProfileData, LibraryData, ProfileData
@@ -47,12 +41,18 @@ from .routers import (
 from .services.core import encoding_payload, reconcile_library  # noqa: F401
 
 
+# Define the FastAPI app instance here
+app = FastAPI(title="Chromecast Transcode Orchestrator", version="0.1.0")
+
+# Configure logging (moved to global scope after app definition)
+LOGGER = logging.getLogger("orchestrator")
+
 def configure_logging() -> None:
     formatter = logging.Formatter("%(asctime)s %(levelname)s [%(name)s] %(message)s")
     stream_handler = logging.StreamHandler()
     stream_handler.setLevel(logging.INFO)
     stream_handler.setFormatter(formatter)
-    sqlite_handler = SQLiteLogHandler(LOG_STORE)
+    sqlite_handler = SQLiteLogHandler(get_app_dependencies().log_store)
     sqlite_handler.setLevel(logging.DEBUG)
     sqlite_handler.setFormatter(formatter)
     context_filter = StructuredLogFilter()
@@ -67,17 +67,12 @@ def configure_logging() -> None:
     root_logger.addHandler(sqlite_handler)
 
 
-configure_logging()
-
-LOGGER = logging.getLogger("orchestrator")
-
-
 def seed_profiles_and_libraries(snapshot: config_module.ConfigSnapshot) -> None:
     name_to_id: Dict[str, int] = {}
     for name, profile in snapshot.config.profiles.items():
         gpu = profile.gpu
         cpu = profile.cpu
-        record = PROFILE_STORE.upsert(
+        record = get_app_dependencies().profile_store.upsert(
             ProfileData(
                 name=name,
                 gpu=HardwareProfileData(
@@ -134,14 +129,14 @@ def seed_profiles_and_libraries(snapshot: config_module.ConfigSnapshot) -> None:
 
     for name, library in snapshot.config.libraries.items():
         profile_id = library.profile_id
-        if profile_id is None or PROFILE_STORE.get(profile_id) is None:
+        if profile_id is None or get_app_dependencies().profile_store.get(profile_id) is None:
             profile_id = name_to_id.get(library.profile)
         if profile_id is None:
             LOGGER.warning(
                 "Skipping library %s because profile %s was not seeded", name, library.profile
             )
             continue
-        LIBRARY_CONFIG_STORE.upsert(
+        get_app_dependencies().library_config_store.upsert(
             LibraryData(
                 name=name,
                 root=library.root,
@@ -150,13 +145,6 @@ def seed_profiles_and_libraries(snapshot: config_module.ConfigSnapshot) -> None:
             )
         )
 
-
-# Initialize Config
-config_snapshot = config_service.reload()
-seed_profiles_and_libraries(config_snapshot)
-LOG_STORE.update_retention(config_snapshot.config.logging.retention_days)
-
-app = FastAPI(title="Chromecast Transcode Orchestrator", version="0.1.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -190,7 +178,7 @@ async def worker_watchdog() -> None:
     while True:
         try:
             await asyncio.sleep(60)
-            failed = await job_manager.check_dead_workers(WORKER_TELEMETRY)
+            failed = await get_app_dependencies().job_manager.check_dead_workers(WORKER_TELEMETRY)
             if failed > 0:
                 LOGGER.warning("Watchdog marked %s jobs as failed due to dead workers", failed)
         except asyncio.CancelledError:
@@ -203,18 +191,23 @@ async def worker_watchdog() -> None:
 
 @app.on_event("startup")
 async def startup_event() -> None:
-    await job_manager.initialize()
+    configure_logging() # Moved from global scope
+    config_snapshot = get_app_dependencies().config_service.reload() # Moved from global scope
+    seed_profiles_and_libraries(config_snapshot) # Moved from global scope
+    get_app_dependencies().log_store.update_retention(config_snapshot.config.logging.retention_days) # Moved from global scope
+
+    await get_app_dependencies().job_manager.initialize()
     asyncio.create_task(worker_watchdog())
     LOGGER.info("Starting initial scan of configured libraries.")
-    for library in LIBRARY_CONFIG_STORE.list_libraries():
-        profile = PROFILE_STORE.get(library.profile_id)
+    for library in get_app_dependencies().library_config_store.list_libraries():
+        profile = get_app_dependencies().profile_store.get(library.profile_id)
         if profile is None:
             LOGGER.warning("Library %s has missing profile id %s", library.name, library.profile_id)
             continue
         LOGGER.info("Scanning library %s at %s", library.name, library.root)
         await reconcile_library(library.name, library.root, profile.name, profile.id)
 
-    jellyfin_cfg = config_service.snapshot.config.jellyfin
+    jellyfin_cfg = get_app_dependencies().config_service.snapshot.config.jellyfin
     if jellyfin_cfg:
         LOGGER.info("Scheduling Jellyfin scans for configured libraries.")
         asyncio.create_task(_safe_jellyfin_trigger(jellyfin_cfg))

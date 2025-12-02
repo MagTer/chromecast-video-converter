@@ -1,7 +1,7 @@
 from datetime import datetime
 
 from app.config import DEFAULT_CONFIG
-from app.dependencies import JOB_HISTORY_STORE, config_service
+from app.dependencies import get_app_dependencies
 from app.job_history import JobHistoryEntry
 from app.main import app
 from fastapi.testclient import TestClient
@@ -11,6 +11,7 @@ client = TestClient(app)
 
 def test_reset_config():
     # Modify config first
+    config_service = get_app_dependencies().config_service
     config_service.update_logging(retention_days=30)
     assert config_service.snapshot.config.logging.retention_days == 30
 
@@ -26,7 +27,7 @@ def test_reset_config():
 
 def test_history_endpoint():
     # Seed history
-    JOB_HISTORY_STORE.record(
+    get_app_dependencies().job_history_store.record(
         JobHistoryEntry(
             job_id="test-job-1",
             path="/test/movie.mkv",
