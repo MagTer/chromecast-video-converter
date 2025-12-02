@@ -1,56 +1,60 @@
-# 01 - Getting Started
+# Getting Started
 
-This guide walks through prerequisites, configuration, and day-one operation of the Chromecast Video Converter MVP. The stack is intended for local GPU-equipped hosts and runs entirely via Docker Compose.
+This guide mirrors the behavior implemented in `docker-compose.yml`, the FastAPI routers, and the watcher/worker services. Follow it to bring the stack online on a GPU-capable host.
 
 ## Prerequisites
 
-- Docker Desktop or a compatible Docker Engine installation.
-- NVIDIA GPU with the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/index.html) installed so the `gpu-ffmpeg` service can reach NVENC devices.
-- Open network access to `localhost:9000` for the dashboard/API and `localhost:6379` if you want to inspect Redis directly.
+- Docker Engine or Docker Desktop with the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/index.html) so the `gpu-ffmpeg` container can reach NVENC devices.
+- A host directory that contains your media (for example `D:\Media\Movies` on Windows) and can be bind-mounted twice (`/watch/...` for watchers and `/media/...` for encoders/orchestrator).
+- Open access to `localhost:9000` for the dashboard/API and `localhost:6379` if you need to inspect Redis.
 
-## Initial setup
+## Prepare the environment
 
-1. Configuration now seeds from built-in defaults defined in `services/orchestrator/app/config.py` (single `chromecast` profile with GPU-first, CPU-fallback settings) and persists to `./logs/config.db` on first boot—no YAML files required.
-2. Keep the left-hand side of the Compose volume mounts aligned with your host paths and use the corresponding `/watch/...` or `/media/...` paths inside the UI so the defaults match container mounts.
-3. Review operational guardrails in the defaults (GPU temperature cutoff, disk usage limits, and whether originals are deleted after successful verification); after boot, update changes through the dashboard so they persist in the database.
-4. Build the stack locally:
-   ```bash
-   docker compose build
-   ```
-5. Start the services:
-   ```bash
-   docker compose up
-   ```
+1. Copy `.env.template` to `.env`.
+2. Set `PATH_MOVIES` and `PATH_SERIES` to the host paths that should be mounted into the containers. Relative entries are resolved against the repository root, e.g. `./media/movies`.
+3. Optional overrides:
+   - `GPU_STREAM_READER_LIMIT`, `GPU_FFPROBE_TIMEOUT`, `GPU_FFMPEG_TIMEOUT`, `GPU_FFMPEG_IDLE_TIMEOUT`, and `GPU_SUBTITLE_TIMEOUT` control the worker timeouts exposed in `services/gpu-ffmpeg/app/worker.py`.
+   - `WATCH_POLLING`, `EVENT_BUFFER_SECONDS`, `EVENT_RETRY_ATTEMPTS`, `EVENT_RETRY_BACKOFF_SECONDS`, and `EVENT_SPOOL_FILE` control how the watcher batches events and how much backlog it retains when the API is unavailable.
+   - `JOB_VISIBILITY_TIMEOUT` (seconds) governs how long a worker can hold a job before Redis re-delivers it.
 
-## Using the dashboard and API
+Configuration is stored in SQLite (`./data/config.db`). The orchestrator seeds that file with the defaults from `services/orchestrator/app/config.py` the first time it boots (two libraries + one `chromecast` profile). All runtime changes should go through the dashboard or API; editing the DB manually is unsupported.
 
-- Open `http://localhost:9000` to view the dashboard. It surfaces queue counts, recent logs, and manual scan controls.
-- Health endpoints: `/api/healthz` (confirms libraries are loaded) and `/api/readyz` (signals the API is ready to serve jobs).
-- GPU telemetry: the queue header reports how many workers have usable CUDA/NVENC
-  devices (for example, `GPU: 1/1 ready`). When no encoder is detected the
-  worker returns an explicit error and the job fails fast instead of falling
-  back to CPU encoding.
-- Queue controls: `/api/queue/pause` and `/api/queue/resume` allow operators to throttle work when storage or thermal limits are reached.
-- Logging: `/api/logs` returns recent log entries across the orchestrator, GPU workers, and folder watcher. Configure the retention window (default 7 days) and review log disk usage from the Configuration page.
-- Library management: add libraries at runtime with `POST /api/libraries` (fields: `name`, `root`, `profile_id`) or the Configuration page form. The orchestrator always scans an entire tree (`depth` defaults to `"max"`), so the UI hides that field and normalizes `/watch/...` inputs to `/media/...` for clarity. Remove libraries with `DELETE /api/libraries/{name}`; existing entries are marked `removed` for traceability.
-- Live updates: the dashboard keeps a WebSocket open to `/ws` so job and entry updates land in real time. Connections auto-retry if the API restarts.
-- Job lifecycle:
-  - `/api/scan` triggers a (re)scan of configured libraries to enqueue work.
-  - `/api/jobs/next` supplies the next job to GPU workers.
-  - `/api/jobs/{id}/status` records progress and completion updates from workers.
-  - `/api/library/entries` now accepts `limit`, `offset`, and `include_total` for paginated browsing; the dashboard uses a “Load more” control instead of refetching the entire catalog on every refresh.
-  - `/api/jobs/clear` removes completed/failed jobs from Redis so the dashboard’s queue table stays focused on active work (the **Clear processed items** button on the Queue page calls this endpoint and refreshes automatically).
+## Build and run
 
-## Media watcher behavior
+```bash
+docker compose build
+docker compose up
+```
 
-The `folder-watcher` container uses Python's `watchdog` library to stream create/modify/delete events from the mounted `movies` and `series` directories. Events include the library name, full path, basic metadata, and whether the entry is a directory. The watcher backs off and retries when the orchestrator API is temporarily unavailable and can optionally buffer events for batch delivery.
+- `orchestrator` exposes the dashboard/API on `http://localhost:9000`.
+- `folder-watcher` waits until the bind mounts exist, then streams file events to `/api/events`. If the API is unreachable it appends batches to the spool (`/tmp/folder-watcher-spool.jsonl`) and replays the file on the next start.
+- `gpu-ffmpeg` polls `/api/jobs/next`, fetches `/api/config` for the latest profiles/operational settings, emits telemetry via `/api/workers/telemetry`, and forwards structured logs to `/api/logs/ingest`.
+- `redis` holds the job stream, queue depth counter, and per-path dedupe keys.
 
-For environments where bind mounts do not propagate filesystem events reliably (e.g., Docker Desktop on Windows/Mac), set `WATCH_POLLING=true` in `docker-compose.yml` to use polling instead of native OS events.
+Stop the stack with `Ctrl+C` or `docker compose down`. Removing the `redis_data` volume resets queued jobs.
 
-Set `EVENT_BUFFER_SECONDS` to a non-zero value to group events into timed batches; adjust `EVENT_RETRY_ATTEMPTS` and `EVENT_RETRY_BACKOFF_SECONDS` to control the retry window if the API is down. If the API remains unreachable, undelivered batches are spooled to `EVENT_SPOOL_FILE` (default `/tmp/folder-watcher-spool.jsonl`) and replayed automatically on the next start.
+## Dashboard tour
 
-## Cleanup and troubleshooting
+The SPA served from `/` mirrors the FastAPI routers under `services/orchestrator/app/routers`:
 
-- Stop the stack with `Ctrl+C` in the Compose terminal or `docker compose down` from another shell.
-- If you adjust volume mounts or the quality config, restart the stack so new paths and guardrails take effect.
-- Redis data persists in the `redis_data` volume; remove it with `docker volume rm chromecast-video-converter_redis_data` if you want a clean queue state.
+- **Queue management** — Trigger manual scans (`/api/scan`), pause or resume intake, clear processed jobs, purge inactive deliveries, and monitor depth + GPU readiness (`/api/metrics` + worker telemetry).
+- **Job history** — Lists the most recent entries from `JOB_HISTORY_STORE`, including elapsed runtime and failure messages.
+- **Library entries** — Filters the SQLite catalog by library or status with `limit`/`offset` pagination. “Load more” simply increments the offset; the API response is an array, so the UI falls back to `received === limit` to detect more rows.
+- **Logs** — Reads `/api/logs`, `/api/logs/categories`, `/api/logs/sources`, and `/api/logs/stats`. Each entry includes severity, source, category, timestamp, and optional `request_id`. A retention form backs `/api/config/logging`.
+- **Configuration** — Adds/removes libraries via `/api/libraries`, edits encoding profiles through `/api/config/encoding`, updates GPU/CPU-specific knobs (NVENC preset, rc mode, CQ/bitrate, lookahead, AQ toggles), and shows host environment hints (WSL2 detection).
+
+The dashboard holds an open WebSocket (`/ws`) that relays `job-update`, `entry-update`, and `library-update` payloads broadcast by the orchestrator, so status changes land immediately without polling.
+
+## Operational tips
+
+- Use `/api/jobs/clear` when the queue table accumulates completed/failed rows or to free Redis memory.
+- `POST /api/jobs/purge-inactive` removes deliveries that never transitioned to `running` (e.g., when a worker crashed before acking).
+- When a file is re-encoded manually (`POST /api/library/entries/{id}/reprocess`), the orchestrator reserves that path before scheduling a new job to avoid duplicate conversions.
+- `/api/library/entries/{id}/remove-original` deletes the source only when the `*-chromecast.mp4` output exists and has a non-zero size; the GPU worker mirrored logic when `remove_original_after_success` is enabled.
+
+## Troubleshooting
+
+- `GET /api/healthz` verifies that libraries are loaded; `GET /api/readyz` simply confirms the FastAPI app is alive.
+- Use `docker compose logs -f service-name` for container-level issues. All containers also forward logs into `events.db`, so the dashboard log view should mirror the same output.
+- If watcher mounts are slow to appear (common on WSL2), it keeps retrying every 5 seconds before scheduling observers. You can change this behavior with `ROOT_RETRY_SECONDS` inside the Compose file.
+- Delete `./data/*.db` only when you intentionally want to reset configuration, library catalog, and logs—doing so wipes runtime state.

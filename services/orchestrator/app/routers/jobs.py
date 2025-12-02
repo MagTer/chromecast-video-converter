@@ -2,7 +2,7 @@ import logging
 import re
 from functools import wraps
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
 from redis.exceptions import RedisError
@@ -95,13 +95,22 @@ async def clear_completed_jobs() -> JSONResponse:
     return JSONResponse({"removed": removed})
 
 
+@router.post("/api/jobs/purge-inactive")
+@guard_job_queue_errors
+async def purge_inactive_jobs() -> JSONResponse:
+    result = await job_manager.purge_inactive_jobs()
+    return JSONResponse(result)
+
+
 @router.get("/api/jobs/next")
 @guard_job_queue_errors
-async def next_job() -> JSONResponse:
+async def next_job(
+    worker_id: str = Query("api", description="ID of the worker claiming the job"),
+) -> JSONResponse:
     queue_state = await job_manager.queue_state()
     if queue_state["paused"]:
         return JSONResponse(queue_state | {"detail": "Queue paused"}, status_code=409)
-    claimed = await job_manager.acquire_next("api")
+    claimed = await job_manager.acquire_next(worker_id)
     if claimed is None:
         raise HTTPException(status_code=204, detail="No jobs available")
     delivery_id, job = claimed

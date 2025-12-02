@@ -5,21 +5,26 @@ import os
 import re
 import shlex
 import subprocess
+import sys
 import time
 from asyncio.subprocess import PIPE, STDOUT, Process
 from collections import deque
 from contextlib import suppress
+from contextvars import ContextVar
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
 import httpx
+from tenacity import retry, stop_after_attempt, wait_exponential
 
 from .capabilities import FfmpegCapabilities
 from .ffmpeg_builder import DEFAULT_LANGUAGE_PREFERENCES, FFmpegBuilder
 from .utils import detect_host_environment, resolve_media_path
 
 logging.addLevelName(logging.DEBUG, "VERBOSE")
+
+_current_request_id: ContextVar[Optional[str]] = ContextVar("request_id", default=None)
 
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
 if LOG_LEVEL == "VERBOSE":
@@ -73,6 +78,7 @@ class OrchestratorLogHandler(logging.Handler):
                     "category": category,
                     "logger": record.name,
                     "message": message,
+                    "request_id": _current_request_id.get(),
                 }
             ]
         }
@@ -110,6 +116,8 @@ SUPPORTED_TEXT_SUBTITLE_CODECS = {
     "srt",
 }
 
+EXPORT_SUBTITLE_LANGUAGES = {"en", "eng", "sv", "swe"}
+
 
 def _sanitize_language_tag(language: str | None) -> str:
     if not language:
@@ -127,82 +135,6 @@ def _subtitle_sidecar_path(output_path: Path, stream_index: int, language: str |
 def _is_text_subtitle(stream: dict) -> bool:
     codec = (stream.get("codec_name") or "").lower()
     return codec in SUPPORTED_TEXT_SUBTITLE_CODECS
-
-
-def _extract_subtitle_track(source: Path, stream_index: int, destination: Path) -> bool:
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    command = [
-        "ffmpeg",
-        "-hide_banner",
-        "-loglevel",
-        "error",
-        "-y",
-        "-i",
-        str(source),
-        "-map",
-        f"0:{stream_index}",
-        "-c:s",
-        "srt",
-        str(destination),
-    ]
-    run_kwargs = {
-        "check": True,
-        "capture_output": True,
-        "text": True,
-    }
-    if SUBTITLE_EXTRACTION_TIMEOUT is not None:
-        run_kwargs["timeout"] = SUBTITLE_EXTRACTION_TIMEOUT
-    try:
-        subprocess.run(command, **run_kwargs)
-        LOGGER.info("Extracted subtitle %s to %s", stream_index, destination)
-        return True
-    except subprocess.TimeoutExpired as exc:
-        LOGGER.warning(
-            "Timed out extracting subtitle %s after %ss (%s)",
-            stream_index,
-            SUBTITLE_EXTRACTION_TIMEOUT,
-            exc,
-        )
-        return False
-    except subprocess.SubprocessError as exc:
-        LOGGER.warning(
-            "Failed to extract subtitle %s (%s); %s",
-            stream_index,
-            exc,
-            exc.stderr or exc.stdout,
-        )
-        return False
-
-
-def _extract_embedded_subtitles(
-    source: Path, analysis: dict, output_path: Path
-) -> list[dict[str, str]]:
-    extracted: list[dict[str, str]] = []
-    streams = analysis.get("streams") or []
-    for stream in streams:
-        if stream.get("codec_type") != "subtitle":
-            continue
-        stream_index = stream.get("index")
-        if stream_index is None:
-            continue
-        path = _subtitle_sidecar_path(
-            output_path, stream_index, stream.get("tags", {}).get("language")
-        )
-        LOGGER.debug(
-            "Attempting subtitle extraction index=%s codec=%s",
-            stream_index,
-            stream.get("codec_name"),
-        )
-        if _is_text_subtitle(stream):
-            if _extract_subtitle_track(source, stream_index, path):
-                extracted.append({"stream_index": stream_index, "path": str(path)})
-        else:
-            LOGGER.info(
-                "Skipping subtitle %s (%s) for extraction; codec not text-based",
-                stream_index,
-                stream.get("codec_name"),
-            )
-    return extracted
 
 
 HOST_ENVIRONMENT = detect_host_environment()
@@ -411,14 +343,12 @@ def snapshot_gpu_state() -> dict[str, Any]:
         "tonemap_cuda_available": bool(ffmpeg_support.get("tonemap_cuda")),
     }
 
-
 def require_gpu(gpu_state: dict[str, Any] | None = None) -> dict[str, Any]:
     state = gpu_state or snapshot_gpu_state()
     if not state.get("available"):
         message = state.get("message") or "GPU unavailable for NVENC workloads"
         raise RuntimeError(message)
     return state
-
 
 def _derive_bit_depth(stream: dict) -> int | None:
     bits = stream.get("bits_per_raw_sample")
@@ -436,7 +366,6 @@ def _derive_bit_depth(stream: dict) -> int | None:
             return None
     return None
 
-
 def _detect_hdr(stream: dict) -> bool:
     transfer = (stream.get("color_transfer") or "").lower()
     if transfer in {"smpte2084", "arib-std-b67"}:
@@ -451,7 +380,6 @@ def _detect_hdr(stream: dict) -> bool:
     bit_depth = _derive_bit_depth(stream) or 8
     return bit_depth > 8
 
-
 def _augment_analysis_with_video_metadata(analysis: dict) -> dict:
     streams = analysis.get("streams") or []
     for stream in streams:
@@ -461,7 +389,6 @@ def _augment_analysis_with_video_metadata(analysis: dict) -> dict:
         stream["is_hdr"] = _detect_hdr(stream)
     analysis["streams"] = streams
     return analysis
-
 
 def probe_file(filepath: str | Path) -> dict:
     target_path = resolve_media_path(filepath)
@@ -521,7 +448,6 @@ def probe_file(filepath: str | Path) -> dict:
 def _loggable_command(command: list[str]) -> str:
     return " ".join(shlex.quote(arg) for arg in command)
 
-
 def _media_summary(analysis: dict) -> dict:
     streams = analysis.get("streams") or []
     video = next((s for s in streams if s.get("codec_type") == "video"), {}) or {}
@@ -541,7 +467,6 @@ def _media_summary(analysis: dict) -> dict:
         "audio_streams": len(audio_streams),
         "subtitle_streams": len(subtitle_streams),
     }
-
 
 def _extract_filter_chain(command: list[str]) -> str | None:
     if "-vf" not in command:
@@ -666,7 +591,6 @@ def _extract_duration(analysis: dict) -> float:
     except (TypeError, ValueError):
         return 0.0
 
-
 def _progress_callback_factory(
     duration: float,
     loop: asyncio.AbstractEventLoop,
@@ -720,9 +644,14 @@ async def resolve_encoding_for_job(job: dict, client: httpx.AsyncClient) -> dict
     return encoding or {}
 
 
+@retry(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=1, max=10),
+    reraise=True,
+)
 async def claim_job(client: httpx.AsyncClient) -> Tuple[Optional[str], Optional[Dict[str, Any]]]:
     try:
-        response = await client.get("/api/jobs/next")
+        response = await client.get("/api/jobs/next", params={"worker_id": WORKER_ID})
         if response.status_code == 204:
             return None, None
         response.raise_for_status()
@@ -751,6 +680,11 @@ async def queue_paused(client: httpx.AsyncClient) -> Tuple[bool, Optional[str]]:
         return False, None
 
 
+@retry(
+    stop=stop_after_attempt(5),
+    wait=wait_exponential(multiplier=1, min=1, max=10),
+    reraise=True,
+)
 async def update_job_status(
     client: httpx.AsyncClient,
     job_id: str,
@@ -798,8 +732,11 @@ async def publish_worker_telemetry(
 
 async def telemetry_loop(client: httpx.AsyncClient, worker_id: str) -> None:
     while True:
-        gpu_state = snapshot_gpu_state()
-        await publish_worker_telemetry(client, worker_id, gpu_state)
+        try:
+            gpu_state = snapshot_gpu_state()
+            await publish_worker_telemetry(client, worker_id, gpu_state)
+        except Exception as exc:
+            LOGGER.warning("Telemetry loop error: %s", exc)
         await asyncio.sleep(max(GPU_TELEMETRY_INTERVAL, 5))
 
 
@@ -848,7 +785,6 @@ async def _validate_output(output: Path, expected_duration: float) -> bool:
             return False
     return True
 
-
 def _build_output_path(source: Path) -> Path:
     resolved = resolve_media_path(source)
     return resolved.parent / f"{resolved.stem}-chromecast.mp4"
@@ -872,161 +808,146 @@ async def _maybe_remove_original(source: Path, output_path: Path, expected_durat
 
 async def process_job(client: httpx.AsyncClient, job: dict) -> None:  # noqa: C901
     job_id = job["id"]
-    source = job["path"]
-    playback_target = resolve_media_path(source)
-    LOGGER.info("Picked up job %s for %s (resolved %s)", job_id[:8], source, playback_target)
-    await update_job_status(client, job_id, "running", 5, "Allocated to GPU worker")
-    if not playback_target.exists():
-        message = f"Source file not found: {source}"
-        LOGGER.error("%s", message)
-        await update_job_status(client, job_id, "failed", 0, message)
-        return
-
-    if not await _ensure_gpu_ready(client, job_id):
-        return
-
-    analysis = await asyncio.to_thread(probe_file, playback_target)
-    analysis = analysis or {}
-    duration = _extract_duration(analysis)
-    LOGGER.info("Media analysis for %s: %s", job_id[:8], _media_summary(analysis))
-    if duration == 0:
-        LOGGER.warning("Duration probe for %s returned 0 seconds", playback_target)
-
-    output_path = _build_output_path(playback_target)
-    encoding = await resolve_encoding_for_job(job, client)
-    if not encoding:
-        LOGGER.warning(
-            "No encoding settings supplied for profile %s; using defaults.",
-            job.get("profile"),
-        )
-    pipeline = encoding.get("pipeline") if isinstance(encoding, dict) else None
-
-    analysis["encoding"] = encoding
-    analysis["profile"] = job.get("profile")
-    if pipeline:
-        analysis["pipeline"] = pipeline
-
-    subtitle_streams = [
-        stream
-        for stream in (analysis.get("streams") or [])
-        if stream.get("codec_type") == "subtitle"
-    ]
-    if subtitle_streams:
-        sidecars = await asyncio.to_thread(
-            _extract_embedded_subtitles, playback_target, analysis, output_path
-        )
-        if sidecars:
-            analysis["subtitle_sidecars"] = sidecars
-            LOGGER.info(
-                "Subtitle extraction created %s sidecars for job %s",
-                len(sidecars),
-                job_id[:8],
-            )
-        analysis["skip_embedded_subtitles"] = bool(sidecars)
-        LOGGER.debug(
-            "Job %s subtitle extraction summary: skip_embedded=%s sidecars=%s",
-            job_id[:8],
-            analysis["skip_embedded_subtitles"],
-            analysis.get("subtitle_sidecars"),
-        )
-
-    if await _validate_output(output_path, duration):
-        message = f"Output already present at {output_path}; skipping encode"
-        await update_job_status(client, job_id, "completed", 100, message)
-        LOGGER.info("Job %s completed from existing output %s", job_id[:8], output_path)
-        if await _maybe_remove_original(playback_target, output_path, duration):
-            await update_job_status(
-                client,
-                job_id,
-                "completed",
-                100,
-                f"{message}. Original removed",
-            )
-        return
-
-    builder = FFmpegBuilder(
-        analysis,
-        playback_target,
-        output_path,
-        PROFILES,
-        FFMPEG_CAPABILITIES,
-        HOST_ENVIRONMENT,
-        language_preferences=LANGUAGE_PREFERENCES,
-    )
+    request_id = job.get("request_id")
+    token = _current_request_id.set(request_id)
     try:
-        command = builder.build()
-    except RuntimeError as exc:
-        message = f"Validation failed: {exc}"
-        LOGGER.error("%s", message)
-        await update_job_status(client, job_id, "failed", 0, message)
-        return
+        source = job["path"]
+        playback_target = resolve_media_path(source)
+        LOGGER.info("Picked up job %s for %s (resolved %s)", job_id[:8], source, playback_target)
+        await update_job_status(client, job_id, "running", 5, "Allocated to GPU worker")
+        if not playback_target.exists():
+            message = f"Source file not found: {source}"
+            LOGGER.error("%s", message)
+            await update_job_status(client, job_id, "failed", 0, message)
+            return
 
-    pipeline_info = analysis.get("pipeline") or {}
-    LOGGER.info(
-        "Job %s pipeline: decode=%s scale=%s encode=%s attempt=%s/%s",
-        job_id[:8],
-        pipeline_info.get("decode_type"),
-        pipeline_info.get("scale_type"),
-        pipeline_info.get("encode_type"),
-        pipeline_info.get("attempt"),
-        pipeline_info.get("max_attempts"),
-    )
+        if not await _ensure_gpu_ready(client, job_id):
+            return
 
-    filter_chain = _extract_filter_chain(command)
-    if filter_chain:
-        LOGGER.info("Job %s video filters: %s", job_id[:8], filter_chain)
+        analysis = await asyncio.to_thread(probe_file, playback_target)
+        analysis = analysis or {}
+        duration = _extract_duration(analysis)
+        LOGGER.info("Media analysis for %s: %s", job_id[:8], _media_summary(analysis))
+        if duration == 0:
+            LOGGER.warning("Duration probe for %s returned 0 seconds", playback_target)
 
-    loop = asyncio.get_running_loop()
-    progress_callback, _, _ = _progress_callback_factory(duration, loop, client, job_id)
+        output_path = _build_output_path(playback_target)
+        encoding = await resolve_encoding_for_job(job, client)
+        if not encoding:
+            LOGGER.warning(
+                "No encoding settings supplied for profile %s; using defaults.",
+                job.get("profile"),
+            )
 
-    return_code, ffmpeg_logs = await run_conversion(
-        command,
-        progress_callback,
-        timeout=FFMPEG_TIMEOUT,
-        idle_timeout=FFMPEG_IDLE_TIMEOUT,
-    )
+        pipeline = job.get("pipeline")
+        if not pipeline and isinstance(encoding, dict):
+            pipeline = encoding.get("pipeline")
 
-    if return_code == 0:
-        message = f"Encoding finished to {output_path}"
-        if not await _validate_output(output_path, duration):
+        analysis["encoding"] = encoding
+        analysis["profile"] = job.get("profile")
+        if pipeline:
+            analysis["pipeline"] = pipeline
+
+        if await _validate_output(output_path, duration):
+            message = f"Output already present at {output_path}; skipping encode"
+            await update_job_status(client, job_id, "completed", 100, message)
+            LOGGER.info("Job %s completed from existing output %s", job_id[:8], output_path)
+            if await _maybe_remove_original(playback_target, output_path, duration):
+                await update_job_status(
+                    client,
+                    job_id,
+                    "completed",
+                    100,
+                    f"{message}. Original removed",
+                )
+            return
+
+        builder = FFmpegBuilder(
+            analysis,
+            playback_target,
+            output_path,
+            PROFILES,
+            FFMPEG_CAPABILITIES,
+            HOST_ENVIRONMENT,
+            language_preferences=LANGUAGE_PREFERENCES,
+        )
+        try:
+            command = builder.build()
+        except RuntimeError as exc:
+            message = f"Validation failed: {exc}"
+            LOGGER.error("%s", message)
+            await update_job_status(client, job_id, "failed", 0, message)
+            return
+
+        pipeline_info = analysis.get("pipeline") or {}
+        LOGGER.info(
+            "Job %s pipeline: decode=%s scale=%s encode=%s attempt=%s/%s",
+            job_id[:8],
+            pipeline_info.get("decode_type"),
+            pipeline_info.get("scale_type"),
+            pipeline_info.get("encode_type"),
+            pipeline_info.get("attempt"),
+            pipeline_info.get("max_attempts"),
+        )
+
+        filter_chain = _extract_filter_chain(command)
+        if filter_chain:
+            LOGGER.info("Job %s video filters: %s", job_id[:8], filter_chain)
+
+        loop = asyncio.get_running_loop()
+        progress_callback, _, _ = _progress_callback_factory(duration, loop, client, job_id)
+
+        return_code, ffmpeg_logs = await run_conversion(
+            command,
+            progress_callback,
+            timeout=FFMPEG_TIMEOUT,
+            idle_timeout=FFMPEG_IDLE_TIMEOUT,
+        )
+
+        if return_code == 0:
+            message = f"Encoding finished to {output_path}"
+            if not await _validate_output(output_path, duration):
+                await update_job_status(
+                    client,
+                    job_id,
+                    "failed",
+                    0,
+                    f"Encoding finished but output missing or invalid at {output_path}",
+                )
+                return
+            removed = await _maybe_remove_original(playback_target, output_path, duration)
+            if removed:
+                message = f"{message} (original removed)"
+            await update_job_status(client, job_id, "completed", 100, message)
+            LOGGER.info("Job %s completed, output: %s", job_id[:8], output_path)
+        else:
+            classification = classify_ffmpeg_error(ffmpeg_logs, return_code)
+            message = f"FFmpeg exited with code {return_code}"
+            if ffmpeg_logs:
+                LOGGER.error(
+                    "Job %s failed (code %s). Last FFmpeg output:\n%s",
+                    job_id[:8],
+                    return_code,
+                    "\n".join(ffmpeg_logs),
+                )
+                message = (
+                    f"{message}; {classification.get('category')}: "
+                    f"{classification.get('message')}"
+                )
+            if classification.get("category") == "nvenc_unavailable":
+                FFMPEG_CAPABILITIES.refresh()
             await update_job_status(
                 client,
                 job_id,
                 "failed",
                 0,
-                f"Encoding finished but output missing or invalid at {output_path}",
+                message,
+                return_code=return_code,
+                logs=ffmpeg_logs,
+                pipeline=pipeline_info or pipeline,
             )
-            return
-        removed = await _maybe_remove_original(playback_target, output_path, duration)
-        if removed:
-            message = f"{message} (original removed)"
-        await update_job_status(client, job_id, "completed", 100, message)
-        LOGGER.info("Job %s completed, output: %s", job_id[:8], output_path)
-    else:
-        classification = classify_ffmpeg_error(ffmpeg_logs, return_code)
-        message = f"FFmpeg exited with code {return_code}"
-        if ffmpeg_logs:
-            LOGGER.error(
-                "Job %s failed (code %s). Last FFmpeg output:\n%s",
-                job_id[:8],
-                return_code,
-                "\n".join(ffmpeg_logs),
-            )
-            message = (
-                f"{message}; {classification.get('category')}: " f"{classification.get('message')}"
-            )
-        if classification.get("category") == "nvenc_unavailable":
-            FFMPEG_CAPABILITIES.refresh()
-        await update_job_status(
-            client,
-            job_id,
-            "failed",
-            0,
-            message,
-            return_code=return_code,
-            logs=ffmpeg_logs,
-            pipeline=pipeline_info or pipeline,
-        )
+    finally:
+        _current_request_id.reset(token)
 
 
 async def main() -> None:
@@ -1070,5 +991,18 @@ async def main() -> None:
                 await telemetry_task
 
 
+def handle_exception(exc_type, exc_value, exc_traceback):
+    if issubclass(exc_type, KeyboardInterrupt):
+        sys.__excepthook__(exc_type, exc_value, exc_traceback)
+        return
+    LOGGER.critical("Uncaught exception", exc_info=(exc_type, exc_value, exc_traceback))
+
+sys.excepthook = handle_exception
+
+
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except Exception as exc:
+        LOGGER.critical("Fatal error in worker main loop", exc_info=exc)
+        sys.exit(1)

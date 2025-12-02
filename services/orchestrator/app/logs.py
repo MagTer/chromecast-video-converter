@@ -8,6 +8,8 @@ from pathlib import Path
 from threading import RLock
 from typing import List, Optional
 
+from .context import get_request_id
+
 VERBOSE_LEVEL_NAME = "VERBOSE"
 logging.addLevelName(logging.DEBUG, VERBOSE_LEVEL_NAME)
 
@@ -59,6 +61,7 @@ class LogEntry:
     category: str
     logger: str
     message: str
+    request_id: Optional[str] = None
 
     def to_dict(self) -> dict:
         return {
@@ -70,6 +73,7 @@ class LogEntry:
             "category": self.category,
             "logger": self.logger,
             "message": self.message,
+            "request_id": self.request_id,
         }
 
 
@@ -96,7 +100,8 @@ class LogStore:
                     logger TEXT NOT NULL,
                     source TEXT NOT NULL,
                     category TEXT NOT NULL,
-                    message TEXT NOT NULL
+                    message TEXT NOT NULL,
+                    request_id TEXT
                 )
                 """
             )
@@ -105,6 +110,7 @@ class LogStore:
             self._conn.execute("CREATE INDEX IF NOT EXISTS idx_logs_logger ON logs(category)")
             self._conn.execute("CREATE INDEX IF NOT EXISTS idx_logs_source ON logs(source)")
             self._conn.execute("CREATE INDEX IF NOT EXISTS idx_logs_timestamp ON logs(timestamp)")
+            self._conn.execute("CREATE INDEX IF NOT EXISTS idx_logs_request_id ON logs(request_id)")
             self._conn.commit()
             self._prune_expired()
 
@@ -127,6 +133,9 @@ class LogStore:
                 schema_updated = True
             if "category" not in columns:
                 self._conn.execute("ALTER TABLE logs ADD COLUMN category TEXT NOT NULL DEFAULT ''")
+                schema_updated = True
+            if "request_id" not in columns:
+                self._conn.execute("ALTER TABLE logs ADD COLUMN request_id TEXT")
                 schema_updated = True
             if schema_updated:
                 self._conn.commit()
@@ -193,9 +202,10 @@ class LogStore:
                     logger,
                     source,
                     category,
-                    message
+                    message,
+                    request_id
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     utc_timestamp.timestamp(),
@@ -206,6 +216,7 @@ class LogStore:
                     source,
                     category,
                     entry.message,
+                    entry.request_id,
                 ),
             )
             self._conn.commit()
@@ -221,10 +232,11 @@ class LogStore:
         logger_name: Optional[str] = None,
         category: Optional[str] = None,
         source: Optional[str] = None,
+        request_id: Optional[str] = None,
     ) -> tuple[str, list]:
         sql = (
             "SELECT timestamp, level, severity, severity_value, logger, source, "
-            "category, message FROM logs"
+            "category, message, request_id FROM logs"
         )
         clauses = []
         params: list = []
@@ -241,6 +253,9 @@ class LogStore:
         if source:
             clauses.append("LOWER(source) = ?")
             params.append(source.lower())
+        if request_id:
+            clauses.append("request_id = ?")
+            params.append(request_id)
         if query:
             clauses.append("LOWER(message) LIKE ?")
             params.append(f"%{query.lower()}%")
@@ -260,6 +275,7 @@ class LogStore:
         logger_name: Optional[str] = None,
         category: Optional[str] = None,
         source: Optional[str] = None,
+        request_id: Optional[str] = None,
         limit: int = 100,
     ) -> List[dict]:
         sql, params = self._filter_query(
@@ -270,6 +286,7 @@ class LogStore:
             logger_name=logger_name,
             category=category,
             source=source,
+            request_id=request_id,
         )
         params[-1] = limit
         with self._lock:
@@ -281,6 +298,7 @@ class LogStore:
             severity = row["severity"] if "severity" in row_keys else row["level"]
             category = row["category"] if "category" in row_keys else row["logger"]
             source = row["source"] if "source" in row_keys else ""
+            req_id = row["request_id"] if "request_id" in row_keys else None
             entries.append(
                 LogEntry(
                     timestamp=_ensure_utc(
@@ -297,6 +315,7 @@ class LogStore:
                     source=source,
                     category=category,
                     message=row["message"],
+                    request_id=req_id,
                 ).to_dict()
             )
         return entries
@@ -338,6 +357,7 @@ class StructuredLogFilter(logging.Filter):
         )
         record.source = getattr(record, "source", None) or derived_source
         record.category = getattr(record, "category", None) or derived_category
+        record.request_id = getattr(record, "request_id", None) or get_request_id()
         return True
 
 
@@ -353,6 +373,7 @@ class SQLiteLogHandler(logging.Handler):
         severity = getattr(record, "severity", record.levelname)
         severity_value = getattr(record, "severity_value", _severity_value(severity))
         derived_source, derived_category = derive_source_category(record.name)
+        request_id = getattr(record, "request_id", None)
         entry = LogEntry(
             timestamp=_ensure_utc(datetime.fromtimestamp(record.created, tz=timezone.utc)),
             level=record.levelname,
@@ -362,6 +383,7 @@ class SQLiteLogHandler(logging.Handler):
             source=source or derived_source,
             category=category or derived_category,
             message=message,
+            request_id=request_id,
         )
         try:
             self.store.add_entry(entry)

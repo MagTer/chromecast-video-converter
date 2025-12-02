@@ -1,12 +1,12 @@
 # Roadmap and Gap Analysis
 
-This roadmap tracks the current MVP state, known risks, and staged steps toward a
+This roadmap tracks the current stack state, known risks, and staged steps toward a
 production-ready public release that could later bundle alongside Jellyfin.
 
 Low-maintenance is the default posture: every stage below should reduce manual
 touch points, minimize moving parts, and keep operational work predictable.
 
-## Current MVP snapshot
+## Current stack snapshot
 
 - **Orchestrator API and dashboard** – FastAPI service exposes health/ready
   endpoints, queue listings, log streaming, manual scans, job claims/updates,

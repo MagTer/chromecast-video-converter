@@ -49,9 +49,11 @@
               <button id="clear-processed" type="button" class="secondary">Clear processed</button>
             </div>
           </div>
-          <span id="queue-metrics" class="status-pill status-idle">Depth: …</span>
-          <span id="gpu-metrics" class="status-pill status-idle">GPU: …</span>
-          <span id="queue-status" class="status-pill status-idle">Loading…</span>
+          <div style="margin-left:auto; display:flex; gap:0.5rem; align-items:center;">
+             <span id="gpu-metrics" class="status-pill status-idle">GPU: …</span>
+             <span id="queue-metrics" class="status-pill status-idle">Depth: …</span>
+             <span id="queue-status" class="status-pill status-idle">Loading…</span>
+          </div>
         </div>
       </header>
       <p id="scan-result" class="hint"></p>
@@ -99,7 +101,7 @@
               <th>File</th>
               <th>Profile</th>
               <th>Pipeline</th>
-              <th>Details</th>
+              <th>Details / Logs</th>
             </tr>
           </thead>
           <tbody id="history-rows"></tbody>
@@ -224,6 +226,16 @@
           <button id="reset-config" type="button" class="secondary danger">Reset to Defaults</button>
         </div>
       </header>
+      <div class="panel" style="margin-bottom:1rem;">
+        <header style="margin-bottom:0.5rem;">
+          <h3 style="margin:0;">Queue maintenance</h3>
+          <p class="hint" style="margin:0;">Use these tools to clear Redis entries when workers are offline.</p>
+        </header>
+        <div class="button-group" style="margin-bottom:0.5rem;">
+          <button id="purge-inactive-jobs" type="button" class="danger">Purge inactive jobs</button>
+        </div>
+        <p id="purge-jobs-result" class="hint"></p>
+      </div>
       <div class="panel">
         <form id="config-form">
           <div class="grid-two">
@@ -625,6 +637,7 @@
           </div>
           <div style="margin-top:1rem; display:flex; gap:0.5rem; align-items:center;">
             <button type="submit">Save encoding profile</button>
+            <button type="button" class="secondary" id="discard-config">Discard Changes</button>
             <span id="config-result" class="hint"></span>
           </div>
           <pre id="ffmpeg-preview" class="ffmpeg-preview" aria-label="ffmpeg preview"></pre>

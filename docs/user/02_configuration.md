@@ -1,50 +1,92 @@
-# 02 - Configuration Guidelines
+# Configuration & Runtime Controls
 
-## Media paths via `.env`
+Everything in this guide maps directly to code under `services/orchestrator/app`, `services/folder-watcher/app`, and `services/gpu-ffmpeg/app`. Use it as the single source of truth for what the stack actually supports.
 
-- Copy `.env.template` to `.env` and set `PATH_MOVIES`/`PATH_SERIES` to the host directories that hold your libraries. Relative values are resolved from the repository root (for example, `./media/movies`); absolute paths work for network shares or mounted drives such as `/mnt/storage/Movies` or `D:\\Media\\Movies` on Windows.
-- Docker Compose consumes those variables in every service, binding each host directory twice: once to `/watch/<library>` and once to `/media/<library>`. The orchestrator understands both mount roots, so UI/API calls and watcher events can reference either prefix.
-- Because these host-root bindings determine what the containers actually see, the orchestrator’s library definitions stored in the config database must use one of the mounted Linux paths (`/watch/movies`, `/watch/series`, `/media/...`) while the Windows host path stays locked to the left-hand side of the Compose mounts. The orchestrator canonicalizes everything to the configured display prefix (default `/media`), so watcher events under `/watch/...` automatically refer to the same entries and jobs as `/media/...`.
-- Optional worker overrides can also live in `.env`. Set `GPU_STREAM_READER_LIMIT` if long FFmpeg stderr lines trigger `LimitOverrunError` during encoding; Compose forwards that value to the GPU worker (default: `1000000`). Use `GPU_FFPROBE_TIMEOUT`, `GPU_FFMPEG_TIMEOUT`, and `GPU_FFMPEG_IDLE_TIMEOUT` to bound how long ffprobe analyses, full encodes, or idle (no-progress) windows are allowed to run before the worker force-fails the job and acknowledges it back to the orchestrator (defaults: 120 s, 7200 s, and 600 s respectively; set to `0` to disable a limit). `GPU_SUBTITLE_TIMEOUT` (default: 180 s) performs the same duty for per-stream subtitle extraction so a stuck ffmpeg sidecar job cannot wedge the worker.
+## Media paths and `.env`
 
-## Watcher configuration flags
+- Copy `.env.template` to `.env` and set `PATH_MOVIES` / `PATH_SERIES` to host directories.
+- Compose mounts each path twice:
+  - `/watch/<name>` — read-only mount that the watcher tails.
+  - `/media/<name>` — read-only mount used by the orchestrator (library scans, log links) and the GPU worker (ffprobe/ffmpeg inputs and outputs).
+- The orchestrator normalizes both prefixes via `resolve_media_path`, so API payloads and watcher events can use either prefix interchangeably. When responding, the API favors the `/media` prefix.
 
-- `WATCH_ROOTS` pairs library names with absolute paths inside the container (e.g., `movies:/watch/movies,series:/watch/series`).
-- `EVENT_BUFFER_SECONDS` controls optional batching of inotify events before they are posted to the orchestrator. Set to `0` to send immediately or a positive integer to flush on that cadence.
-- `EVENT_RETRY_ATTEMPTS` and `EVENT_RETRY_BACKOFF_SECONDS` define the retry window when the orchestrator API is temporarily unavailable. Retries use exponential backoff based on the provided delay.
-- `ROOT_RETRY_SECONDS` governs how frequently the watcher waits for a missing mount to appear before starting the inotify loop.
-- `EVENT_SPOOL_FILE` (default: `/tmp/folder-watcher-spool.jsonl`) persists undelivered batches when the orchestrator is offline; buffered payloads are replayed on the next start before new inotify events are processed. `EVENT_SPOOL_MAX_BYTES` caps the retained backlog (defaults to 10 MB) to prevent unbounded growth.
+## Library and profile management
 
-The SQLite config store (`./logs/config.db`) seeds itself from the built-in defaults in `services/orchestrator/app/config.py` (single `chromecast` profile with GPU + CPU sections). Runtime edits should happen through the dashboard/API; the GPU worker always pulls the latest settings from the orchestrator.
+The config database (`config.db`) stores all runtime settings:
 
-## GUI-powered tuning
+- `POST /api/libraries` accepts `{name, root, profile_id}`. The server trims empty names, enforces uniqueness, normalizes paths, forces `depth="max"`, and kicks off `reconcile_library` in the background.
+- `PATCH /api/libraries/{name}` switches to a different profile. Only profile IDs that exist in `PROFILE_STORE` are accepted.
+- `DELETE /api/libraries/{name}` removes the definition and marks every tracked entry for that library as `removed`.
+- `POST /api/scan` runs a manual walk for either a specific library (`{"library":"movies"}`) or all libraries (empty body). Scans reuse the same dedupe logic as watcher events.
 
-- The orchestrator dashboard & API accept JSON/YAML that controls library names, profiles, bitrates, and Jellyfin integration. Those fields are surfaced through the GUI so operators can tune quality and automation; they do not change the host path mappings.
-- The Queue page now highlights active work more clearly: job IDs are clickable shortcuts that pre-fill the log search box, an **Elapsed** column shows how long each job has been running or how long it took, and a **Clear processed items** button issues `POST /api/jobs/clear` to remove completed/failed jobs from Redis.
-- Encoding controls are GPU-first and NVENC-only: presets remain P4–P7 but the UI defaults to P7 for maximum quality, and rate control now offers CQ, single-pass VBR, or VBR HQ (two-pass with `-multipass fullres`; workers will still fall back to VBR automatically if the driver rejects HQ). The defaults still favor 720p30 at 5 Mbps target / 10 Mbps max with a 16 Mbps buffer, CQ vs. bitrate/maxrate/bufsize inputs auto-enable based on your selection, and the preview shows the exact FFmpeg 6.1 flags (including `-rc-lookahead N`). B-frames honor profile constraints (0 when baseline), lookahead stays 0–32 with adaptive B-frames gated on lookahead>0, and AQ exposes on/off toggles plus a strength slider (5–10, default 7) so you can bias how aggressively bits migrate to complex scenes. Level constraints auto-adjust when a chosen resolution/FPS requires 4.0/4.1/4.2. Audio remains AAC stereo (2 channels) with selectable bitrates.
-- CPU fallback now has its own libx264 block on the Configuration page. You can pick CRF, VBR, or CBR (VBR HQ stays GPU-only), choose any standard x264 preset (`ultrafast`…`veryslow`), override CPU-specific bitrates/maxrates/buffer sizes, and independently cap resolution/FPS/B-frame behavior. The controls enforce the same Chromecast ceilings (<=1080p60, <=12 Mbps video, AAC stereo) but let you keep CPU safety margins different from NVENC defaults.
-- Language preference can be configured per deployment: set `operational.language_preferences` to a list such as `["swe", "eng", "deu"]` to drive audio/subtitle mapping. Defaults preserve the Swedish-first rule.
-- GPU workers now parse HDR metadata (transfer characteristics, mastering data, bit depth) and automatically pick the best tonemap path—`tonemap_cuda` when supported, `zscale`+`tonemap` as a CPU fallback, or skip tonemapping when no filters are available. There is no longer a profile-level `allow_tonemap` switch, and errors still differentiate retryable causes (device busy/incomplete moov) from fatal codec/pix_fmt issues.
-- Subtitle streams embedded inside the source container are now extracted to per-output `.srt` sidecars (when FFmpeg can re-encode them as plain text) and omitted from the encode so the CUDA filter graph can stay on the GPU; Jellyfin/Chromecast can keep reading the same text tracks from the generated files even though they are no longer remuxed into the `.mp4`.
-- The GUI blocks invalid H.264 level, resolution, and FPS mixes as you edit: picking 1080p60 automatically bumps the level to 4.2 and disables lower levels; dropping the level to 3.1 constrains the menus to 720p30/60-safe choices. Inline tooltips (ⓘ) explain rate control, presets, B‑frames, lookahead, and AQ in plain language.
-- The Configuration page includes an **Add library** form. Provide a unique name, a mounted path such as `/media/movies` (the UI will normalize any `/watch/...` inputs to `/media/...` for display), and an existing encoding profile. The orchestrator always performs a full recursive scan (`depth` defaults to `max`), so there is no longer a depth input to juggle. On save, the orchestrator persists the definition, kicks off a background scan, and the new path becomes available immediately without restarting containers.
-- Library removal is supported directly from the dashboard or via `DELETE /api/libraries/{name}`. Removing a library marks its existing entries as `removed` in the catalog (for auditability) but leaves the historical rows intact.
-- When adding libraries, ensure the `root` matches a mounted path; otherwise files will not be reachable.
-- Jellyfin integration is optional; omit the `jellyfin` section from the seed (as shown in `config/settings.yaml.template`) whenever no server is reachable, and the orchestrator will quietly skip those refresh tasks.
-- Log retention is also editable in the GUI. The `logging.retention_days` field is stored in the config database (default: `7`) and controls how long centralized logs from every container stay on disk. The Configuration page displays current disk usage for the log database mounted at `./logs`.
-- Log records include `severity`, `source`, and `category` metadata in the `/api/logs` payloads, and the dashboard filters default to `INFO` and above to suppress verbose chatter. Keep orchestrator, watcher, and worker containers at `LOG_LEVEL=INFO` during normal operation; only switch to `VERBOSE` temporarily when debugging and rely on the UI filters to surface warnings and errors quickly.
+Profiles are edited via `/api/config/encoding` (or `/api/profiles` CRUD endpoints). FastAPI re-validates every field through `HardwareProfile` so only Chromecast-safe resolutions, FPS, bitrates, and AAC stereo settings can be saved. Each profile stores both GPU (NVENC) and CPU (fallback) blocks. CPU settings are currently only used when the retry pipeline falls through to CPU stages after an NVENC failure.
 
-## Live updates and pagination
+## Queue controls
 
-- The dashboard subscribes to the orchestrator WebSocket at `/ws` for job status, library entry, and library add/remove events. No manual refresh is required to see queue/entry changes; connections will auto-retry if interrupted.
-- The **Library entries** view loads results in pages (`limit`/`offset`) with a “Load more” control. The API supports `include_total=true` on `/api/library/entries` to return `{items, total, limit, offset}` so clients can decide when to stop fetching.
-- Example paginated request:
+- `POST /api/queue/pause` and `/api/queue/resume` toggle the Redis flag the worker checks before dequeuing.
+- `POST /api/jobs/clear` deletes completed/failed jobs from Redis. `POST /api/jobs/purge-inactive` removes deliveries that never advanced to `running`.
+- `/api/queue/state` returns the current pause reason, queue depth, and worker telemetry summary.
 
-  ```bash
-  curl "http://localhost:9000/api/library/entries?limit=50&offset=0&include_total=true&status=pending"
-  ```
+Job state changes always follow this sequence:
 
-## Keeping configs aligned
+1. Worker acquires a job via `/api/jobs/next`.
+2. `sync_entry_from_job` updates the library row to `converting`.
+3. Worker pushes `/api/jobs/{id}/status` events during the run (`running`, `completed`, or `failed`).
+4. `record_job_history` persists each transition; `/api/history` lists the most recent entries.
+5. Worker acknowledges the delivery with `/api/jobs/{id}/ack`.
 
-- After editing `docker-compose.yml` to point to different host folders, restart the stack to refresh the mounts.
-- If you add new directories in Compose later, update the Configuration page to include the new library/profile pair so the orchestrator knows how to schedule jobs there.
+Retries are automatic when `classify_ffmpeg_error` labels a failure as retryable and the job has remaining attempts. Pipelines progress from all-GPU to CPU decode/scale/encode if necessary.
+
+## Library catalog & pagination
+
+- `/api/library/entries` accepts `limit`, `offset`, `status`, and `library`.
+- The endpoint returns a plain array of entries sorted by `updated_at` (no total count). The dashboard detects additional pages by comparing `items.length` to the requested limit.
+- Each entry includes the normalized path, output path, status, last job ID, decode/scale/encode types, and `original_missing` flag.
+- `POST /api/library/entries/{id}/reprocess` requeues a job (optionally forcing a new profile ID). The orchestrator rechecks whether the source still exists before enqueuing.
+- `POST /api/library/entries/{id}/remove-original` deletes the source only when the converted output is present and non-zero. Errors return HTTP 409 with a descriptive message.
+
+## Folder watcher knobs
+
+Environment variables are read at import time inside `services/folder-watcher/app/watcher.py`:
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `WATCH_ROOTS` | `movies:/watch/movies,series:/watch/series` | Comma-separated `<library>:<path>` list. Paths must match the container mounts. |
+| `WATCH_POLLING` | `false` | When `true`, uses `PollingObserver` with `POLLING_INTERVAL` seconds between scans (better for WSL2/OSX bind mounts). |
+| `EVENT_BUFFER_SECONDS` | `1` | Buffer window before sending collected events. `0` flushes immediately. |
+| `EVENT_RETRY_ATTEMPTS` / `EVENT_RETRY_BACKOFF_SECONDS` | `5` / `2` | Exponential backoff strategy for POST `/api/events`. |
+| `EVENT_SPOOL_FILE` | `/tmp/folder-watcher-spool.jsonl` | JSONL spool used whenever HTTP posting fails after retries. Replayed automatically on restart. |
+| `EVENT_SPOOL_MAX_BYTES` | `10485760` | Emits a warning when the spool size exceeds this number of bytes (current implementation logs the warning but does not truncate automatically). |
+
+Each queued event includes the library, absolute path, event type (`created`, `modified`, `deleted`), and optional size/timestamp metadata. Move events emit a synthetic `deleted` for the source and `created` for the destination.
+
+## GPU worker configuration
+
+Refer to `services/gpu-ffmpeg/app/worker.py` for authoritative behavior:
+
+- `LOG_LEVEL` / `FFMPEG_LOG_LEVEL` adjust orchestrator-ingested logs and ffmpeg verbosity.
+- `GPU_POLL_INTERVAL` (default `5s`) controls how often the worker polls for new jobs.
+- `GPU_FFPROBE_TIMEOUT`, `GPU_FFMPEG_TIMEOUT`, `GPU_FFMPEG_IDLE_TIMEOUT`, and `GPU_SUBTITLE_TIMEOUT` cap ffprobe, full encoding, no-progress windows, and per-subtitle extraction respectively (`0` disables a limit).
+- `JOB_VISIBILITY_TIMEOUT` must be at least as long as the longest expected encode so Redis does not redeliver an active job.
+- `ORCHESTRATOR_URL` and `WORKER_ID` identify the worker in telemetry payloads and logs.
+- `remove_original_after_success` is read from the `operational` block inside `/api/config`. When `true`, the worker deletes the source only after validating the output duration/size. Library-level removal via the API remains independent of this flag.
+- Language selection currently favors Swedish audio/subtitles, then English. The preference list lives in `FFmpegBuilder.DEFAULT_LANGUAGE_PREFERENCES`.
+
+Workers stream telemetry to `/api/workers/telemetry` (GPU names, NVENC capability flags, ffmpeg filter availability). The queue view consumes this payload to render the `GPU: X/Y ready` pill.
+
+## Logging & retention
+
+- Every service installs an `OrchestratorLogHandler` that POSTs to `/api/logs/ingest`. The payload captures timestamp, severity (with INFO/WARNING/ERROR plus `VERBOSE` for debug logs), source, category, logger name, message, and optional `request_id`.
+- `/api/logs` filters by `min_severity`, `source`, `category`, `logger`, or free-text `query` across the stored rows. Results are capped at 200 entries per call.
+- `/api/config/logging` updates the retention window. The handler immediately updates the SQLite store (`LogStore.update_retention`) and prunes entries older than `retention_days`.
+- `/api/logs/stats` reports how many rows are stored and the configured retention so operators know when to compact.
+
+## Live updates
+
+The `WebsocketNotifier` broadcasts the following payloads to every `/ws` client:
+
+- `{"type": "job-update", "job": {...}}`
+- `{"type": "entry-update", "entry": {...}}`
+- `{"type": "library-update", "action": "created|deleted", "library": {...}}`
+
+Because the socket requires clients to send heartbeat frames, the dashboard keeps the connection alive by sending empty messages on an interval and will reconnect if the socket closes.

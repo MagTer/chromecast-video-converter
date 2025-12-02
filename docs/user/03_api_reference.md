@@ -1,91 +1,88 @@
-# 03 - API Reference (MVP)
+# API Reference
 
-This cheatsheet covers the orchestrator endpoints most operators and scripts will touch. Paths are relative to the orchestrator base URL (default `http://localhost:9000`).
+All endpoints live under the orchestrator base URL (default `http://localhost:9000`). The list below mirrors the actual routers and return shapes inside `services/orchestrator/app/routers`.
 
 ## Libraries
 
-- **List**: `GET /api/libraries`
-- **Create**: `POST /api/libraries`
-
-  ```json
-  {
-    "name": "movies",
-    "root": "/media/movies",
-    "profile_id": 1
-  }
-  ```
-
-  Constraints: `name` unique; `root` non-empty (use mounted `/media/...` or `/watch/...`, the API normalizes to `/media/...` when responding); `profile_id` must exist. Depth always defaults to `"max"` so the entire tree is scanned.
-
-- **Delete**: `DELETE /api/libraries/{name}` — Removes library config and marks existing entries from that library as `removed`.
-
-- **Update profile**: `PATCH /api/libraries/{name}` with `{ "profile_id": <id> }`.
+| Action | Method & Path | Notes |
+| --- | --- | --- |
+| List libraries | `GET /api/libraries` | Returns an array of `{name, root, depth, profile_id, profile}`. |
+| Create library | `POST /api/libraries` | Body `{ "name": "...", "root": "/media/movies", "profile_id": 1 }`. Depth is forced to `"max"`; duplicate names return `409`. |
+| Update profile | `PATCH /api/libraries/{name}` | Body `{ "profile_id": 2 }`. |
+| Delete library | `DELETE /api/libraries/{name}` | Marks existing entries from that library as `removed` in addition to deleting the config row. |
+| Manual scan | `POST /api/scan` | Optional body `{ "library": "movies", "root": "/watch/movies" }`. Missing `library` scans all definitions. |
 
 ## Library entries
 
-- **List (paginated)**: `GET /api/library/entries?limit=100&offset=0&include_total=true&status=<optional>&library=<optional>`
+| Action | Method & Path | Notes |
+| --- | --- | --- |
+| List entries | `GET /api/library/entries?limit=100&offset=0&status=&library=` | Returns an array (no total count). Paths/output paths are normalized to `/media/...`. |
+| Reprocess entry | `POST /api/library/entries/{id}/reprocess` | Optional body `{ "profile_id": <int> }`. Fails with `404` if the entry or profile does not exist. |
+| Change entry profile | `PATCH /api/library/entries/{id}` | Body `{ "profile_id": <int> }` rewrites the stored profile without scheduling a job. |
+| Remove original | `POST /api/library/entries/{id}/remove-original` | Deletes the source file once the converted output is verified to exist. Returns `409` if the output is missing or empty. |
 
-  Returns either an array or an object `{items, total, limit, offset}` when `include_total=true`. Default order: `updated_at` descending.
+## Watcher events
 
-- **Reprocess**: `POST /api/library/entries/{id}/reprocess` (optional body `{ "profile_id": <id> }`).
+```
+POST /api/events
+{
+  "events": [
+    {
+      "path": "/watch/movies/demo.mkv",
+      "library": "movies",
+      "event": "created|modified|deleted",
+      "is_directory": false,
+      "size": 123456,
+      "modified_at": "2025-12-01T18:04:00Z"
+    }
+  ]
+}
+```
 
-- **Remove original**: `POST /api/library/entries/{id}/remove-original`.
+Events are processed in order. Non-media files are ignored; delete events immediately mark entries `removed`.
 
-## Events (from watcher)
+## Jobs & queue
 
-- **Batch/Single**: `POST /api/events`
+| Action | Method & Path | Notes |
+| --- | --- | --- |
+| List jobs | `GET /api/jobs` | Array of queued/active jobs (newest first) including `elapsed_seconds` and pipeline info. |
+| Claim job | `GET /api/jobs/next?worker_id=worker-1` | Returns a payload with job data and `delivery_id`. Responds `204` when nothing is available or `409` if the queue is paused. |
+| Update status | `POST /api/jobs/{id}/status` | Body includes `status` (`running`, `completed`, `failed`), optional `progress`, `message`, `return_code`, `logs`, and the effective `pipeline`. Failed updates trigger automatic retries unless the classification is non-retryable. |
+| Acknowledge delivery | `POST /api/jobs/{id}/ack` | Body `{ "delivery_id": "..." }`. Required after a worker finishes handling a job. |
+| Clear processed | `POST /api/jobs/clear` | Removes `completed`/`failed` jobs from Redis. |
+| Purge inactive | `POST /api/jobs/purge-inactive` | Sweeps jobs that never transitioned to `running`. Useful after hard worker crashes. |
+| Queue state | `GET /api/queue/state` | Returns pause status, reason, depth, and worker telemetry summary. |
+| Pause queue | `POST /api/queue/pause` `{ "reason": "maintenance" }` |
+| Resume queue | `POST /api/queue/resume` |
 
-  ```json
-  {
-    "events": [
-      {
-        "path": "/watch/movies/demo.mkv",
-        "library": "movies",
-        "event": "created",
-        "is_directory": false,
-        "size": 12345,
-        "modified_at": "2025-11-24T12:00:00Z"
-      }
-    ]
-  }
-  ```
+## Job history
 
-## Jobs
-
-- **List**: `GET /api/jobs` returns recent queue entries (newest first) with normalized paths and an `elapsed_seconds` field suitable for showing runtime in the dashboard.
-- **Next job**: `GET /api/jobs/next`
-- **Update status**: `POST /api/jobs/{job_id}/status` with `{ "status": "running|completed|failed", "progress": 0-100, "message": "..." }`
-- **Acknowledge**: `POST /api/jobs/{job_id}/ack` with `{ "delivery_id": "..." }`
-- **Clear processed jobs**: `POST /api/jobs/clear` removes completed and failed jobs from Redis.
-
-## WebSocket
-
-- **Endpoint**: `GET /ws`
-- **Message types**:
-  - `{"type": "job-update", "job": { ... }, "event": "status|queued|acquired|reprocess"}`
-  - `{"type": "entry-update", "entry": { ... }, "event": "queued|tracked|job-status|reprocess|remove-original"}`
-  - `{"type": "library-update", "action": "created|deleted", "library": { ... }}`
-
-Clients should reconnect on close; dashboard already retries automatically.
-
-## Queue and health
-
-- `GET /api/queue/state`
-- `POST /api/queue/pause` `{ "reason": "maintenance" }`
-- `POST /api/queue/resume`
-- `GET /api/healthz`, `GET /api/readyz`
+`GET /api/history?limit=100` lists the SQLite-backed history entries in reverse chronological order (`id`, `path`, `library`, `profile`, `status`, `message`, `created_at`, `updated_at`, `elapsed_seconds`).
 
 ## Logs
 
-- `GET /api/logs?min_severity=INFO&source=&category=&query=`
-- `POST /api/logs/ingest` for structured log batches.
+- `GET /api/logs?min_severity=INFO&source=&category=&query=` returns up to 200 structured entries.
+- `GET /api/logs/categories` and `/api/logs/sources` provide dropdown data for the dashboard filters.
+- `GET /api/logs/stats` shows how many entries are stored and the retention window.
+- `POST /api/logs/ingest` accepts `{ "entries": [ { "timestamp": "...", "level": "INFO", "severity": "INFO", "logger": "...", "source": "...", "category": "...", "message": "..." } ] }`. Missing `source`/`category` are derived from the logger name.
 
-## Config & profiles
+## Configuration
 
-- `GET /api/config`
-- `POST /api/config/encoding` to upsert a profile (chromecast-safe validation enforced)
-- `GET/POST/PUT/DELETE /api/profiles`
+| Action | Method & Path | Notes |
+| --- | --- | --- |
+| Get config snapshot | `GET /api/config` | Returns sanitized config including libraries, profile definitions, operational settings, log retention, optional Jellyfin block, and `environment.is_wsl2`. |
+| Upsert encoding profile | `POST /api/config/encoding` | Body matches `EncodingUpdatePayload` (one GPU block + one CPU block). |
+| CRUD profiles | `GET/POST/PUT/DELETE /api/profiles[/{id}]` | Create/delete individual profiles without touching the library mappings. Delete returns `204` on success. |
+| Update log retention | `POST /api/config/logging` `{ "retention_days": 7 }` |
+| Reset config | `POST /api/config/reset` | Reverts to `DEFAULT_CONFIG`. Profiles already stored in `PROFILE_STORE` remain so existing IDs continue to match queued jobs. |
 
----
+## WebSocket & telemetry
 
-For UI/usage walkthroughs, see `docs/user/01_getting_started.md` and `docs/user/02_configuration.md`.
+- `GET /ws` — multiplexed channel for `job-update`, `entry-update`, and `library-update` payloads. Clients should echo small keep-alive messages and reconnect on close.
+- `POST /api/workers/telemetry` — GPU workers post `{ "worker_id": "...", "hostname": "...", "gpu_available": true, "ffmpeg_version": "...", "tonemap_cuda": true, ... }`. The server keeps the latest payload per worker ID.
+- `GET /api/metrics` — returns `{ "jobs": { "pending": N, ... }, "workers": { "workers": W, "available": A, "telemetry": [...] } }` for dashboards or Prometheus exporters.
+
+## Health
+
+- `GET /api/healthz` — `{"status":"ok","libraries":<count>}` once the orchestrator has loaded the config snapshot.
+- `GET /api/readyz` — `{"status":"ready"}` as soon as FastAPI is listening.
