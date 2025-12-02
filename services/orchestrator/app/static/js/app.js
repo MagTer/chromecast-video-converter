@@ -80,6 +80,8 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
     const wizardSkipBtn = document.querySelector("#wizard-skip-btn");
     const refreshHistoryBtn = document.querySelector("#refresh-history");
     const resetConfigBtn = document.querySelector("#reset-config");
+    const purgeJobsBtn = document.querySelector("#purge-inactive-jobs");
+    const purgeJobsResult = document.querySelector("#purge-jobs-result");
 
     let configCache = null;
     let libraryEntries = [];
@@ -795,13 +797,15 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
         const recordedElapsed = Number(job?.elapsed_seconds ?? Number.NaN);
         const pipeline = job.pipeline || (job.encoding ? job.encoding.pipeline : null);
         const pipelineText = formatPipeline(pipeline);
-        const elapsedSeconds =
-          status === "running"
-            ? jobElapsedSeconds(job)
-            : Number.isFinite(recordedElapsed)
-            ? recordedElapsed
-            : 0;
-        const elapsed = formatElapsed(elapsedSeconds);
+        
+        let elapsed = "-";
+        if (status === "running") {
+             elapsed = formatElapsed(jobElapsedSeconds(job));
+        } else if (status !== "pending") {
+             const val = Number.isFinite(recordedElapsed) ? recordedElapsed : 0;
+             elapsed = formatElapsed(val);
+        }
+
         const truncatedId = job.id ? job.id.slice(0, 8) : "";
         tr.innerHTML = `
           <td>
@@ -860,6 +864,9 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
         const fileName = fileNameFromPath(normalizedPath);
         const finished = job.updated_at ? new Date(job.updated_at).toLocaleString() : "-";
         const pipelineText = formatPipeline(job.pipeline || (job.encoding ? job.encoding.pipeline : null));
+        const detailsLink = job.id 
+            ? `<a href="?job_id=${job.id}" class="link-button" onclick="event.preventDefault(); logQuery.value='${job.id}'; switchPage('logs'); fetchLogs();">View Logs</a>` 
+            : (job.message || "-");
 
         tr.innerHTML = `
           <td>${job.id.slice(0, 8)}</td>
@@ -868,7 +875,7 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
           <td class="path-cell" title="${normalizedPath}">${fileName}</td>
           <td>${job.profile}</td>
           <td>${pipelineText}</td>
-          <td>${job.message || "-"}</td>
+          <td>${detailsLink}</td>
         `;
         historyRows.appendChild(tr);
       });
@@ -901,9 +908,11 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
       if (gpuMetrics) {
         const workerCount = workerMetrics.workers ?? 0;
         const available = workerMetrics.available ?? 0;
-        gpuMetrics.textContent = `GPU: ${available}/${workerCount || 0} ready`;
+        const online = workerCount > 0;
+        const statusColor = online ? (available > 0 ? "🟢" : "🟡") : "🔴";
+        gpuMetrics.textContent = `GPU: ${statusColor} ${available}/${workerCount} ready`;
         gpuMetrics.className = "status-pill status-idle";
-        if (!workerCount || !available) {
+        if (!online) {
           gpuMetrics.className = "status-pill status-paused";
         }
       }
@@ -1490,6 +1499,42 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
         });
     }
 
+    if (purgeJobsBtn) {
+        purgeJobsBtn.addEventListener("click", async () => {
+            if (!confirm("Remove all queued jobs that are not currently running?")) return;
+            purgeJobsBtn.disabled = true;
+            purgeJobsResult.textContent = "Purging inactive jobs...";
+            try {
+                const response = await fetch("/api/jobs/purge-inactive", { method: "POST" });
+                const result = await response.json();
+                if (response.ok) {
+                    purgeJobsResult.textContent =
+                        `Removed ${result.removed_jobs} jobs (acked ${result.pending_messages_acknowledged} pending, trimmed ${result.stream_entries_deleted} stream entries).`;
+                    await Promise.all([fetchJobs(), refreshQueueState()]);
+                } else {
+                    purgeJobsResult.textContent = `Purge failed: ${result.detail || "Unknown error"}`;
+                }
+            } catch (error) {
+                console.error("Purge failed", error);
+                purgeJobsResult.textContent = "Purge failed: see console for details.";
+            } finally {
+                purgeJobsBtn.disabled = false;
+            }
+        });
+    }
+
+    const discardConfigBtn = document.querySelector("#discard-config");
+    if (discardConfigBtn) {
+      discardConfigBtn.addEventListener("click", () => {
+        const currentProfile = document.querySelector("#profile-select").value;
+        if (currentProfile) {
+          loadProfile(currentProfile);
+          configResult.textContent = "Changes discarded.";
+          setTimeout(() => { configResult.textContent = ""; }, 2000);
+        }
+      });
+    }
+
     [
       profileCqSelect,
       profileBitrateSelect,
@@ -1720,10 +1765,6 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
 
     refreshEntriesBtn.addEventListener("click", refreshLibraryEntries);
 
-    entrySearch.addEventListener("input", () => {
-      renderEntryTable();
-    });
-
     [entryLibraryFilter, entryStatusFilter, entryPageSize].forEach((control) => {
       control.addEventListener("change", () => {
         refreshLibraryEntries();
@@ -1790,6 +1831,17 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
       copyLogsButton.title = "Clipboard API unavailable";
     }
 
+    // Check URL params for direct log linking
+    const urlParams = new URLSearchParams(window.location.search);
+    const targetJobId = urlParams.get("job_id");
+    if (targetJobId) {
+      logQuery.value = targetJobId;
+      // Clear the param so refreshing doesn't get stuck
+      window.history.replaceState({}, "", window.location.pathname + window.location.hash);
+      switchPage("logs");
+      // fetchLogs will be called by the interval or initial load
+    }
+
     fetchConfig();
     fetchJobs();
     fetchHistory();
@@ -1800,6 +1852,23 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
     refreshQueueState();
     connectLiveUpdates();
     const initialPage = window.location.hash.replace("#", "") || "queue";
+    
+    // Search Persistence
+    if (sessionStorage.getItem("logQuery")) {
+        logQuery.value = sessionStorage.getItem("logQuery");
+    }
+    if (sessionStorage.getItem("entrySearch")) {
+        entrySearch.value = sessionStorage.getItem("entrySearch");
+    }
+
+    logQuery.addEventListener("input", () => {
+        sessionStorage.setItem("logQuery", logQuery.value);
+    });
+    entrySearch.addEventListener("input", () => {
+        sessionStorage.setItem("entrySearch", entrySearch.value);
+        renderEntryTable();
+    });
+
     switchPage(initialPage);
     setInterval(fetchJobs, 5000);
     setInterval(fetchHistory, 15000);

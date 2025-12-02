@@ -82,7 +82,10 @@ class JobHistoryStore:
     def list_recent(self, limit: int = 100) -> List[JobHistoryEntry]:
         with self._session() as session:
             records = session.scalars(
-                select(JobHistory).order_by(JobHistory.started_at.desc()).limit(limit)
+                select(JobHistory)
+                .where(JobHistory.status.in_([JobHistoryStatus.COMPLETED, JobHistoryStatus.FAILED]))
+                .order_by(JobHistory.started_at.desc())
+                .limit(limit)
             ).all()
         return [
             JobHistoryEntry(

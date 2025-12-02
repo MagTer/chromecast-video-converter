@@ -12,6 +12,7 @@ from uuid import uuid4
 import redis.asyncio as redis
 from pydantic import BaseModel, Field
 
+from .context import get_request_id
 from .utils import resolve_media_path
 
 
@@ -33,6 +34,8 @@ class Job(BaseModel):
     attempt: int = Field(default=1, ge=1)
     max_attempts: int = Field(default=5, ge=1)
     status: str = JobStatus.PENDING
+    worker_id: Optional[str] = None
+    request_id: Optional[str] = None
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
     progress: int = 0
@@ -253,6 +256,7 @@ class JobManager:
         payload = json.loads(fields.get("payload", "{}"))
         job = self._decode_job(payload)
         job.status = JobStatus.RUNNING
+        job.worker_id = consumer
         job.updated_at = datetime.utcnow()
         await self._redis.hset(self._job_key(job.id), mapping=self._encode_job(job))
         await self._redis.zadd(self._job_index, {job.id: job.updated_at.timestamp()})
@@ -306,6 +310,7 @@ class JobManager:
             pipeline=pipeline,
             attempt=attempt,
             max_attempts=max_attempts,
+            request_id=get_request_id(),
         )
         existing_job = await self._reserve_path_for_job(path, job.id, force=force)
         if existing_job:
@@ -378,6 +383,74 @@ class JobManager:
         await self._redis.xack(self._stream, self._group, message_id)
         await self._redis.xdel(self._stream, message_id)
 
+    async def _stream_messages_by_job(self, batch_size: int = 500) -> dict[str, list[str]]:
+        mapping: dict[str, list[str]] = {}
+        if not hasattr(self._redis, "xrange"):
+            return mapping
+        start = "-"
+        while True:
+            entries = await self._redis.xrange(self._stream, start, "+", count=batch_size)
+            if not entries:
+                break
+            for message_id, fields in entries:
+                payload_raw = fields.get("payload")
+                if not payload_raw:
+                    continue
+                try:
+                    payload = json.loads(payload_raw)
+                except json.JSONDecodeError:
+                    continue
+                job_id = payload.get("id")
+                if job_id:
+                    mapping.setdefault(job_id, []).append(message_id)
+            if len(entries) < batch_size:
+                break
+            start = f"({entries[-1][0]}"
+        return mapping
+
+    async def purge_inactive_jobs(self) -> dict[str, int]:
+        await self.initialize()
+        job_ids = await self._redis.zrange(self._job_index, 0, -1)
+        pending_map = await self._pending_message_map()
+        stream_map = await self._stream_messages_by_job()
+        processed_stream_ids: set[str] = set()
+        removed_jobs = 0
+        pending_ack = 0
+        stream_deleted = 0
+        for job_id in job_ids:
+            data = await self._redis.hgetall(self._job_key(job_id))
+            if not data:
+                continue
+            job = self._decode_job(data)
+            if job.status == JobStatus.RUNNING:
+                continue
+            await self._redis.delete(self._job_key(job.id))
+            await self._redis.zrem(self._job_index, job.id)
+            await self._redis.srem(self._path_index, job.path)
+            await self._redis.delete(self._path_key(job.path))
+            removed_jobs += 1
+            message_id = pending_map.get(job.id)
+            if message_id:
+                await self._ack_pending_message(message_id)
+                pending_ack += 1
+                processed_stream_ids.add(message_id)
+            for stream_id in stream_map.get(job.id, []):
+                if stream_id in processed_stream_ids:
+                    continue
+                deleted = await self._redis.xdel(self._stream, stream_id)
+                if deleted:
+                    stream_deleted += deleted
+                processed_stream_ids.add(stream_id)
+        if removed_jobs:
+            depth = int(await self._redis.get(self._depth_key) or 0)
+            new_depth = max(0, depth - removed_jobs)
+            await self._redis.set(self._depth_key, new_depth)
+        return {
+            "removed_jobs": removed_jobs,
+            "pending_messages_acknowledged": pending_ack,
+            "stream_entries_deleted": stream_deleted,
+        }
+
     async def _handle_stale_job(self, job_id: str, job: Job, pending_map: dict[str, str]) -> None:
         threshold = datetime.utcnow() - timedelta(seconds=self.STALE_RUNNING_TIMEOUT)
         if not job.updated_at or job.updated_at > threshold:
@@ -416,8 +489,57 @@ class JobManager:
         for job_id in job_ids:
             data = await self._redis.hgetall(self._job_key(job_id))
             if data:
-                jobs.append(self._decode_job(data))
+                job = self._decode_job(data)
+                if job.status not in {JobStatus.COMPLETED, JobStatus.FAILED}:
+                    jobs.append(job)
         return jobs
+
+    async def check_dead_workers(self, active_workers: Dict[str, Any]) -> int:
+        await self.initialize()
+        jobs = await self.list_jobs(limit=1000)
+        pending_map = await self._pending_message_map()
+        failed_count = 0
+        now = datetime.utcnow()
+        threshold_seconds = 90
+
+        for job in jobs:
+            if job.status != JobStatus.RUNNING or not job.worker_id:
+                continue
+
+            worker = active_workers.get(job.worker_id)
+            is_dead = False
+            reason = ""
+
+            if not worker:
+                if job.updated_at < now - timedelta(seconds=threshold_seconds):
+                    is_dead = True
+                    reason = f"Worker {job.worker_id} missing"
+            else:
+                last_seen = worker.checked_at
+                if last_seen.tzinfo:
+                    last_seen = last_seen.replace(tzinfo=None)
+                if (now - last_seen).total_seconds() > threshold_seconds:
+                    is_dead = True
+                    reason = f"Worker {job.worker_id} timed out"
+
+            if is_dead:
+                self._logger.warning("Failing job %s: %s", job.id, reason)
+
+                job.status = JobStatus.FAILED
+                job.message = f"Worker Failure: {reason}"
+                job.progress = 0
+                job.updated_at = datetime.utcnow()
+
+                await self._redis.hset(self._job_key(job.id), mapping=self._encode_job(job))
+                await self._redis.zadd(self._job_index, {job.id: job.updated_at.timestamp()})
+
+                msg_id = pending_map.get(job.id)
+                if msg_id:
+                    await self._ack_pending_message(msg_id)
+
+                failed_count += 1
+
+        return failed_count
 
     async def acquire_next(self, consumer: str) -> Optional[tuple[str, Job]]:
         await self.initialize()
@@ -440,6 +562,7 @@ class JobManager:
         job = self._decode_job(payload)
         job.status = JobStatus.RUNNING
         job.progress = job.progress or 0
+        job.worker_id = consumer
         job.updated_at = datetime.utcnow()
         await self._redis.hset(self._job_key(job.id), mapping=self._encode_job(job))
         await self._redis.zadd(self._job_index, {job.id: job.updated_at.timestamp()})

@@ -20,6 +20,7 @@ from .dependencies import (
     LOG_STORE,
     PROFILE_STORE,
     STATIC_DIR,
+    WORKER_TELEMETRY,
     config_service,
     job_manager,
 )
@@ -163,6 +164,9 @@ app.add_middleware(
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
+from .middleware import RequestIdMiddleware  # noqa: E402
+
+app.add_middleware(RequestIdMiddleware)
 
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
@@ -181,9 +185,26 @@ async def _safe_jellyfin_trigger(jellyfin_cfg: config_module.JellyfinConfig) -> 
         LOGGER.error("Jellyfin refresh failed", exc_info=exc)
 
 
+async def worker_watchdog() -> None:
+    LOGGER.info("Starting worker watchdog")
+    while True:
+        try:
+            await asyncio.sleep(60)
+            failed = await job_manager.check_dead_workers(WORKER_TELEMETRY)
+            if failed > 0:
+                LOGGER.warning("Watchdog marked %s jobs as failed due to dead workers", failed)
+        except asyncio.CancelledError:
+            LOGGER.info("Worker watchdog cancelled")
+            break
+        except Exception as exc:
+            LOGGER.error("Watchdog error: %s", exc)
+            await asyncio.sleep(60)
+
+
 @app.on_event("startup")
 async def startup_event() -> None:
     await job_manager.initialize()
+    asyncio.create_task(worker_watchdog())
     LOGGER.info("Starting initial scan of configured libraries.")
     for library in LIBRARY_CONFIG_STORE.list_libraries():
         profile = PROFILE_STORE.get(library.profile_id)

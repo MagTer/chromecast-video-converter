@@ -48,12 +48,14 @@ class VideoStreamInfo:
             except (TypeError, ValueError):
                 pass
         if self.pix_fmt:
-            matches = re.findall(r"(\d+)", self.pix_fmt)
-            if matches:
+            # Match common FFmpeg formats like yuv420p10le, p010le, etc.
+            # We look for digits immediately followed by 'le' or 'be'.
+            match = re.search(r"(\d+)(?:le|be)", self.pix_fmt)
+            if match:
                 try:
-                    return int(matches[-1])
+                    return int(match.group(1))
                 except ValueError:
-                    return None
+                    pass
         return None
 
     def frame_rate(self) -> float | None:
@@ -432,7 +434,7 @@ class FFmpegBuilder:
         capabilities = self.ffmpeg_capabilities
         supports_hwaccel = capabilities.supports_hwaccel("cuda")
         supports_hwupload = capabilities.supports_filter("hwupload_cuda")
-        gpu_scale_filter = self._gpu_scale_filter(target_height)
+        gpu_scale_filter = self._gpu_scale_filter(target_height, video_stream)
         scale_on_gpu = scale_type == "gpu" and bool(gpu_scale_filter)
         gpu_pipeline_ready = (
             decode_type == "gpu"
@@ -478,7 +480,7 @@ class FFmpegBuilder:
                     filters.append("hwupload_cuda")
                 if scale_on_gpu and gpu_scale_filter:
                     filters.append(gpu_scale_filter)
-                filters.append("format=nv12")
+                # filters.append("format=nv12") # <-- REMOVE THIS LINE
             else:
                 filters.append("format=yuv420p")
         else:
@@ -504,7 +506,14 @@ class FFmpegBuilder:
             "zscale=p=bt709:t=bt709:m=bt709:r=tv",
         ]
 
-    def _gpu_scale_filter(self, target_height: str) -> str | None:
+    def _gpu_scale_filter(
+        self, target_height: str, video_stream: VideoStreamInfo | None
+    ) -> str | None:
+        # 10-bit/HDR content is safer to process via CPU (download -> tonemap -> upload)
+        # because scale_npp often lacks P010 support and scale_cuda can be flaky.
+        if video_stream and (video_stream.bit_depth() or 8) > 8:
+            return None
+
         if self.ffmpeg_capabilities.supports_filter("scale_npp"):
             return (
                 f"scale_npp=w=-2:h={target_height}:format=nv12:"
@@ -551,29 +560,34 @@ class FFmpegBuilder:
             selected_subtitles = []
             default_sub_idx = None
 
+        # 1. Base Command (Input)
         command: list[str] = self._ffmpeg_base_command(decode_type)
+
+        # 2. Main Output Options
+        main_options: list[str] = []
         if video_streams:
-            command.extend(["-map", "0:v"])
+            main_options.extend(["-map", "0:v"])
         for audio_stream in selected_audio:
-            command.extend(["-map", f"0:a:{audio_stream.input_index}"])
+            main_options.extend(["-map", f"0:a:{audio_stream.input_index}"])
         for subtitle_stream in selected_subtitles:
-            command.extend(["-map", f"0:s:{subtitle_stream.input_index}"])
+            main_options.extend(["-map", f"0:s:{subtitle_stream.input_index}"])
 
         audio_dispositions = self._build_disposition_flags(selected_audio, default_audio_idx, "a")
         subtitle_dispositions = self._build_disposition_flags(
             selected_subtitles, default_sub_idx, "s"
         )
 
-        video_filter, _needs_filter = self._build_filter_chain(profile, video_stream, pipeline)
+        video_filter, needs_filter = self._build_filter_chain(profile, video_stream, pipeline)
 
-        command.extend(["-vf", video_filter])
+        if needs_filter:
+            main_options.extend(["-vf", video_filter])
 
         h264_profile_lower = profile.h264_profile.lower()
         bframes = profile.bframes if h264_profile_lower != "baseline" else 0
 
         if encode_type == "gpu":
             encoder_name = self.ffmpeg_capabilities.preferred_encoder_for_codec(profile.codec)
-            command.extend(
+            main_options.extend(
                 [
                     "-c:v",
                     encoder_name,
@@ -585,7 +599,7 @@ class FFmpegBuilder:
                     profile.level,
                 ]
             )
-            command.extend(["-pix_fmt", "nv12"])
+            # main_options.extend(["-pix_fmt", "nv12"])
             rc_mode = profile.rc_mode
             if rc_mode == "cbr":
                 rc_mode = "vbr"
@@ -632,9 +646,9 @@ class FFmpegBuilder:
             aq_strength = max(1, min(15, profile.aq_strength))
 
             if rc_mode == "cq":
-                command.extend(["-rc", "constqp", "-qp", profile.cq])
+                main_options.extend(["-rc", "constqp", "-qp", profile.cq])
             else:
-                command.extend(
+                main_options.extend(
                     [
                         "-rc",
                         rc_mode,
@@ -647,13 +661,13 @@ class FFmpegBuilder:
                     ]
                 )
                 if multipass_mode:
-                    command.extend(["-multipass", multipass_mode])
+                    main_options.extend(["-multipass", multipass_mode])
 
-            command.extend(["-bf", str(bframes)])
+            main_options.extend(["-bf", str(bframes)])
 
-            command.extend(["-rc-lookahead", str(lookahead)])
-            command.extend(["-b_adapt", "1" if adaptive_b_frames else "0"])
-            command.extend(
+            main_options.extend(["-rc-lookahead", str(lookahead)])
+            main_options.extend(["-b_adapt", "1" if adaptive_b_frames else "0"])
+            main_options.extend(
                 [
                     "-spatial_aq",
                     "1" if spatial_aq else "0",
@@ -662,9 +676,9 @@ class FFmpegBuilder:
                 ]
             )
             if aq_enabled:
-                command.extend(["-aq-strength", str(aq_strength)])
+                main_options.extend(["-aq-strength", str(aq_strength)])
         else:
-            command.extend(
+            main_options.extend(
                 [
                     "-c:v",
                     "libx264",
@@ -679,9 +693,9 @@ class FFmpegBuilder:
                 ]
             )
             if profile.rc_mode == "crf":
-                command.extend(["-crf", str(profile.cq)])
+                main_options.extend(["-crf", str(profile.cq)])
             else:
-                command.extend(
+                main_options.extend(
                     [
                         "-b:v",
                         profile.bitrate,
@@ -691,11 +705,11 @@ class FFmpegBuilder:
                         profile.bufsize,
                     ]
                 )
-            command.extend(["-bf", str(bframes)])
-        command.extend(["-movflags", "+faststart"])
+            main_options.extend(["-bf", str(bframes)])
+        main_options.extend(["-movflags", "+faststart"])
 
         if selected_audio:
-            command.extend(
+            main_options.extend(
                 [
                     "-c:a",
                     profile.audio_codec,
@@ -707,11 +721,17 @@ class FFmpegBuilder:
             )
 
         if selected_subtitles:
-            command.extend(["-c:s", "mov_text"])
+            main_options.extend(["-c:s", "mov_text"])
 
-        command.extend(audio_dispositions)
-        command.extend(subtitle_dispositions)
+        main_options.extend(audio_dispositions)
+        main_options.extend(subtitle_dispositions)
 
-        command.extend(["-progress", "pipe:1", str(self.output_path)])
+        # 3. Global Options (Progress)
+        command.extend(["-progress", "pipe:1"])
+
+        # 4. Assemble Command
+        # Add main output options + main output path
+        command.extend(main_options)
+        command.append(str(self.output_path))
 
         return command

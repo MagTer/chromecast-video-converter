@@ -173,6 +173,47 @@ def test_event_paths_normalized_to_canonical(tmp_path, monkeypatch, fake_redis):
     assert jobs_after[0]["path"] == str(media_file)
 
 
+def test_purge_inactive_jobs_endpoint(test_app, tmp_path):
+    client, _main = test_app
+    profile_id = _first_profile_id(client)
+
+    media_root = tmp_path / "purge"
+    media_root.mkdir()
+
+    create = client.post(
+        "/api/libraries",
+        json={"name": "purge", "root": str(media_root), "depth": "max", "profile_id": profile_id},
+    )
+    assert create.status_code == 201
+
+    media_file = media_root / "stale.mkv"
+    media_file.write_bytes(b"demo")
+    client.post(
+        "/api/events",
+        json={
+            "events": [
+                {
+                    "path": str(media_file),
+                    "library": "purge",
+                    "event": "created",
+                    "is_directory": False,
+                }
+            ]
+        },
+    )
+
+    jobs_before = client.get("/api/jobs").json()
+    assert jobs_before, "job should be queued"
+
+    response = client.post("/api/jobs/purge-inactive")
+    payload = response.json()
+    assert response.status_code == 200
+    assert payload["removed_jobs"] >= 1
+
+    jobs_after = client.get("/api/jobs").json()
+    assert jobs_after == []
+
+
 def test_reprocess_endpoint_adds_job(test_app, tmp_path):
     client, main = test_app
 

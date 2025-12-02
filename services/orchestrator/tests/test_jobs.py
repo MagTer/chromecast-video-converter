@@ -75,3 +75,43 @@ def test_acquire_stalled_handles_tuple_shape(fake_redis, monkeypatch):
         assert stalled == (None, None)
 
     asyncio.run(_run())
+
+
+def test_purge_inactive_jobs(fake_redis, tmp_path, monkeypatch):
+    async def _run():
+        monkeypatch.setattr(
+            "app.jobs.redis.from_url", lambda url, decode_responses=True: fake_redis
+        )
+        manager = JobManager("redis://test", visibility_timeout=1)
+
+        media_path = tmp_path / "purge.mkv"
+        media_path.write_bytes(b"demo")
+
+        await manager.add_job(str(media_path), "movies", "mobile")
+        stats = await manager.purge_inactive_jobs()
+        assert stats["removed_jobs"] == 1
+        jobs = await manager.list_jobs()
+        assert jobs == []
+
+    asyncio.run(_run())
+
+
+def test_purge_inactive_jobs_skips_running(fake_redis, tmp_path, monkeypatch):
+    async def _run():
+        monkeypatch.setattr(
+            "app.jobs.redis.from_url", lambda url, decode_responses=True: fake_redis
+        )
+        manager = JobManager("redis://test", visibility_timeout=1)
+
+        media_path = tmp_path / "active.mkv"
+        media_path.write_bytes(b"demo")
+
+        job = await manager.add_job(str(media_path), "movies", "mobile")
+        claimed = await manager.acquire_next("worker-1")
+        assert claimed is not None
+        stats = await manager.purge_inactive_jobs()
+        assert stats["removed_jobs"] == 0
+        jobs = await manager.list_jobs()
+        assert len(jobs) == 1 and jobs[0].id == job.id
+
+    asyncio.run(_run())
