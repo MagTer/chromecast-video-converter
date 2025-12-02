@@ -4,7 +4,7 @@ from fastapi import APIRouter
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
 
-from ..dependencies import JOB_HISTORY_STORE
+from ..dependencies import get_app_dependencies
 
 LOGGER = logging.getLogger("orchestrator.history")
 router = APIRouter()
@@ -13,7 +13,7 @@ router = APIRouter()
 @router.get("/api/history")
 async def list_job_history(limit: int = 100) -> JSONResponse:
     """Retrieve recent job history."""
-    history = JOB_HISTORY_STORE.list_recent(limit=limit)
+    history = get_app_dependencies().job_history_store.list_recent(limit=limit)
     return JSONResponse(
         jsonable_encoder(
             [

@@ -1,7 +1,9 @@
 import asyncio
 import os
+import sys
+from functools import lru_cache
 from pathlib import Path
-from typing import Any, Dict, Set
+from typing import Any, Dict, Set, Tuple
 
 from fastapi import WebSocket
 from fastapi.encoders import jsonable_encoder
@@ -20,42 +22,112 @@ from .utils import (
 
 
 # Environment Variables
-def resolve_data_dir() -> Path:
-    default = Path(os.environ.get("DATA_DIR", "/app/data")).resolve()
+def _resolve_data_dir(data_dir: Path | None = None) -> Path:
+    if data_dir:
+        resolved_path = data_dir.resolve()
+    else:
+        resolved_path = Path(os.environ.get("DATA_DIR", "/app/data")).resolve()
     try:
-        default.mkdir(parents=True, exist_ok=True)
-        return default
+        resolved_path.mkdir(parents=True, exist_ok=True)
+        return resolved_path
     except OSError:
         fallback = Path("./data").resolve()
         fallback.mkdir(parents=True, exist_ok=True)
         return fallback
 
 
-DATA_DIR = resolve_data_dir()
+def _get_log_db_path(data_dir: Path | None = None) -> Path:
+    return Path(os.environ.get("LOG_DB_PATH", _resolve_data_dir(data_dir) / "events.db")).resolve()
 
-LOG_DB_PATH = Path(os.environ.get("LOG_DB_PATH", DATA_DIR / "events.db")).resolve()
-CONFIG_DB_PATH = Path(os.environ.get("CONFIG_DB_PATH", DATA_DIR / "config.db")).resolve()
-LIBRARY_DB_PATH = Path(os.environ.get("LIBRARY_DB_PATH", DATA_DIR / "library.db")).resolve()
+
+def _get_config_db_path(data_dir: Path | None = None) -> Path:
+    return Path(os.environ.get("CONFIG_DB_PATH", _resolve_data_dir(data_dir) / "config.db")).resolve()
+
+
+def _get_library_db_path(data_dir: Path | None = None) -> Path:
+    return Path(os.environ.get("LIBRARY_DB_PATH", _resolve_data_dir(data_dir) / "library.db")).resolve()
+
+
 JOB_QUEUE_URL = os.environ.get("JOB_QUEUE", "redis://localhost:6379/0")
 JOB_VISIBILITY_TIMEOUT = int(os.environ.get("JOB_VISIBILITY_TIMEOUT", "300"))
 
-# Database & Stores
-LOG_STORE = LogStore(LOG_DB_PATH)
-SESSION_FACTORY, ENGINE = create_session_factory(LIBRARY_DB_PATH)
 
-# Ensure tables exist
-Base.metadata.create_all(ENGINE)
+class AppDependencies:
+    def __init__(self, data_dir: Path | None = None):
+        self._data_dir = data_dir
 
-PROFILE_STORE = ProfileStore(SESSION_FACTORY)
-LIBRARY_CONFIG_STORE = LibraryConfigStore(SESSION_FACTORY)
-LIBRARY_STORE = LibraryEntryStore(LIBRARY_DB_PATH, session_factory=SESSION_FACTORY, engine=ENGINE)
-JOB_HISTORY_STORE = JobHistoryStore(SESSION_FACTORY)
+    @property
+    @lru_cache
+    def data_dir(self) -> Path:
+        return _resolve_data_dir(self._data_dir)
 
-# Services
-config_service = config_module.ConfigService(CONFIG_DB_PATH)
-job_manager = jobs.JobManager(JOB_QUEUE_URL, visibility_timeout=JOB_VISIBILITY_TIMEOUT)
+    @property
+    @lru_cache
+    def log_store(self) -> LogStore:
+        return LogStore(_get_log_db_path(self._data_dir))
 
-# Global State
+    @property
+    @lru_cache
+    def session_factory_and_engine(self) -> Tuple[Any, Any]:
+        session_factory, engine = create_session_factory(_get_library_db_path(self._data_dir))
+        Base.metadata.create_all(engine)
+        return session_factory, engine
+
+    @property
+    @lru_cache
+    def session_factory(self) -> Any:
+        return self.session_factory_and_engine[0]
+
+    @property
+    @lru_cache
+    def engine(self) -> Any:
+        return self.session_factory_and_engine[1]
+
+    @property
+    @lru_cache
+    def profile_store(self) -> ProfileStore:
+        return ProfileStore(self.session_factory)
+
+    @property
+    @lru_cache
+    def library_config_store(self) -> LibraryConfigStore:
+        return LibraryConfigStore(self.session_factory)
+
+    @property
+    @lru_cache
+    def library_entry_store(self) -> LibraryEntryStore:
+        return LibraryEntryStore(
+            _get_library_db_path(self._data_dir),
+            session_factory=self.session_factory,
+            engine=self.engine,
+        )
+
+    @property
+    @lru_cache
+    def job_history_store(self) -> JobHistoryStore:
+        return JobHistoryStore(self.session_factory)
+
+    @property
+    @lru_cache
+    def config_service(self) -> config_module.ConfigService:
+        return config_module.ConfigService(_get_config_db_path(self._data_dir))
+
+    @property
+    @lru_cache
+    def job_manager(self) -> jobs.JobManager:
+        return jobs.JobManager(JOB_QUEUE_URL, visibility_timeout=JOB_VISIBILITY_TIMEOUT)
+
+
+_global_app_dependencies: AppDependencies | None = None
+
+
+def get_app_dependencies() -> AppDependencies:
+    global _global_app_dependencies
+    if _global_app_dependencies is None:
+        _global_app_dependencies = AppDependencies()
+    return _global_app_dependencies
+
+
 WORKER_TELEMETRY: Dict[str, WorkerTelemetryPayload] = {}
 
 
@@ -111,8 +183,7 @@ except FileNotFoundError:
 
 
 def get_library_map() -> Dict[str, Any]:
-    return {library.name: library for library in LIBRARY_CONFIG_STORE.list_libraries()}
+    return {library.name: library for library in get_app_dependencies().library_config_store.list_libraries()}
 
 
 HOST_ENVIRONMENT = {"is_wsl2": detect_wsl2()}
-print(f"DEBUG: LIBRARY_DB_PATH resolved to {LIBRARY_DB_PATH}")

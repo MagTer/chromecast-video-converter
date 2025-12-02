@@ -8,13 +8,9 @@ from fastapi.responses import JSONResponse
 
 from .. import config as config_module
 from ..dependencies import (
-    LIBRARY_CONFIG_STORE,
-    LIBRARY_STORE,
     NOTIFIER,
-    PROFILE_STORE,
-    config_service,
+    get_app_dependencies,
     get_library_map,
-    job_manager,
 )
 from ..profiles import LibraryData
 from ..schemas import (
@@ -55,8 +51,8 @@ def cache_headers(snapshot: config_module.ConfigSnapshot) -> Dict[str, str]:
 @router.get("/api/libraries")
 async def list_libraries() -> JSONResponse:
     payload = []
-    for library in LIBRARY_CONFIG_STORE.list_libraries():
-        profile = PROFILE_STORE.get(library.profile_id)
+    for library in get_app_dependencies().library_config_store.list_libraries():
+        profile = get_app_dependencies().profile_store.get(library.profile_id)
         payload.append(
             {
                 **library.to_payload(),
@@ -73,9 +69,9 @@ async def create_library(
     normalized_name = payload.name.strip()
     if not normalized_name:
         raise HTTPException(status_code=400, detail="Library name cannot be empty")
-    if LIBRARY_CONFIG_STORE.get(normalized_name):
+    if get_app_dependencies().library_config_store.get(normalized_name):
         raise HTTPException(status_code=409, detail="Library name already exists")
-    profile = PROFILE_STORE.get(payload.profile_id)
+    profile = get_app_dependencies().profile_store.get(payload.profile_id)
     if profile is None:
         raise HTTPException(status_code=404, detail="Profile not found")
     root = payload.root.strip()
@@ -91,7 +87,7 @@ async def create_library(
             normalized_name,
         )
 
-    library = LIBRARY_CONFIG_STORE.upsert(
+    library = get_app_dependencies().library_config_store.upsert(
         LibraryData(
             name=normalized_name,
             root=canonical_root,
@@ -99,7 +95,7 @@ async def create_library(
             profile_id=payload.profile_id,
         )
     )
-    snapshot = config_service.upsert_library(
+    snapshot = get_app_dependencies().config_service.upsert_library(
         normalized_name,
         root=library.root,
         depth=library.depth,
@@ -116,11 +112,11 @@ async def create_library(
 
 @router.patch("/api/libraries/{library_name}")
 async def update_library_profile(library_name: str, payload: LibraryProfilePayload) -> JSONResponse:
-    profile = PROFILE_STORE.get(payload.profile_id)
+    profile = get_app_dependencies().profile_store.get(payload.profile_id)
     if profile is None:
         raise HTTPException(status_code=404, detail="Profile not found")
     try:
-        library = LIBRARY_CONFIG_STORE.update_profile(library_name, payload.profile_id)
+        library = get_app_dependencies().library_config_store.update_profile(library_name, payload.profile_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="Library not found")
     return JSONResponse({**library.to_payload(), "profile": profile.name})
@@ -128,12 +124,12 @@ async def update_library_profile(library_name: str, payload: LibraryProfilePaylo
 
 @router.delete("/api/libraries/{library_name}")
 async def delete_library(library_name: str) -> JSONResponse:
-    library = LIBRARY_CONFIG_STORE.get(library_name)
+    library = get_app_dependencies().library_config_store.get(library_name)
     if library is None:
         raise HTTPException(status_code=404, detail="Library not found")
-    LIBRARY_CONFIG_STORE.delete(library_name)
-    snapshot = config_service.delete_library(library_name)
-    removed_entries = LIBRARY_STORE.mark_missing(library_name, set())
+    get_app_dependencies().library_config_store.delete(library_name)
+    snapshot = get_app_dependencies().config_service.delete_library(library_name)
+    removed_entries = get_app_dependencies().library_entry_store.mark_missing(library_name, set())
     await emit_library_update("deleted", {"name": library_name, "entries_marked": removed_entries})
     return JSONResponse(
         {"deleted": library_name, "entries_marked": removed_entries},
@@ -153,19 +149,19 @@ async def list_library_entries(
     if offset < 0:
         raise HTTPException(status_code=400, detail="Offset cannot be negative")
 
-    entries = LIBRARY_STORE.list_entries(status=status, library=library, limit=limit, offset=offset)
+    entries = get_app_dependencies().library_entry_store.list_entries(status=status, library=library, limit=limit, offset=offset)
     return JSONResponse(jsonable_encoder([entry_to_response(entry) for entry in entries]))
 
 
 @router.patch("/api/library/entries/{entry_id}")
 async def update_entry_profile(entry_id: int, payload: EntryProfilePayload) -> JSONResponse:
-    entry = LIBRARY_STORE.get(entry_id)
+    entry = get_app_dependencies().library_entry_store.get(entry_id)
     if entry is None:
         raise HTTPException(status_code=404, detail="Library entry not found")
-    profile = PROFILE_STORE.get(payload.profile_id)
+    profile = get_app_dependencies().profile_store.get(payload.profile_id)
     if profile is None:
         raise HTTPException(status_code=404, detail="Profile not found")
-    updated = LIBRARY_STORE.update_status(
+    updated = get_app_dependencies().library_entry_store.update_status(
         entry.path,
         entry.status,
         library=entry.library,
@@ -184,12 +180,12 @@ async def update_entry_profile(entry_id: int, payload: EntryProfilePayload) -> J
 async def reprocess_entry(
     entry_id: int, payload: Optional[ReprocessPayload] = None
 ) -> JSONResponse:
-    entry = LIBRARY_STORE.get(entry_id)
+    entry = get_app_dependencies().library_entry_store.get(entry_id)
     if entry is None:
         raise HTTPException(status_code=404, detail="Library entry not found")
     source = Path(entry.path)
     if not source.exists():
-        updated = LIBRARY_STORE.update_status(
+        updated = get_app_dependencies().library_entry_store.update_status(
             entry.path,
             LibraryStatus.REMOVED,
             message="Original missing",
@@ -208,12 +204,12 @@ async def reprocess_entry(
         profile_id = profile.id
         profile_name = profile.name
     else:
-        profile = PROFILE_STORE.get(profile_id)
+        profile = get_app_dependencies().profile_store.get(profile_id)
         if profile:
             profile_name = profile.name
     if profile_id is None:
         raise HTTPException(status_code=404, detail="Profile not available for entry")
-    job = await job_manager.add_job(
+    job = await get_app_dependencies().job_manager.add_job(
         entry.path,
         entry.library,
         profile_name,
@@ -221,11 +217,11 @@ async def reprocess_entry(
         encoding=encoding_payload(profile_id),
         force=True,
     )
-    updated = LIBRARY_STORE.update_status(
+    updated = get_app_dependencies().library_entry_store.update_status(
         entry.path,
         LibraryStatus.PENDING,
         job_id=job.id,
-        output_path=str(job_manager.output_path(source)),
+        output_path=str(get_app_dependencies().job_manager.output_path(source)),
         original_missing=False,
         profile=profile_name,
         profile_id=profile_id,
@@ -240,16 +236,16 @@ async def reprocess_entry(
 
 @router.post("/api/library/entries/{entry_id}/remove-original")
 async def remove_original(entry_id: int) -> JSONResponse:
-    entry = LIBRARY_STORE.get(entry_id)
+    entry = get_app_dependencies().library_entry_store.get(entry_id)
     if entry is None:
         raise HTTPException(status_code=404, detail="Library entry not found")
     source = resolve_media_path(entry.path)
-    output_path = Path(entry.output_path or job_manager.output_path(source))
+    output_path = Path(entry.output_path or get_app_dependencies().job_manager.output_path(source))
     if not output_path.exists() or output_path.stat().st_size == 0:
         raise HTTPException(status_code=409, detail="Converted output missing or empty")
 
     if not source.exists():
-        updated = LIBRARY_STORE.update_status(
+        updated = get_app_dependencies().library_entry_store.update_status(
             entry.path,
             LibraryStatus.REMOVED,
             original_missing=True,
@@ -266,7 +262,7 @@ async def remove_original(entry_id: int) -> JSONResponse:
     except OSError as exc:
         raise HTTPException(status_code=500, detail=str(exc))
 
-    updated = LIBRARY_STORE.update_status(
+    updated = get_app_dependencies().library_entry_store.update_status(
         entry.path,
         LibraryStatus.REMOVED,
         job_id=entry.last_job_id,
@@ -293,7 +289,7 @@ async def manual_scan(payload: ScanRequest, background_tasks: BackgroundTasks) -
     scheduled: List[str] = []
     for name, library in target_libs.items():
         root_path = payload.root or library.root
-        profile = PROFILE_STORE.get(library.profile_id)
+        profile = get_app_dependencies().profile_store.get(library.profile_id)
         if profile is None:
             LOGGER.warning(
                 "Skipping manual scan for %s; profile id %s missing", name, library.profile_id

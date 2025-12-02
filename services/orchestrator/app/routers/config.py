@@ -7,10 +7,7 @@ from fastapi.responses import JSONResponse
 from .. import config as config_module
 from ..dependencies import (
     HOST_ENVIRONMENT,
-    LIBRARY_CONFIG_STORE,
-    LOG_STORE,
-    PROFILE_STORE,
-    config_service,
+    get_app_dependencies,
 )
 from ..profiles import HardwareProfileData, ProfileData
 from ..schemas import EncodingUpdatePayload, LoggingUpdatePayload
@@ -92,16 +89,16 @@ def profile_data_from_payload(
 
 @router.get("/api/config")
 async def get_config() -> JSONResponse:
-    snapshot = config_service.snapshot
+    snapshot = get_app_dependencies().config_service.snapshot
     libraries = {
         library.name: {
             "root": library.root,
             "depth": library.depth,
             "profile_id": library.profile_id,
         }
-        for library in LIBRARY_CONFIG_STORE.list_libraries()
+        for library in get_app_dependencies().library_config_store.list_libraries()
     }
-    profiles = [profile.to_payload() for profile in PROFILE_STORE.list_profiles()]
+    profiles = [profile.to_payload() for profile in get_app_dependencies().profile_store.list_profiles()]
     payload = config_module.sanitize_config(snapshot.config, revision=snapshot.revision)
     payload["libraries"] = libraries
     payload["profiles"] = profiles
@@ -115,8 +112,8 @@ async def update_encoding(payload: EncodingUpdatePayload) -> JSONResponse:
         profile_data, validated = profile_data_from_payload(payload)
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=422, detail=str(exc))
-    profile = PROFILE_STORE.upsert(profile_data)
-    snapshot = config_service.update_profile(payload.name, validated.model_dump())
+    profile = get_app_dependencies().profile_store.upsert(profile_data)
+    snapshot = get_app_dependencies().config_service.update_profile(payload.name, validated.model_dump())
     return JSONResponse(
         {"profile": profile.to_payload(), "revision": snapshot.revision},
         headers=cache_headers(snapshot),
@@ -125,13 +122,13 @@ async def update_encoding(payload: EncodingUpdatePayload) -> JSONResponse:
 
 @router.get("/api/profiles")
 async def list_profiles() -> JSONResponse:
-    profiles = [profile.to_payload() for profile in PROFILE_STORE.list_profiles()]
+    profiles = [profile.to_payload() for profile in get_app_dependencies().profile_store.list_profiles()]
     return JSONResponse(profiles)
 
 
 @router.get("/api/profiles/{profile_id}")
 async def get_profile(profile_id: int) -> JSONResponse:
-    profile = PROFILE_STORE.get(profile_id)
+    profile = get_app_dependencies().profile_store.get(profile_id)
     if profile is None:
         raise HTTPException(status_code=404, detail="Profile not found")
     return JSONResponse(profile.to_payload())
@@ -139,14 +136,14 @@ async def get_profile(profile_id: int) -> JSONResponse:
 
 @router.post("/api/profiles")
 async def create_profile(payload: EncodingUpdatePayload) -> JSONResponse:
-    if PROFILE_STORE.get_by_name(payload.name):
+    if get_app_dependencies().profile_store.get_by_name(payload.name):
         raise HTTPException(status_code=409, detail="Profile name already exists")
     try:
         profile_data, validated = profile_data_from_payload(payload)
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=422, detail=str(exc))
-    profile = PROFILE_STORE.create(profile_data)
-    snapshot = config_service.update_profile(payload.name, validated.model_dump())
+    profile = get_app_dependencies().profile_store.create(profile_data)
+    snapshot = get_app_dependencies().config_service.update_profile(payload.name, validated.model_dump())
     return JSONResponse(
         {"profile": profile.to_payload(), "revision": snapshot.revision},
         headers=cache_headers(snapshot),
@@ -161,10 +158,10 @@ async def update_profile(profile_id: int, payload: EncodingUpdatePayload) -> JSO
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=422, detail=str(exc))
     try:
-        profile = PROFILE_STORE.update(profile_id, profile_data)
+        profile = get_app_dependencies().profile_store.update(profile_id, profile_data)
     except KeyError:
         raise HTTPException(status_code=404, detail="Profile not found")
-    snapshot = config_service.update_profile(payload.name, validated.model_dump())
+    snapshot = get_app_dependencies().config_service.update_profile(payload.name, validated.model_dump())
     return JSONResponse(
         {"profile": profile.to_payload(), "revision": snapshot.revision},
         headers=cache_headers(snapshot),
@@ -174,7 +171,7 @@ async def update_profile(profile_id: int, payload: EncodingUpdatePayload) -> JSO
 @router.delete("/api/profiles/{profile_id}")
 async def delete_profile(profile_id: int) -> JSONResponse:
     try:
-        PROFILE_STORE.delete(profile_id)
+        get_app_dependencies().profile_store.delete(profile_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="Profile not found")
     except ValueError as exc:
@@ -184,8 +181,8 @@ async def delete_profile(profile_id: int) -> JSONResponse:
 
 @router.post("/api/config/logging")
 async def update_logging(payload: LoggingUpdatePayload) -> JSONResponse:
-    snapshot = config_service.update_logging(payload.retention_days)
-    LOG_STORE.update_retention(snapshot.config.logging.retention_days)
+    snapshot = get_app_dependencies().config_service.update_logging(payload.retention_days)
+    get_app_dependencies().log_store.update_retention(snapshot.config.logging.retention_days)
     LOGGER.info("Updated log retention to %s days", payload.retention_days)
     return JSONResponse(
         {
@@ -199,12 +196,12 @@ async def update_logging(payload: LoggingUpdatePayload) -> JSONResponse:
 @router.post("/api/config/reset")
 async def reset_config() -> JSONResponse:
     """Reset configuration to built-in defaults."""
-    snapshot = config_service.reset_to_defaults()
+    snapshot = get_app_dependencies().config_service.reset_to_defaults()
     # Note: We do not reset the PROFILE_STORE here to avoid breaking existing IDs
     # referenced by jobs. The user can manually clean up profiles if needed.
 
     # We also need to update LOG_STORE retention
-    LOG_STORE.update_retention(snapshot.config.logging.retention_days)
+    get_app_dependencies().log_store.update_retention(snapshot.config.logging.retention_days)
 
     return JSONResponse(
         config_module.sanitize_config(snapshot.config, revision=snapshot.revision),

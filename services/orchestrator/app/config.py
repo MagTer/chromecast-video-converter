@@ -36,14 +36,14 @@ DEFAULT_CONFIG: Dict[str, Any] = {
                 "mode": "gpu",
                 "codec": "h264",
                 "profile": "high",
-                "level": "3.1",
+                "level": "4.0",
                 "resolution": "1280x720",
                 "max_fps": 30,
                 "bitrate": "5M",
                 "max_bitrate": "10M",
                 "bufsize": "16M",
                 "preset": "p7",
-                "rc": "vbr",
+                "rc": "vbr_hq",
                 "cq": 18,
                 "bframes": 2,
                 "lookahead": 24,
@@ -62,21 +62,21 @@ DEFAULT_CONFIG: Dict[str, Any] = {
                 "mode": "cpu",
                 "codec": "h264",
                 "profile": "high",
-                "level": "3.1",
-                "resolution": "1280x720",
+                "level": "4.1",
+                "resolution": "1920x1080",
                 "max_fps": 30,
                 "bitrate": "5M",
                 "max_bitrate": "8M",
                 "bufsize": "16M",
-                "preset": "slow",
+                "preset": "veryslow",
                 "rc": "crf",
-                "cq": 20,
-                "bframes": 2,
-                "lookahead": 0,
-                "adaptive_b_frames": False,
-                "aq": False,
-                "spatial_aq": False,
-                "temporal_aq": False,
+                "cq": 18,
+                "bframes": 3,
+                "lookahead": 60,
+                "adaptive_b_frames": True,
+                "aq": True,
+                "spatial_aq": True,
+                "temporal_aq": True,
                 "aq_strength": 7,
                 "audio": {
                     "codec": "aac",
@@ -251,8 +251,8 @@ def _validate_bframe_chain(
     if profile.lower() == "baseline" and bframes != 0:
         raise ValueError("Baseline profile forbids B-frames; expected 0.")
 
-    if lookahead < 0 or lookahead > 32:
-        raise ValueError("Lookahead depth must be between 0 and 32 frames.")
+    if lookahead < 0 or lookahead > 60:
+        raise ValueError("Lookahead depth must be between 0 and 60 frames.")
 
     if adaptive_b_frames and (lookahead <= 0 or bframes == 0):
         raise ValueError("Adaptive B-frames require lookahead > 0 and at least 1 B-frame.")
@@ -347,7 +347,7 @@ class HardwareProfile(BaseModel):
     cq: int = Field(default=18, ge=0, le=30)
     rc: str = Field(default="vbr")
     bframes: int = Field(default=2, ge=0, le=3)
-    lookahead: int = Field(default=24, ge=0, le=32)
+    lookahead: int = Field(default=24, ge=0, le=60)
     adaptive_b_frames: bool = Field(default=True)
     aq: bool = Field(default=True)
     spatial_aq: bool = Field(default=True)

@@ -4,7 +4,7 @@ from typing import Optional
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 
-from ..dependencies import LOG_STORE
+from ..dependencies import get_app_dependencies
 from ..logs import LogEntry, derive_source_category, severity_value
 from ..schemas import LogIngestBatch
 
@@ -21,7 +21,7 @@ async def list_logs(
     category: Optional[str] = None,
 ) -> JSONResponse:
     severity_filter = None if min_severity == "ALL" else (min_severity or "INFO")
-    entries = LOG_STORE.list_entries(
+    entries = get_app_dependencies().log_store.list_entries(
         level=level,
         min_severity=severity_filter,
         query=query,
@@ -35,17 +35,17 @@ async def list_logs(
 
 @router.get("/api/logs/categories")
 async def list_log_categories() -> JSONResponse:
-    return JSONResponse(LOG_STORE.list_categories())
+    return JSONResponse(get_app_dependencies().log_store.list_categories())
 
 
 @router.get("/api/logs/sources")
 async def list_log_sources() -> JSONResponse:
-    return JSONResponse(LOG_STORE.list_sources())
+    return JSONResponse(get_app_dependencies().log_store.list_sources())
 
 
 @router.get("/api/logs/stats")
 async def log_stats() -> JSONResponse:
-    return JSONResponse(LOG_STORE.stats())
+    return JSONResponse(get_app_dependencies().log_store.stats())
 
 
 @router.post("/api/logs/ingest")
@@ -59,7 +59,7 @@ async def ingest_logs(batch: LogIngestBatch) -> JSONResponse:
             derived_source, derived_category = derive_source_category(entry.logger)
             source = source or derived_source
             category = category or derived_category
-        LOG_STORE.add_entry(
+        get_app_dependencies().log_store.add_entry(
             LogEntry(
                 timestamp=entry.timestamp or datetime.now(timezone.utc),
                 level=entry.level,
