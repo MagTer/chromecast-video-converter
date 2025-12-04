@@ -43,27 +43,28 @@ def _build_test_app(tmp_path: Path, monkeypatch, fake_redis):
 
     import app.jobs as jobs
 
-    monkeypatch.setattr(jobs.redis, "from_url", lambda url, decode_responses=True: fake_redis)
+    monkeypatch.setattr(jobs.redis, "from_url", lambda url, decode_responses=True: fake_redis())
 
     import app.main as main
 
     importlib.reload(main)
-    
+
     # Ensure config is seeded
     from app.dependencies import get_app_dependencies
     from app.main import seed_profiles_and_libraries
-    
+
     config_service = get_app_dependencies().config_service
     snapshot = config_service.reload()
     seed_profiles_and_libraries(snapshot)
-    
+
     return main.app, main
 
 
 @pytest.fixture()
 def test_app(tmp_path, monkeypatch, fake_redis):
     app, main = _build_test_app(tmp_path, monkeypatch, fake_redis)
-    return TestClient(app), main
+    with TestClient(app) as client:
+        yield client, main
 
 
 def _first_profile_id(client: TestClient) -> int:
@@ -172,6 +173,9 @@ def test_event_paths_normalized_to_canonical(tmp_path, monkeypatch, fake_redis):
         "is_directory": False,
     }
     assert client.post("/api/events", json=second_event).status_code == 200
+    from app.dependencies import get_app_dependencies
+
+    get_app_dependencies().job_manager._redis = None
 
     entries_after = client.get("/api/library/entries", params={"library": "mirror"}).json()
     assert len(entries_after) == 1
@@ -355,6 +359,7 @@ def test_clear_jobs_endpoint_removes_completed_jobs(test_app, tmp_path):
             encoding=encoding_payload(profile_id),
         )
     )
+    get_app_dependencies().job_manager._redis = None
 
     asyncio.run(
         get_app_dependencies().job_manager.update_job(
@@ -362,6 +367,7 @@ def test_clear_jobs_endpoint_removes_completed_jobs(test_app, tmp_path):
             jobs_module.JobStatusUpdate(status=jobs_module.JobStatus.COMPLETED, progress=100),
         )
     )
+    get_app_dependencies().job_manager._redis = None
 
     response = client.post("/api/jobs/clear")
     assert response.status_code == 200

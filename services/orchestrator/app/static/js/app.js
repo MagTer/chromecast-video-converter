@@ -182,8 +182,10 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
       if (Number.isFinite(job?.elapsed_seconds)) {
         return job.elapsed_seconds;
       }
-      const created = job?.created_at ? new Date(job.created_at) : null;
-      if (!created || Number.isNaN(created.getTime())) {
+      const startTimeStr = job?.started_at || job?.created_at;
+      const start = startTimeStr ? new Date(startTimeStr) : null;
+
+      if (!start || Number.isNaN(start.getTime())) {
         return 0;
       }
       const status = String(job?.status || "").toLowerCase();
@@ -192,9 +194,9 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
         status === "completed" || status === "failed"
           ? updated && !Number.isNaN(updated.getTime())
             ? updated
-            : created
+            : start
           : new Date();
-      const elapsedMs = endDate.getTime() - created.getTime();
+      const elapsedMs = endDate.getTime() - start.getTime();
       return Math.max(0, Math.round(elapsedMs / 1000));
     }
 

@@ -8,7 +8,7 @@ from app.jobs import JobManager, JobStatus, JobStatusUpdate
 def test_job_lifecycle(fake_redis, tmp_path, monkeypatch):
     async def _run():
         monkeypatch.setattr(
-            "app.jobs.redis.from_url", lambda url, decode_responses=True: fake_redis
+            "app.jobs.redis.from_url", lambda url, decode_responses=True: fake_redis()
         )
         manager = JobManager("redis://test", visibility_timeout=1)
 
@@ -48,7 +48,7 @@ def test_job_lifecycle(fake_redis, tmp_path, monkeypatch):
 def test_pause_and_resume(fake_redis, tmp_path, monkeypatch):
     async def _run():
         monkeypatch.setattr(
-            "app.jobs.redis.from_url", lambda url, decode_responses=True: fake_redis
+            "app.jobs.redis.from_url", lambda url, decode_responses=True: fake_redis()
         )
         manager = JobManager("redis://test", visibility_timeout=1)
 
@@ -68,9 +68,10 @@ def test_pause_and_resume(fake_redis, tmp_path, monkeypatch):
 def test_acquire_stalled_handles_tuple_shape(fake_redis, monkeypatch):
     async def _run():
         monkeypatch.setattr(
-            "app.jobs.redis.from_url", lambda url, decode_responses=True: fake_redis
+            "app.jobs.redis.from_url", lambda url, decode_responses=True: fake_redis()
         )
         manager = JobManager("redis://test", visibility_timeout=1)
+        await manager.initialize()
         stalled = await manager._acquire_stalled("worker-1")
         assert stalled == (None, None)
 
@@ -80,7 +81,7 @@ def test_acquire_stalled_handles_tuple_shape(fake_redis, monkeypatch):
 def test_purge_inactive_jobs(fake_redis, tmp_path, monkeypatch):
     async def _run():
         monkeypatch.setattr(
-            "app.jobs.redis.from_url", lambda url, decode_responses=True: fake_redis
+            "app.jobs.redis.from_url", lambda url, decode_responses=True: fake_redis()
         )
         manager = JobManager("redis://test", visibility_timeout=1)
 
@@ -99,7 +100,7 @@ def test_purge_inactive_jobs(fake_redis, tmp_path, monkeypatch):
 def test_purge_inactive_jobs_skips_running(fake_redis, tmp_path, monkeypatch):
     async def _run():
         monkeypatch.setattr(
-            "app.jobs.redis.from_url", lambda url, decode_responses=True: fake_redis
+            "app.jobs.redis.from_url", lambda url, decode_responses=True: fake_redis()
         )
         manager = JobManager("redis://test", visibility_timeout=1)
 

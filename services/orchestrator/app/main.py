@@ -16,7 +16,7 @@ from . import (
 from .dependencies import (
     STATIC_DIR,
     WORKER_TELEMETRY,
-    get_app_dependencies, # Added this import
+    get_app_dependencies,  # Added this import
 )
 from .logs import SQLiteLogHandler, StructuredLogFilter
 from .profiles import HardwareProfileData, LibraryData, ProfileData
@@ -40,12 +40,12 @@ from .routers import (
 )
 from .services.core import encoding_payload, reconcile_library  # noqa: F401
 
-
 # Define the FastAPI app instance here
 app = FastAPI(title="Chromecast Transcode Orchestrator", version="0.1.0")
 
 # Configure logging (moved to global scope after app definition)
 LOGGER = logging.getLogger("orchestrator")
+
 
 def configure_logging() -> None:
     formatter = logging.Formatter("%(asctime)s %(levelname)s [%(name)s] %(message)s")
@@ -191,10 +191,12 @@ async def worker_watchdog() -> None:
 
 @app.on_event("startup")
 async def startup_event() -> None:
-    configure_logging() # Moved from global scope
-    config_snapshot = get_app_dependencies().config_service.reload() # Moved from global scope
-    seed_profiles_and_libraries(config_snapshot) # Moved from global scope
-    get_app_dependencies().log_store.update_retention(config_snapshot.config.logging.retention_days) # Moved from global scope
+    configure_logging()  # Moved from global scope
+    config_snapshot = get_app_dependencies().config_service.reload()  # Moved from global scope
+    seed_profiles_and_libraries(config_snapshot)  # Moved from global scope
+    get_app_dependencies().log_store.update_retention(
+        config_snapshot.config.logging.retention_days
+    )  # Moved from global scope
 
     await get_app_dependencies().job_manager.initialize()
     asyncio.create_task(worker_watchdog())

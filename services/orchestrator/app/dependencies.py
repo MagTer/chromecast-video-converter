@@ -1,6 +1,5 @@
 import asyncio
 import os
-import sys
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, Set, Tuple
@@ -41,11 +40,15 @@ def _get_log_db_path(data_dir: Path | None = None) -> Path:
 
 
 def _get_config_db_path(data_dir: Path | None = None) -> Path:
-    return Path(os.environ.get("CONFIG_DB_PATH", _resolve_data_dir(data_dir) / "config.db")).resolve()
+    return Path(
+        os.environ.get("CONFIG_DB_PATH", _resolve_data_dir(data_dir) / "config.db")
+    ).resolve()
 
 
 def _get_library_db_path(data_dir: Path | None = None) -> Path:
-    return Path(os.environ.get("LIBRARY_DB_PATH", _resolve_data_dir(data_dir) / "library.db")).resolve()
+    return Path(
+        os.environ.get("LIBRARY_DB_PATH", _resolve_data_dir(data_dir) / "library.db")
+    ).resolve()
 
 
 JOB_QUEUE_URL = os.environ.get("JOB_QUEUE", "redis://localhost:6379/0")
@@ -183,7 +186,10 @@ except FileNotFoundError:
 
 
 def get_library_map() -> Dict[str, Any]:
-    return {library.name: library for library in get_app_dependencies().library_config_store.list_libraries()}
+    return {
+        library.name: library
+        for library in get_app_dependencies().library_config_store.list_libraries()
+    }
 
 
 HOST_ENVIRONMENT = {"is_wsl2": detect_wsl2()}

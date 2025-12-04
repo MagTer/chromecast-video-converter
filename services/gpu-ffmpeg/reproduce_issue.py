@@ -1,11 +1,11 @@
 import sys
 from pathlib import Path
-from typing import Iterable
 
 sys.path.append("services/gpu-ffmpeg")
 
 from app.capabilities import EncoderCapabilities, FfmpegCapabilities
 from app.ffmpeg_builder import FFmpegBuilder
+
 
 def make_capabilities() -> FfmpegCapabilities:
     encoder_info = EncoderCapabilities(
@@ -17,12 +17,13 @@ def make_capabilities() -> FfmpegCapabilities:
     # Removing "zscale", "tonemap" from filters to simulate missing CPU tonemap support
     return FfmpegCapabilities(
         skip_detection=True,
-        filters={"tonemap_cuda", "scale_npp", "scale_cuda", "hwupload_cuda"}, 
+        filters={"tonemap_cuda", "scale_npp", "scale_cuda", "hwupload_cuda"},
         encoders={"h264_nvenc", "libx264", "aac"},
         decoders={"h264", "hevc", "aac"},
         hwaccels={"cuda"},
         encoder_capabilities={"h264_nvenc": encoder_info},
     )
+
 
 PROFILES = {
     "chromecast": {
@@ -36,7 +37,7 @@ PROFILES = {
             "bitrate": "5M",
             "max_bitrate": "10M",
             "bufsize": "16M",
-            "audio": {"codec": "aac", "bitrate": "192k", "channels": 2}
+            "audio": {"codec": "aac", "bitrate": "192k", "channels": 2},
         },
         "cpu": {
             "codec": "h264",
@@ -46,8 +47,8 @@ PROFILES = {
             "rc": "crf",
             "cq": 20,
             "preset": "slow",
-            "audio": {"codec": "aac", "bitrate": "192k", "channels": 2}
-        }
+            "audio": {"codec": "aac", "bitrate": "192k", "channels": 2},
+        },
     }
 }
 
@@ -62,26 +63,21 @@ analysis = {
             "color_transfer": "smpte2084",
             "avg_frame_rate": "24000/1001",
             "width": 1920,
-            "height": 1080
+            "height": 1080,
         },
-        {"codec_type": "audio", "codec_name": "aac", "tags": {"language": "eng"}}
+        {"codec_type": "audio", "codec_name": "aac", "tags": {"language": "eng"}},
     ],
     "pipeline": {
         "decode_type": "cpu",
         "scale_type": "cpu",
         "encode_type": "cpu",
         "attempt": 5,
-        "max_attempts": 5
-    }
+        "max_attempts": 5,
+    },
 }
 
 builder = FFmpegBuilder(
-    analysis,
-    Path("in.mkv"),
-    Path("out.mp4"),
-    PROFILES,
-    make_capabilities(),
-    {"is_wsl2": False}
+    analysis, Path("in.mkv"), Path("out.mp4"), PROFILES, make_capabilities(), {"is_wsl2": False}
 )
 command = builder.build()
 print(" ".join(command))

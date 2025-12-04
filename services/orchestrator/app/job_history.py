@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from datetime import datetime
+from threading import Lock
 from typing import List, Optional
 
 from sqlalchemy import Column, DateTime, Integer, String, Text, select
@@ -46,38 +47,42 @@ class JobHistoryEntry:
 class JobHistoryStore:
     def __init__(self, session_factory: sessionmaker) -> None:
         self._Session = session_factory
+        self._lock = Lock()
 
     def _session(self):
         return self._Session()
 
     def record(self, entry: JobHistoryEntry) -> JobHistory:
-        with self._session() as session:
-            existing = session.scalar(select(JobHistory).where(JobHistory.job_id == entry.job_id))
-            timestamp = datetime.utcnow()
-            if existing:
-                existing.status = entry.status
-                existing.message = entry.message
-                existing.completed_at = entry.completed_at
-                existing.started_at = existing.started_at or entry.started_at or timestamp
-                session.add(existing)
-                session.commit()
-                session.refresh(existing)
-                return existing
+        with self._lock:
+            with self._session() as session:
+                existing = session.scalar(
+                    select(JobHistory).where(JobHistory.job_id == entry.job_id)
+                )
+                timestamp = datetime.utcnow()
+                if existing:
+                    existing.status = entry.status
+                    existing.message = entry.message
+                    existing.completed_at = entry.completed_at
+                    existing.started_at = existing.started_at or entry.started_at or timestamp
+                    session.add(existing)
+                    session.commit()
+                    session.refresh(existing)
+                    return existing
 
-            record = JobHistory(
-                job_id=entry.job_id,
-                path=entry.path,
-                library=entry.library,
-                profile=entry.profile,
-                status=entry.status,
-                message=entry.message,
-                started_at=entry.started_at or timestamp,
-                completed_at=entry.completed_at,
-            )
-            session.add(record)
-            session.commit()
-            session.refresh(record)
-            return record
+                record = JobHistory(
+                    job_id=entry.job_id,
+                    path=entry.path,
+                    library=entry.library,
+                    profile=entry.profile,
+                    status=entry.status,
+                    message=entry.message,
+                    started_at=entry.started_at or timestamp,
+                    completed_at=entry.completed_at,
+                )
+                session.add(record)
+                session.commit()
+                session.refresh(record)
+                return record
 
     def list_recent(self, limit: int = 100) -> List[JobHistoryEntry]:
         with self._session() as session:

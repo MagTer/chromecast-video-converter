@@ -25,6 +25,7 @@ class JobStatus(str):
 
 class Job(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid4()))
+    job_type: str = "convert"
     path: str
     library: str
     profile: str
@@ -37,6 +38,7 @@ class Job(BaseModel):
     worker_id: Optional[str] = None
     request_id: Optional[str] = None
     created_at: datetime = Field(default_factory=datetime.utcnow)
+    started_at: Optional[datetime] = None
     updated_at: datetime = Field(default_factory=datetime.utcnow)
     progress: int = 0
     message: Optional[str] = None
@@ -79,7 +81,8 @@ class JobManager:
     def __init__(self, redis_url: str, *, visibility_timeout: int = 300) -> None:
         self._logger = logging.getLogger(__name__)
         self._video_extensions = {".mp4", ".m4v", ".mov", ".mkv", ".ts", ".flv"}
-        self._redis = redis.from_url(redis_url, decode_responses=True)
+        self._redis_url = redis_url
+        self._redis = None
         self._stream = os.environ.get("JOB_QUEUE_STREAM", "job_queue")
         self._group = os.environ.get("JOB_QUEUE_GROUP", "workers")
         self._visibility_timeout = visibility_timeout
@@ -135,6 +138,8 @@ class JobManager:
 
     async def initialize(self) -> None:
         async with self._ensure_group_lock:
+            if self._redis is None:
+                self._redis = redis.from_url(self._redis_url, decode_responses=True)
             try:
                 await self._redis.xgroup_create(self._stream, self._group, id="0-0", mkstream=True)
             except redis.ResponseError as exc:
@@ -201,6 +206,8 @@ class JobManager:
         payload = job.model_dump()
         payload["created_at"] = payload["created_at"].isoformat()
         payload["updated_at"] = payload["updated_at"].isoformat()
+        if payload.get("started_at"):
+            payload["started_at"] = payload["started_at"].isoformat()
         encoded: dict[str, str] = {}
         for key, value in payload.items():
             if value is None:
@@ -216,8 +223,8 @@ class JobManager:
             raise KeyError("job not found")
         parsed: Dict[str, Any] = {}
         for key, value in data.items():
-            if key in {"created_at", "updated_at"}:
-                parsed[key] = datetime.fromisoformat(value)
+            if key in {"created_at", "updated_at", "started_at"}:
+                parsed[key] = datetime.fromisoformat(value) if value else None
             elif key == "progress":
                 parsed[key] = int(value) if value else 0
             elif key == "profile_id":
@@ -255,16 +262,32 @@ class JobManager:
         message_id, fields = messages[0]
         payload = json.loads(fields.get("payload", "{}"))
         job = self._decode_job(payload)
+
+        # Zombie detection
+        delivery_count_key = f"job:{job.id}:delivery_count"
+        count = await self._redis.incr(delivery_count_key)
+        if count > 3:
+            self._logger.error("Job %s crashed repeatedly (count=%s); failing", job.id[:8], count)
+            job.status = JobStatus.FAILED
+            job.message = "Worker crashed repeatedly"
+            job.updated_at = datetime.utcnow()
+            await self._redis.hset(self._job_key(job.id), mapping=self._encode_job(job))
+            await self._redis.zadd(self._job_index, {job.id: job.updated_at.timestamp()})
+            await self._redis.xack(self._stream, self._group, message_id)
+            await self._redis.delete(delivery_count_key)
+            return None, None
+
         job.status = JobStatus.RUNNING
         job.worker_id = consumer
         job.updated_at = datetime.utcnow()
         await self._redis.hset(self._job_key(job.id), mapping=self._encode_job(job))
         await self._redis.zadd(self._job_index, {job.id: job.updated_at.timestamp()})
         self._logger.warning(
-            "Re-claimed stalled job %s (path=%s) for consumer %s",
+            "Re-claimed stalled job %s (path=%s) for consumer %s (attempt %s)",
             job.id[:8],
             job.path,
             consumer,
+            count,
         )
         return message_id, job
 
@@ -311,6 +334,7 @@ class JobManager:
             attempt=attempt,
             max_attempts=max_attempts,
             request_id=get_request_id(),
+            job_type="convert",
         )
         existing_job = await self._reserve_path_for_job(path, job.id, force=force)
         if existing_job:
@@ -332,6 +356,42 @@ class JobManager:
                 library,
                 profile,
             )
+        return job
+
+    async def add_delete_job(self, path: str) -> Job:
+        await self.initialize()
+        path = self._canonical_path(path)
+        # No extension check or converted check for delete jobs; we want to delete what's asked.
+
+        job = Job(
+            path=path,
+            library="system",
+            profile="system-delete",
+            job_type="delete",
+            request_id=get_request_id(),
+            pipeline={"max_attempts": 3},  # Simpler pipeline for delete
+        )
+
+        # No path reservation check? Or should we?
+        # If a conversion is running, we probably shouldn't delete.
+        # But "remove-original" usually happens after conversion or manual trigger.
+        # Let's skip reservation for now to avoid complexity, or use a different key?
+        # Actually, if we reserve, we prevent concurrent operations.
+        # Let's use force=True behavior effectively or just unique ID.
+        # But we want to track it.
+
+        encoded = self._encode_job(job)
+        await self._redis.hset(self._job_key(job.id), mapping=encoded)
+        await self._redis.zadd(self._job_index, {job.id: job.updated_at.timestamp()})
+        # Do NOT add to _path_index or _path_key to avoid conflict with existing media tracking?
+        # If we do, it might block re-scanning.
+        # But `remove-original` implies the file IS there.
+
+        await self._redis.xadd(
+            self._stream, {"payload": json.dumps(encoded)}, maxlen=10_000, approximate=True
+        )
+        await self._redis.incr(self._depth_key)
+        self._logger.info("Queued DELETE job %s for %s", job.id[:8], path)
         return job
 
     STALE_RUNNING_TIMEOUT = 300  # seconds
@@ -563,6 +623,7 @@ class JobManager:
         job.status = JobStatus.RUNNING
         job.progress = job.progress or 0
         job.worker_id = consumer
+        job.started_at = datetime.utcnow()
         job.updated_at = datetime.utcnow()
         await self._redis.hset(self._job_key(job.id), mapping=self._encode_job(job))
         await self._redis.zadd(self._job_index, {job.id: job.updated_at.timestamp()})

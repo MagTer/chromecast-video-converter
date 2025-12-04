@@ -343,12 +343,14 @@ def snapshot_gpu_state() -> dict[str, Any]:
         "tonemap_cuda_available": bool(ffmpeg_support.get("tonemap_cuda")),
     }
 
+
 def require_gpu(gpu_state: dict[str, Any] | None = None) -> dict[str, Any]:
     state = gpu_state or snapshot_gpu_state()
     if not state.get("available"):
         message = state.get("message") or "GPU unavailable for NVENC workloads"
         raise RuntimeError(message)
     return state
+
 
 def _derive_bit_depth(stream: dict) -> int | None:
     bits = stream.get("bits_per_raw_sample")
@@ -366,6 +368,7 @@ def _derive_bit_depth(stream: dict) -> int | None:
             return None
     return None
 
+
 def _detect_hdr(stream: dict) -> bool:
     transfer = (stream.get("color_transfer") or "").lower()
     if transfer in {"smpte2084", "arib-std-b67"}:
@@ -380,6 +383,7 @@ def _detect_hdr(stream: dict) -> bool:
     bit_depth = _derive_bit_depth(stream) or 8
     return bit_depth > 8
 
+
 def _augment_analysis_with_video_metadata(analysis: dict) -> dict:
     streams = analysis.get("streams") or []
     for stream in streams:
@@ -389,6 +393,7 @@ def _augment_analysis_with_video_metadata(analysis: dict) -> dict:
         stream["is_hdr"] = _detect_hdr(stream)
     analysis["streams"] = streams
     return analysis
+
 
 def probe_file(filepath: str | Path) -> dict:
     target_path = resolve_media_path(filepath)
@@ -448,6 +453,7 @@ def probe_file(filepath: str | Path) -> dict:
 def _loggable_command(command: list[str]) -> str:
     return " ".join(shlex.quote(arg) for arg in command)
 
+
 def _media_summary(analysis: dict) -> dict:
     streams = analysis.get("streams") or []
     video = next((s for s in streams if s.get("codec_type") == "video"), {}) or {}
@@ -467,6 +473,7 @@ def _media_summary(analysis: dict) -> dict:
         "audio_streams": len(audio_streams),
         "subtitle_streams": len(subtitle_streams),
     }
+
 
 def _extract_filter_chain(command: list[str]) -> str | None:
     if "-vf" not in command:
@@ -590,6 +597,7 @@ def _extract_duration(analysis: dict) -> float:
         return float(analysis.get("format", {}).get("duration", 0))
     except (TypeError, ValueError):
         return 0.0
+
 
 def _progress_callback_factory(
     duration: float,
@@ -764,26 +772,31 @@ async def _probe_duration(source: Path) -> float:
 
 async def _validate_output(output: Path, expected_duration: float) -> bool:
     if not output.exists():
+        LOGGER.warning("Output validation failed: File %s not found", output)
         return False
     try:
         stat = output.stat()
-    except OSError:
+    except OSError as exc:
+        LOGGER.warning("Output validation failed: stat error %s", exc)
         return False
     if stat.st_size <= 0:
+        LOGGER.warning("Output validation failed: File empty")
         return False
     if expected_duration > 0:
         output_duration = await _probe_duration(output)
         if output_duration <= 0:
+            LOGGER.warning("Output validation failed: Duration probe failed (0s)")
             return False
         if abs(output_duration - expected_duration) > 1.0:
             LOGGER.warning(
-                "Output duration for %s mismatches source (%.2fs vs %.2fs)",
-                output,
-                output_duration,
+                "Duration mismatch: Source %.2fs, Output %.2fs (Diff %.2fs)",
                 expected_duration,
+                output_duration,
+                abs(output_duration - expected_duration),
             )
             return False
     return True
+
 
 def _build_output_path(source: Path) -> Path:
     resolved = resolve_media_path(source)
@@ -806,8 +819,37 @@ async def _maybe_remove_original(source: Path, output_path: Path, expected_durat
     return True
 
 
+async def handle_delete_job(client: httpx.AsyncClient, job: dict) -> None:
+    job_id = job["id"]
+    source_path = job["path"]
+    request_id = job.get("request_id")
+    token = _current_request_id.set(request_id)
+    try:
+        LOGGER.info("Processing DELETE job %s for %s", job_id[:8], source_path)
+        path = resolve_media_path(source_path)
+        if not path.exists():
+            await update_job_status(client, job_id, "completed", 100, "File already missing")
+            return
+
+        if path.is_dir():
+            raise ValueError("Path is a directory")
+
+        path.unlink()
+        await update_job_status(client, job_id, "completed", 100, "File deleted")
+        LOGGER.info("Deleted file %s", path)
+    except Exception as exc:
+        LOGGER.error("Delete job failed: %s", exc)
+        await update_job_status(client, job_id, "failed", 0, str(exc))
+    finally:
+        _current_request_id.reset(token)
+
+
 async def process_job(client: httpx.AsyncClient, job: dict) -> None:  # noqa: C901
     job_id = job["id"]
+    if job.get("job_type") == "delete":
+        await handle_delete_job(client, job)
+        return
+
     request_id = job.get("request_id")
     token = _current_request_id.set(request_id)
     try:
@@ -996,6 +1038,7 @@ def handle_exception(exc_type, exc_value, exc_traceback):
         sys.__excepthook__(exc_type, exc_value, exc_traceback)
         return
     LOGGER.critical("Uncaught exception", exc_info=(exc_type, exc_value, exc_traceback))
+
 
 sys.excepthook = handle_exception
 
