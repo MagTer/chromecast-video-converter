@@ -170,6 +170,8 @@ def find_library_for_path(path: str) -> Optional[str]:
 
 def should_track_file(path: Path | str) -> bool:
     resolved = resolve_media_path(path)
+    if "sample" in str(resolved).lower():
+        return False
     return (
         resolved.is_file()
         and resolved.suffix.lower() in get_app_dependencies().job_manager.video_extensions
