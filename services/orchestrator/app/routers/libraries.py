@@ -116,7 +116,9 @@ async def update_library_profile(library_name: str, payload: LibraryProfilePaylo
     if profile is None:
         raise HTTPException(status_code=404, detail="Profile not found")
     try:
-        library = get_app_dependencies().library_config_store.update_profile(library_name, payload.profile_id)
+        library = get_app_dependencies().library_config_store.update_profile(
+            library_name, payload.profile_id
+        )
     except KeyError:
         raise HTTPException(status_code=404, detail="Library not found")
     return JSONResponse({**library.to_payload(), "profile": profile.name})
@@ -149,7 +151,9 @@ async def list_library_entries(
     if offset < 0:
         raise HTTPException(status_code=400, detail="Offset cannot be negative")
 
-    entries = get_app_dependencies().library_entry_store.list_entries(status=status, library=library, limit=limit, offset=offset)
+    entries = get_app_dependencies().library_entry_store.list_entries(
+        status=status, library=library, limit=limit, offset=offset
+    )
     return JSONResponse(jsonable_encoder([entry_to_response(entry) for entry in entries]))
 
 
@@ -257,17 +261,15 @@ async def remove_original(entry_id: int) -> JSONResponse:
         await NOTIFIER.broadcast({"type": "entry-update", "entry": entry_payload})
         return JSONResponse(jsonable_encoder({"entry": entry_payload}))
 
-    try:
-        source.unlink()
-    except OSError as exc:
-        raise HTTPException(status_code=500, detail=str(exc))
+    # Enqueue delete job
+    job = await get_app_dependencies().job_manager.add_delete_job(entry.path)
 
     updated = get_app_dependencies().library_entry_store.update_status(
         entry.path,
-        LibraryStatus.REMOVED,
-        job_id=entry.last_job_id,
+        LibraryStatus.PENDING,
+        job_id=job.id,
         output_path=str(output_path),
-        original_missing=True,
+        original_missing=False,
         profile=entry.profile,
         profile_id=entry.profile_id,
     )

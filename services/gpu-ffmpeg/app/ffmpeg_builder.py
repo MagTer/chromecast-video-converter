@@ -11,6 +11,17 @@ LOGGER = logging.getLogger("gpu-ffmpeg.builder")
 
 DEFAULT_LANGUAGE_PREFERENCES = ("swe", "eng")
 
+SUPPORTED_SUBTITLE_CODECS = {
+    "subrip",
+    "ass",
+    "ssa",
+    "webvtt",
+    "mov_text",
+    "stl",
+    "srt",
+    "text",
+}
+
 
 @dataclass
 class StreamDisposition:
@@ -549,9 +560,68 @@ class FFmpegBuilder:
         decode_type = (pipeline.get("decode_type") or "gpu").lower()
         encode_type = (pipeline.get("encode_type") or "gpu").lower()
 
+        # Smart Bitrate Clamping
+        try:
+            source_bitrate = int(self.analysis.get("format", {}).get("bit_rate", 0))
+        except (ValueError, TypeError):
+            source_bitrate = 0
+
+        if source_bitrate > 0:
+
+            def _parse_bitrate(val: str) -> int:
+                if not val:
+                    return 0
+                s = val.lower().strip()
+                mult = 1
+                if s.endswith("k"):
+                    mult = 1000
+                    s = s[:-1]
+                elif s.endswith("m"):
+                    mult = 1000000
+                    s = s[:-1]
+                try:
+                    return int(float(s) * mult)
+                except ValueError:
+                    return 0
+
+            target_br = _parse_bitrate(profile.bitrate)
+            max_br = _parse_bitrate(profile.max_bitrate)
+
+            # "If source_bitrate * 1.5 < profile_target_bitrate, clamp the output bitrate"
+            limit = int(source_bitrate * 1.5)
+            if limit < target_br:
+                LOGGER.info(
+                    "Smart bitrate clamping: reducing target %s -> %s (source %s)",
+                    profile.bitrate,
+                    limit,
+                    source_bitrate,
+                )
+                profile.bitrate = str(limit)
+                # "Ensure it never exceeds the profile's max_bitrate"
+                # If our new target is lower, we satisfy max_bitrate
+                # (assuming max was >= old target).
+                # If max_bitrate is somehow lower than limit (unlikely for a profile),
+                # we should respect max.
+                if max_br > 0 and limit > max_br:
+                    profile.bitrate = str(max_br)
+
         streams = self.analysis.get("streams", []) or []
         video_streams, audio_streams, subtitle_streams = self._parse_streams(streams)
         video_stream = video_streams[0] if video_streams else None
+
+        # Robust Subtitle Handling
+        valid_subs = []
+        for sub in subtitle_streams:
+            codec = (sub.codec_name or "").lower()
+            if codec in SUPPORTED_SUBTITLE_CODECS:
+                valid_subs.append(sub)
+            else:
+                LOGGER.warning(
+                    "Skipping unsupported bitmap subtitle stream %s (codec %s)",
+                    sub.input_index,
+                    codec,
+                )
+        subtitle_streams = valid_subs
 
         selected_audio, default_audio_idx = self._select_priority_streams(audio_streams)
         selected_subtitles, default_sub_idx = self._select_priority_streams(subtitle_streams)

@@ -126,7 +126,9 @@ async def next_job(
 @guard_job_queue_errors
 async def update_job_status(job_id: str, payload: JobStatusPayload) -> JSONResponse:
     try:
-        job = await get_app_dependencies().job_manager.update_job(job_id, jobs.JobStatusUpdate(**payload.model_dump()))
+        job = await get_app_dependencies().job_manager.update_job(
+            job_id, jobs.JobStatusUpdate(**payload.model_dump())
+        )
     except KeyError:
         raise HTTPException(status_code=404, detail="Job not found")
     if payload.status == jobs.JobStatus.FAILED:
@@ -146,7 +148,9 @@ async def update_job_status(job_id: str, payload: JobStatusPayload) -> JSONRespo
                 f"{retry_pipeline.get('scale_type', 'cpu').upper()} scale / "
                 f"{retry_pipeline.get('encode_type', 'cpu').upper()} encode"
             )
-            job = await get_app_dependencies().job_manager.schedule_retry(job, retry_pipeline, message=retry_message)
+            job = await get_app_dependencies().job_manager.schedule_retry(
+                job, retry_pipeline, message=retry_message
+            )
             entry = sync_entry_from_job(job, LibraryStatus.PENDING, retry_message)
             record_job_history(job, JobHistoryStatus.RUNNING, retry_message, completed=False)
             return await _respond_with_updates(job, entry)
@@ -160,7 +164,10 @@ async def update_job_status(job_id: str, payload: JobStatusPayload) -> JSONRespo
     if payload.status == jobs.JobStatus.RUNNING:
         entry = sync_entry_from_job(job, LibraryStatus.CONVERTING, payload.message)
     elif payload.status == jobs.JobStatus.COMPLETED:
-        entry = sync_entry_from_job(job, LibraryStatus.CONVERTED, payload.message)
+        if getattr(job, "job_type", "convert") == "delete":
+            entry = sync_entry_from_job(job, LibraryStatus.REMOVED, payload.message)
+        else:
+            entry = sync_entry_from_job(job, LibraryStatus.CONVERTED, payload.message)
     record_job_history(job, payload.status, payload.message, completed=completed)
     tracked_entry = entry if completed or payload.status == jobs.JobStatus.RUNNING else None
     return await _respond_with_updates(job, tracked_entry)

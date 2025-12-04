@@ -98,7 +98,9 @@ async def get_config() -> JSONResponse:
         }
         for library in get_app_dependencies().library_config_store.list_libraries()
     }
-    profiles = [profile.to_payload() for profile in get_app_dependencies().profile_store.list_profiles()]
+    profiles = [
+        profile.to_payload() for profile in get_app_dependencies().profile_store.list_profiles()
+    ]
     payload = config_module.sanitize_config(snapshot.config, revision=snapshot.revision)
     payload["libraries"] = libraries
     payload["profiles"] = profiles
@@ -113,7 +115,9 @@ async def update_encoding(payload: EncodingUpdatePayload) -> JSONResponse:
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=422, detail=str(exc))
     profile = get_app_dependencies().profile_store.upsert(profile_data)
-    snapshot = get_app_dependencies().config_service.update_profile(payload.name, validated.model_dump())
+    snapshot = get_app_dependencies().config_service.update_profile(
+        payload.name, validated.model_dump()
+    )
     return JSONResponse(
         {"profile": profile.to_payload(), "revision": snapshot.revision},
         headers=cache_headers(snapshot),
@@ -122,7 +126,9 @@ async def update_encoding(payload: EncodingUpdatePayload) -> JSONResponse:
 
 @router.get("/api/profiles")
 async def list_profiles() -> JSONResponse:
-    profiles = [profile.to_payload() for profile in get_app_dependencies().profile_store.list_profiles()]
+    profiles = [
+        profile.to_payload() for profile in get_app_dependencies().profile_store.list_profiles()
+    ]
     return JSONResponse(profiles)
 
 
@@ -143,7 +149,9 @@ async def create_profile(payload: EncodingUpdatePayload) -> JSONResponse:
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=422, detail=str(exc))
     profile = get_app_dependencies().profile_store.create(profile_data)
-    snapshot = get_app_dependencies().config_service.update_profile(payload.name, validated.model_dump())
+    snapshot = get_app_dependencies().config_service.update_profile(
+        payload.name, validated.model_dump()
+    )
     return JSONResponse(
         {"profile": profile.to_payload(), "revision": snapshot.revision},
         headers=cache_headers(snapshot),
@@ -161,7 +169,9 @@ async def update_profile(profile_id: int, payload: EncodingUpdatePayload) -> JSO
         profile = get_app_dependencies().profile_store.update(profile_id, profile_data)
     except KeyError:
         raise HTTPException(status_code=404, detail="Profile not found")
-    snapshot = get_app_dependencies().config_service.update_profile(payload.name, validated.model_dump())
+    snapshot = get_app_dependencies().config_service.update_profile(
+        payload.name, validated.model_dump()
+    )
     return JSONResponse(
         {"profile": profile.to_payload(), "revision": snapshot.revision},
         headers=cache_headers(snapshot),
