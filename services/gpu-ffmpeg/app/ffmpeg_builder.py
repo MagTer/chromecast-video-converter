@@ -485,13 +485,22 @@ class FFmpegBuilder:
                 filters.append(f"scale=-2:{target_height}:force_original_aspect_ratio=decrease")
             if fps_fragment:
                 filters.append(fps_fragment)
-            if encode_type == "gpu":
+
+            # Hybrid pipeline fix: If we are going to GPU for scaling OR encoding,
+            # we need to upload. This covers:
+            # 1. CPU decode -> GPU scale -> GPU encode
+            # 2. CPU decode -> GPU scale -> CPU encode (unlikely but possible)
+            # 3. CPU decode -> CPU scale -> GPU encode
+            if encode_type == "gpu" or scale_on_gpu:
                 filters.append("format=nv12")
                 if supports_hwupload:
                     filters.append("hwupload_cuda")
                 if scale_on_gpu and gpu_scale_filter:
                     filters.append(gpu_scale_filter)
-                # filters.append("format=nv12") # <-- REMOVE THIS LINE
+
+                if encode_type == "cpu":
+                    filters.append("hwdownload")
+                    filters.append("format=yuv420p")
             else:
                 filters.append("format=yuv420p")
         else:
