@@ -43,7 +43,11 @@ class EncodingProfile(Base):
     audio_bitrate = Column(String, nullable=False, default="192k")
     audio_channels = Column(Integer, nullable=False, default=2)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
-    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+    updated_at = Column(
+        DateTime,
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
 
     def to_payload(self) -> dict:
         definition = {}
@@ -116,7 +120,11 @@ class LibraryConfig(Base):
     depth = Column(String, nullable=False, default="max")
     profile_id = Column(Integer, ForeignKey("encoding_profiles.id"), nullable=False)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
-    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+    updated_at = Column(
+        DateTime,
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
 
     def to_payload(self) -> dict:
         return {
