@@ -4,7 +4,7 @@ import asyncio
 import json
 import logging
 import os
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
@@ -37,9 +37,9 @@ class Job(BaseModel):
     status: str = JobStatus.PENDING
     worker_id: Optional[str] = None
     request_id: Optional[str] = None
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     started_at: Optional[datetime] = None
-    updated_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     progress: int = 0
     message: Optional[str] = None
     force: bool = Field(default=False)
@@ -94,6 +94,7 @@ class JobManager:
         self._job_index = f"{self._stream}:index"
         self._job_data_prefix = f"{self._stream}:job"
         self._ensure_group_lock: asyncio.Lock | None = None
+        self._redis_loop: asyncio.AbstractEventLoop | None = None
 
     def _canonical_path(self, path: str | Path) -> str:
         return str(resolve_media_path(path))
@@ -137,11 +138,25 @@ class JobManager:
         return self._already_converted(canonical_source, log=log)
 
     async def initialize(self) -> None:
+        current_loop = asyncio.get_running_loop()
+
+        if self._redis_loop is not None and self._redis_loop is not current_loop:
+            self._logger.warning("Event loop changed, resetting Redis client and lock")
+            if self._redis:
+                try:
+                    await self._redis.aclose()
+                except Exception:
+                    pass
+            self._redis = None
+            self._ensure_group_lock = None
+            self._redis_loop = None
+
         if self._ensure_group_lock is None:
             self._ensure_group_lock = asyncio.Lock()
         async with self._ensure_group_lock:
             if self._redis is None:
                 self._redis = redis.from_url(self._redis_url, decode_responses=True)
+                self._redis_loop = current_loop
             try:
                 await self._redis.xgroup_create(self._stream, self._group, id="0-0", mkstream=True)
             except redis.ResponseError as exc:
@@ -272,7 +287,7 @@ class JobManager:
             self._logger.error("Job %s crashed repeatedly (count=%s); failing", job.id[:8], count)
             job.status = JobStatus.FAILED
             job.message = "Worker crashed repeatedly"
-            job.updated_at = datetime.utcnow()
+            job.updated_at = datetime.now(timezone.utc)
             await self._redis.hset(self._job_key(job.id), mapping=self._encode_job(job))
             await self._redis.zadd(self._job_index, {job.id: job.updated_at.timestamp()})
             await self._redis.xack(self._stream, self._group, message_id)
@@ -281,7 +296,7 @@ class JobManager:
 
         job.status = JobStatus.RUNNING
         job.worker_id = consumer
-        job.updated_at = datetime.utcnow()
+        job.updated_at = datetime.now(timezone.utc)
         await self._redis.hset(self._job_key(job.id), mapping=self._encode_job(job))
         await self._redis.zadd(self._job_index, {job.id: job.updated_at.timestamp()})
         self._logger.warning(
@@ -578,7 +593,7 @@ class JobManager:
         }
 
     async def _handle_stale_job(self, job_id: str, job: Job, pending_map: dict[str, str]) -> None:
-        threshold = datetime.utcnow() - timedelta(seconds=self.STALE_RUNNING_TIMEOUT)
+        threshold = datetime.now(timezone.utc) - timedelta(seconds=self.STALE_RUNNING_TIMEOUT)
         if not job.updated_at or job.updated_at > threshold:
             return
         self._logger.warning("Stale job detected: %s (status=%s)", job_id[:8], job.status)
@@ -591,7 +606,7 @@ class JobManager:
             job.status = JobStatus.FAILED
             job.progress = 0
             job.message = "Worker unavailable; job marked failed"
-            job.updated_at = datetime.utcnow()
+            job.updated_at = datetime.now(timezone.utc)
             await self._redis.hset(self._job_key(job_id), mapping=self._encode_job(job))
             await self._redis.zadd(self._job_index, {job_id: job.updated_at.timestamp()})
             self._logger.warning("Marked job %s as failed after missing worker", job_id[:8])
@@ -625,7 +640,7 @@ class JobManager:
         jobs = await self.list_jobs(limit=1000)
         pending_map = await self._pending_message_map()
         failed_count = 0
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         threshold_seconds = 90
 
         for job in jobs:
@@ -637,13 +652,18 @@ class JobManager:
             reason = ""
 
             if not worker:
-                if job.updated_at < now - timedelta(seconds=threshold_seconds):
+                updated_at = job.updated_at
+                if updated_at.tzinfo is None:
+                    updated_at = updated_at.replace(tzinfo=timezone.utc)
+
+                if updated_at < now - timedelta(seconds=threshold_seconds):
                     is_dead = True
                     reason = f"Worker {job.worker_id} missing"
             else:
                 last_seen = worker.checked_at
-                if last_seen.tzinfo:
-                    last_seen = last_seen.replace(tzinfo=None)
+                if last_seen.tzinfo is None:
+                    last_seen = last_seen.replace(tzinfo=timezone.utc)
+
                 if (now - last_seen).total_seconds() > threshold_seconds:
                     is_dead = True
                     reason = f"Worker {job.worker_id} timed out"
@@ -654,7 +674,7 @@ class JobManager:
                 job.status = JobStatus.FAILED
                 job.message = f"Worker Failure: {reason}"
                 job.progress = 0
-                job.updated_at = datetime.utcnow()
+                job.updated_at = datetime.now(timezone.utc)
 
                 await self._redis.hset(self._job_key(job.id), mapping=self._encode_job(job))
                 await self._redis.zadd(self._job_index, {job.id: job.updated_at.timestamp()})
@@ -689,8 +709,8 @@ class JobManager:
         job.status = JobStatus.RUNNING
         job.progress = job.progress or 0
         job.worker_id = consumer
-        job.started_at = datetime.utcnow()
-        job.updated_at = datetime.utcnow()
+        job.started_at = datetime.now(timezone.utc)
+        job.updated_at = datetime.now(timezone.utc)
         await self._redis.hset(self._job_key(job.id), mapping=self._encode_job(job))
         await self._redis.zadd(self._job_index, {job.id: job.updated_at.timestamp()})
         self._logger.info(
@@ -747,7 +767,7 @@ class JobManager:
                 job.max_attempts = int(
                     update.pipeline.get("max_attempts", job.max_attempts) or job.max_attempts
                 )
-        job.updated_at = datetime.utcnow()
+        job.updated_at = datetime.now(timezone.utc)
         await self._redis.hset(self._job_key(job_id), mapping=self._encode_job(job))
         await self._redis.zadd(self._job_index, {job_id: job.updated_at.timestamp()})
         self._logger.debug(
@@ -775,13 +795,13 @@ class JobManager:
         job.progress = 0
         job.message = message
         job.pipeline = pipeline
-        job.updated_at = datetime.utcnow()
+        job.updated_at = datetime.now(timezone.utc)
         if job.encoding is None:
             job.encoding = {}
         job.encoding["pipeline"] = pipeline
         payload = self._encode_job(job)
         await self._redis.hset(self._job_key(job.id), mapping=payload)
-        await self._redis.zadd(self._job_index, {job.id: datetime.utcnow().timestamp()})
+        await self._redis.zadd(self._job_index, {job.id: datetime.now(timezone.utc).timestamp()})
         await self._redis.xadd(
             self._stream, {"payload": json.dumps(payload)}, maxlen=10_000, approximate=True
         )

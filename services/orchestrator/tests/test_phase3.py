@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timezone
 
 from app.config import DEFAULT_CONFIG
 from app.dependencies import get_app_dependencies
@@ -35,8 +35,8 @@ def test_history_endpoint():
             profile="chromecast",
             status="completed",
             message="Done",
-            started_at=datetime.utcnow(),
-            completed_at=datetime.utcnow(),
+            started_at=datetime.now(timezone.utc),
+            completed_at=datetime.now(timezone.utc),
         )
     )
 

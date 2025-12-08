@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import asdict, dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from threading import RLock
 from typing import List, Optional
 
@@ -42,8 +42,8 @@ class EncodingProfile(Base):
     audio_codec = Column(String, nullable=False, default="aac")
     audio_bitrate = Column(String, nullable=False, default="192k")
     audio_channels = Column(Integer, nullable=False, default=2)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
     def to_payload(self) -> dict:
         definition = {}
@@ -115,8 +115,8 @@ class LibraryConfig(Base):
     root = Column(String, nullable=False)
     depth = Column(String, nullable=False, default="max")
     profile_id = Column(Integer, ForeignKey("encoding_profiles.id"), nullable=False)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
     def to_payload(self) -> dict:
         return {
@@ -195,7 +195,7 @@ class ProfileStore:
 
     def create(self, data: ProfileData) -> EncodingProfile:
         with self._lock, self._session() as session:
-            now = datetime.utcnow()
+            now = datetime.now(timezone.utc)
             profile = EncodingProfile(
                 name=data.name,
                 codec=data.gpu.codec,
@@ -257,7 +257,7 @@ class ProfileStore:
             profile.audio_bitrate = data.gpu.audio_bitrate
             profile.audio_channels = data.gpu.audio_channels
             profile.definition = json.dumps({"gpu": asdict(data.gpu), "cpu": asdict(data.cpu)})
-            profile.updated_at = datetime.utcnow()
+            profile.updated_at = datetime.now(timezone.utc)
             session.add(profile)
             session.commit()
             session.refresh(profile)
@@ -316,7 +316,7 @@ class LibraryConfigStore:
     def upsert(self, data: LibraryData) -> LibraryConfig:
         with self._lock, self._session() as session:
             existing = session.scalar(select(LibraryConfig).where(LibraryConfig.name == data.name))
-            now = datetime.utcnow()
+            now = datetime.now(timezone.utc)
             if existing:
                 existing.root = data.root
                 existing.depth = data.depth
@@ -346,7 +346,7 @@ class LibraryConfigStore:
             if library is None:
                 raise KeyError(name)
             library.profile_id = profile_id
-            library.updated_at = datetime.utcnow()
+            library.updated_at = datetime.now(timezone.utc)
             session.add(library)
             session.commit()
             session.refresh(library)

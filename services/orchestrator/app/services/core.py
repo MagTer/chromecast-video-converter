@@ -1,6 +1,6 @@
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
@@ -26,11 +26,17 @@ LOGGER = logging.getLogger("orchestrator.core")
 
 
 def _job_elapsed_seconds(job: jobs.Job) -> int:
-    start = job.created_at or datetime.utcnow()
+    start = job.created_at
+    if start is None or start.tzinfo is None:
+        start = (start or datetime.min).replace(tzinfo=timezone.utc)
+
     if job.status in {jobs.JobStatus.COMPLETED, jobs.JobStatus.FAILED}:
-        end = job.updated_at or datetime.utcnow()
+        end = job.updated_at
+        if end is None or end.tzinfo is None:
+            end = (end or datetime.min).replace(tzinfo=timezone.utc)
     else:
-        end = datetime.utcnow()
+        end = datetime.now(timezone.utc)
+
     try:
         return max(0, int((end - start).total_seconds()))
     except Exception:  # noqa: BLE001
@@ -62,7 +68,7 @@ def entry_to_response(entry: LibraryEntry) -> Dict[str, Any]:
 def record_job_history(
     job: jobs.Job, status: str, message: Optional[str] = None, *, completed: bool = False
 ) -> None:
-    completed_at = datetime.utcnow() if completed else None
+    completed_at = datetime.now(timezone.utc) if completed else None
     try:
         get_app_dependencies().job_history_store.record(
             JobHistoryEntry(
