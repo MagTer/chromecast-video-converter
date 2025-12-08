@@ -24,18 +24,5 @@ jobs:
           python -m pip install -r services/orchestrator/requirements.txt
           python -m pip install -r services/gpu-ffmpeg/requirements.txt
 
-      - name: Run ruff
-        run: ruff check .
-
-      - name: Run black
-        run: black --check .
-
-      - name: Run Orchestrator tests
-        env:
-          PYTHONPATH: "${{ github.workspace }}/services/orchestrator"
-        run: pytest services/orchestrator/tests/
-
-      - name: Run GPU Worker tests
-        env:
-          PYTHONPATH: "${{ github.workspace }}/services/gpu-ffmpeg"
-        run: pytest services/gpu-ffmpeg/tests/ services/gpu-ffmpeg/test_worker.py
+      - name: Run Quality Checks
+        run: python scripts/code_check.py

@@ -93,7 +93,7 @@ class JobManager:
         self._path_lookup_prefix = f"{self._stream}:path"
         self._job_index = f"{self._stream}:index"
         self._job_data_prefix = f"{self._stream}:job"
-        self._ensure_group_lock = asyncio.Lock()
+        self._ensure_group_lock: asyncio.Lock | None = None
 
     def _canonical_path(self, path: str | Path) -> str:
         return str(resolve_media_path(path))
@@ -137,6 +137,8 @@ class JobManager:
         return self._already_converted(canonical_source, log=log)
 
     async def initialize(self) -> None:
+        if self._ensure_group_lock is None:
+            self._ensure_group_lock = asyncio.Lock()
         async with self._ensure_group_lock:
             if self._redis is None:
                 self._redis = redis.from_url(self._redis_url, decode_responses=True)

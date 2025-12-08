@@ -37,11 +37,11 @@ Stop the stack with `Ctrl+C` or `docker compose down`. Removing the `redis_data`
 
 The SPA served from `/` mirrors the FastAPI routers under `services/orchestrator/app/routers`:
 
-- **Queue management** — Trigger manual scans (`/api/scan`), pause or resume intake, clear processed jobs, purge inactive deliveries, and monitor depth + GPU readiness (`/api/metrics` + worker telemetry).
+- **Queue management** — Trigger manual scans (`/api/scan`), pause or resume intake, clear processed jobs, purge inactive deliveries, and monitor depth (accurate real-time Redis stream count) + GPU readiness.
 - **Job history** — Lists the most recent entries from `JOB_HISTORY_STORE`, including elapsed runtime and failure messages.
-- **Library entries** — Filters the SQLite catalog by library or status with `limit`/`offset` pagination. “Load more” simply increments the offset; the API response is an array, so the UI falls back to `received === limit` to detect more rows.
-- **Logs** — Reads `/api/logs`, `/api/logs/categories`, `/api/logs/sources`, and `/api/logs/stats`. Each entry includes severity, source, category, timestamp, and optional `request_id`. A retention form backs `/api/config/logging`.
-- **Configuration** — Adds/removes libraries via `/api/libraries`, edits encoding profiles through `/api/config/encoding`, updates GPU/CPU-specific knobs (NVENC preset, rc mode, CQ/bitrate, lookahead, AQ toggles), and shows host environment hints (WSL2 detection).
+- **Library entries** — Filters the SQLite catalog by library or status. Features "Reprocess All" and "Delete All Originals" bulk actions alongside individual entry controls.
+- **Logs** — Reads `/api/logs`, `/api/logs/categories`, `/api/logs/sources`, and `/api/logs/stats`.
+- **Configuration** — Edits encoding profiles (GPU/CPU-specific knobs like NVENC preset, VBR/CRF, bitrate), manages operational settings (scan interval), and log retention.
 
 The dashboard holds an open WebSocket (`/ws`) that relays `job-update`, `entry-update`, and `library-update` payloads broadcast by the orchestrator, so status changes land immediately without polling.
 

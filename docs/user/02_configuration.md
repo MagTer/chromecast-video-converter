@@ -42,12 +42,20 @@ Retries are automatic when `classify_ffmpeg_error` labels a failure as retryable
 - `/api/library/entries` accepts `limit`, `offset`, `status`, and `library`.
 - The endpoint returns a plain array of entries sorted by `updated_at` (no total count). The dashboard detects additional pages by comparing `items.length` to the requested limit.
 - Each entry includes the normalized path, output path, status, last job ID, decode/scale/encode types, and `original_missing` flag.
-- `POST /api/library/entries/{id}/reprocess` requeues a job (optionally forcing a new profile ID). The orchestrator rechecks whether the source still exists before enqueuing.
+- `POST /api/library/entries/{id}/reprocess` requeues a job. The orchestrator rechecks whether the source still exists before enqueuing.
+- `POST /api/library/entries/reprocess-all` requeues all eligible entries for reprocessing.
 - `POST /api/library/entries/{id}/remove-original` deletes the source only when the converted output is present and non-zero. Errors return HTTP 409 with a descriptive message.
+- `POST /api/library/entries/delete-all-originals` deletes source files for all entries where a successful conversion exists.
+
+## Operational settings
+
+The **Operational settings** section in the configuration page allows tuning background tasks:
+
+- **Scan interval**: Defines how frequently (in minutes) the system triggers a full library scan. Setting this to `0` disables scheduled scanning. Changes are picked up dynamically by the folder watcher service.
 
 ## Folder watcher knobs
 
-Environment variables are read at import time inside `services/folder-watcher/app/watcher.py`:
+Environment variables are read at import time inside `services/folder-watcher/app/watcher.py`. Note that the scan interval is now primarily controlled via the API (see above), though other behaviors remain env-var driven:
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
@@ -56,9 +64,9 @@ Environment variables are read at import time inside `services/folder-watcher/ap
 | `EVENT_BUFFER_SECONDS` | `1` | Buffer window before sending collected events. `0` flushes immediately. |
 | `EVENT_RETRY_ATTEMPTS` / `EVENT_RETRY_BACKOFF_SECONDS` | `5` / `2` | Exponential backoff strategy for POST `/api/events`. |
 | `EVENT_SPOOL_FILE` | `/tmp/folder-watcher-spool.jsonl` | JSONL spool used whenever HTTP posting fails after retries. Replayed automatically on restart. |
-| `EVENT_SPOOL_MAX_BYTES` | `10485760` | Emits a warning when the spool size exceeds this number of bytes (current implementation logs the warning but does not truncate automatically). |
+| `EVENT_SPOOL_MAX_BYTES` | `10485760` | Emits a warning when the spool size exceeds this number of bytes. |
 
-Each queued event includes the library, absolute path, event type (`created`, `modified`, `deleted`), and optional size/timestamp metadata. Move events emit a synthetic `deleted` for the source and `created` for the destination.
+Each queued event includes the library, absolute path, event type (`created`, `modified`, `deleted`), and optional size/timestamp metadata.
 
 ## GPU worker configuration
 

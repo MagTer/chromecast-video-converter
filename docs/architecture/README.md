@@ -27,7 +27,7 @@ All containers share the `PATH_MOVIES`/`PATH_SERIES` mounts twice (`/watch/...` 
 
 ## Control and data flow
 
-1. **Detection** — `folder-watcher` schedules OS-native observers (or `PollingObserver` when `WATCH_POLLING=true`). Events are grouped for `EVENT_BUFFER_SECONDS` seconds, posted to `/api/events`, and spooled to `EVENT_SPOOL_FILE` (default `/tmp/folder-watcher-spool.jsonl`) if HTTP delivery fails. On startup the watcher replays the spool in chunks of 50.
+1. **Detection** — `folder-watcher` schedules OS-native observers (or `PollingObserver` when `WATCH_POLLING=true`) and also runs a background scheduler based on the configured scan interval (fetched dynamically from `/api/config`). Events are grouped for `EVENT_BUFFER_SECONDS` seconds, posted to `/api/events`, and spooled to `EVENT_SPOOL_FILE` (default `/tmp/folder-watcher-spool.jsonl`) if HTTP delivery fails. On startup the watcher replays the spool in chunks of 50.
 2. **Normalization** — `/api/events` resolves `/watch/...` and `/media/...` paths to a shared canonical form, discards directory events, and ignores non-media file extensions. `LibraryEntryStore` upserts entries while noting missing originals or outputs.
 3. **Job creation** — `record_library_entry` checks for an existing `*-chromecast.mp4`. If conversion is required, `JobManager` enqueues a Redis job with the selected profile encoding payload. Manual scans via `/api/scan` walk the mounted root to reach the same logic.
 4. **Worker loop** — `gpu-ffmpeg` calls `/api/jobs/next`, honoring `queue_state["paused"]`. Status callbacks hit `/api/jobs/{id}/status`; failing attempts classify stderr and may schedule retries with progressively more CPU stages. Once complete the worker calls `/api/jobs/{id}/ack`.
