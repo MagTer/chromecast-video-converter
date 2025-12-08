@@ -285,6 +285,72 @@ class EventManager:
                 await asyncio.sleep(1)
 
 
+async def _fetch_scan_interval(client: httpx.AsyncClient) -> int:
+    try:
+        response = await client.get("/api/config")
+        if response.is_success:
+            config = response.json()
+            minutes = config.get("operational", {}).get("scan_interval_min", 0)
+            return minutes * 60
+    except Exception as exc:
+        LOGGER.warning("Failed to fetch config for scheduled scanner: %s", exc)
+    return -1  # Indicate failure/no change implied if we pass current? No, returning -1 for error
+
+
+async def _trigger_scans(client: httpx.AsyncClient, libraries: List[str]):
+    for lib in libraries:
+        try:
+            LOGGER.info("Triggering scheduled scan for %s", lib)
+            response = await client.post("/api/scan", json={"library": lib})
+            if not response.is_success:
+                LOGGER.warning("Scan request failed for %s: %s", lib, response.text)
+        except Exception as exc:
+            LOGGER.error("Error triggering scheduled scan for %s: %s", lib, exc)
+
+
+async def scheduled_scanner(client: httpx.AsyncClient):
+    LOGGER.info("Scheduled scanner started")
+
+    raw_entries = WATCH_ROOTS.split(",")
+    libraries = []
+    for entry in raw_entries:
+        if not entry.strip():
+            continue
+        parts = entry.split(":", 1)
+        if len(parts) == 2:
+            libraries.append(parts[0])
+
+    scan_interval_seconds = 0
+
+    while True:
+        # Initial check or re-check after sleep
+        new_interval = await _fetch_scan_interval(client)
+        if new_interval >= 0 and new_interval != scan_interval_seconds:
+            scan_interval_seconds = new_interval
+            LOGGER.info("Updated scan interval to %s seconds", scan_interval_seconds)
+
+        if scan_interval_seconds <= 0:
+            await asyncio.sleep(60)
+            continue
+
+        await _trigger_scans(client, libraries)
+
+        # Sleep loop
+        start_sleep = time.monotonic()
+        while time.monotonic() - start_sleep < scan_interval_seconds:
+            await asyncio.sleep(60)
+            # Periodically check for config updates
+            updated = await _fetch_scan_interval(client)
+            if updated >= 0 and updated != scan_interval_seconds:
+                scan_interval_seconds = updated
+                LOGGER.info("Scan interval changed to %s seconds", scan_interval_seconds)
+                # If disabled or interval shortened past elapsed, break to next cycle/check
+                if scan_interval_seconds <= 0 or (
+                    time.monotonic() - start_sleep >= scan_interval_seconds
+                ):
+                    break
+
+
 async def main():
     if not WATCH_ROOTS:
         LOGGER.warning("WATCH_ROOTS is required.")
@@ -298,6 +364,7 @@ async def main():
 
         # Start processing queue
         processor_task = asyncio.create_task(event_manager.process_queue())
+        scanner_task = asyncio.create_task(scheduled_scanner(client))
 
         if WATCH_POLLING:
             observer = PollingObserver(timeout=POLLING_INTERVAL)
@@ -337,6 +404,7 @@ async def main():
 
         observer.join()
         processor_task.cancel()
+        scanner_task.cancel()
 
 
 if __name__ == "__main__":

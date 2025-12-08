@@ -33,3 +33,6 @@ logs/
 # misc
 *.swp
 *.DS_Store
+
+.gemini/
+gha-creds-*.json

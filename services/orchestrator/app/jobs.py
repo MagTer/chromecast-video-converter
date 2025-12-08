@@ -42,6 +42,7 @@ class Job(BaseModel):
     updated_at: datetime = Field(default_factory=datetime.utcnow)
     progress: int = 0
     message: Optional[str] = None
+    force: bool = Field(default=False)
 
     class Config:
         json_encoders = {datetime: lambda value: value.isoformat()}
@@ -92,7 +93,6 @@ class JobManager:
         self._path_lookup_prefix = f"{self._stream}:path"
         self._job_index = f"{self._stream}:index"
         self._job_data_prefix = f"{self._stream}:job"
-        self._depth_key = f"{self._stream}:depth"
         self._ensure_group_lock = asyncio.Lock()
 
     def _canonical_path(self, path: str | Path) -> str:
@@ -291,6 +291,25 @@ class JobManager:
         )
         return message_id, job
 
+    def _validate_job_path(self, source: Path, force: bool, emit_log: bool, path: str) -> None:
+        if source.suffix.lower() not in self._video_extensions:
+            raise ValueError("Unsupported media extension")
+        if "-chromecast" in source.stem.lower():
+            raise ValueError("Converted outputs are ignored")
+
+        if force:
+            output_path = self._output_path(source)
+            if output_path.exists():
+                try:
+                    output_path.unlink()
+                    self._logger.info("Deleted existing output %s for forced job", output_path)
+                except OSError as exc:
+                    self._logger.warning(
+                        "Failed to delete existing output %s: %s", output_path, exc
+                    )
+        elif self._already_converted(source, log=emit_log):
+            raise ValueError(f"Output already exists for {path}")
+
     async def add_job(
         self,
         path: str,
@@ -305,12 +324,7 @@ class JobManager:
         await self.initialize()
         path = self._canonical_path(path)
         source = Path(path)
-        if source.suffix.lower() not in self._video_extensions:
-            raise ValueError("Unsupported media extension")
-        if "-chromecast" in source.stem.lower():
-            raise ValueError("Converted outputs are ignored")
-        if self._already_converted(source, log=emit_log):
-            raise ValueError(f"Output already exists for {path}")
+        self._validate_job_path(source, force, emit_log, path)
 
         pipeline = encoding.get("pipeline") if encoding else None
         max_attempts = 5
@@ -335,6 +349,7 @@ class JobManager:
             max_attempts=max_attempts,
             request_id=get_request_id(),
             job_type="convert",
+            force=force,
         )
         existing_job = await self._reserve_path_for_job(path, job.id, force=force)
         if existing_job:
@@ -347,7 +362,6 @@ class JobManager:
         await self._redis.xadd(
             self._stream, {"payload": json.dumps(encoded)}, maxlen=10_000, approximate=True
         )
-        await self._redis.incr(self._depth_key)
         if emit_log:
             self._logger.info(
                 "Queued job %s for %s (library=%s, profile=%s)",
@@ -390,7 +404,6 @@ class JobManager:
         await self._redis.xadd(
             self._stream, {"payload": json.dumps(encoded)}, maxlen=10_000, approximate=True
         )
-        await self._redis.incr(self._depth_key)
         self._logger.info("Queued DELETE job %s for %s", job.id[:8], path)
         return job
 
@@ -468,46 +481,97 @@ class JobManager:
             start = f"({entries[-1][0]}"
         return mapping
 
+    async def _purge_stream_messages(self, running_job_ids: set[str]) -> tuple[int, int]:
+        stream_deleted = 0
+        pending_ack = 0
+        start = "-"
+        while True:
+            entries = await self._redis.xrange(self._stream, start, "+", count=1000)
+            if not entries:
+                break
+
+            for message_id, fields in entries:
+                should_delete = False
+                payload_raw = fields.get("payload")
+
+                if not payload_raw:
+                    should_delete = True
+                else:
+                    try:
+                        payload = json.loads(payload_raw)
+                        job_id = payload.get("id")
+                        if not job_id or job_id not in running_job_ids:
+                            should_delete = True
+                    except (json.JSONDecodeError, AttributeError):
+                        should_delete = True
+
+                if should_delete:
+                    await self._redis.xack(self._stream, self._group, message_id)
+                    deleted = await self._redis.xdel(self._stream, message_id)
+                    if deleted:
+                        stream_deleted += deleted
+                    pending_ack += 1
+
+            if len(entries) < 1000:
+                break
+            start = f"({entries[-1][0]}"
+        return stream_deleted, pending_ack
+
+    async def _purge_ghost_pel_entries(self) -> int:
+        pending_ack = 0
+        if hasattr(self._redis, "xpending_range"):
+            try:
+                pending_entries = await self._redis.xpending_range(
+                    self._stream, self._group, "-", "+", 10000
+                )
+                for entry in pending_entries:
+                    msg_id = entry["message_id"]
+                    exists = await self._redis.xrange(self._stream, msg_id, msg_id)
+                    if not exists:
+                        await self._redis.xack(self._stream, self._group, msg_id)
+                        pending_ack += 1
+            except Exception as e:
+                self._logger.error("Failed to clean up PEL: %s", e)
+        return pending_ack
+
     async def purge_inactive_jobs(self) -> dict[str, int]:
         await self.initialize()
-        job_ids = await self._redis.zrange(self._job_index, 0, -1)
-        pending_map = await self._pending_message_map()
-        stream_map = await self._stream_messages_by_job()
-        processed_stream_ids: set[str] = set()
+
+        # 1. Identify running jobs and clean up inactive job metadata
+        all_job_ids = await self._redis.zrange(self._job_index, 0, -1)
+        running_job_ids = set()
         removed_jobs = 0
-        pending_ack = 0
-        stream_deleted = 0
-        for job_id in job_ids:
+
+        for job_id in all_job_ids:
             data = await self._redis.hgetall(self._job_key(job_id))
             if not data:
+                await self._redis.zrem(self._job_index, job_id)
                 continue
-            job = self._decode_job(data)
-            if job.status == JobStatus.RUNNING:
-                continue
-            await self._redis.delete(self._job_key(job.id))
-            await self._redis.zrem(self._job_index, job.id)
-            await self._redis.srem(self._path_index, job.path)
-            await self._redis.delete(self._path_key(job.path))
-            removed_jobs += 1
-            message_id = pending_map.get(job.id)
-            if message_id:
-                await self._ack_pending_message(message_id)
-                pending_ack += 1
-                processed_stream_ids.add(message_id)
-            for stream_id in stream_map.get(job.id, []):
-                if stream_id in processed_stream_ids:
-                    continue
-                deleted = await self._redis.xdel(self._stream, stream_id)
-                if deleted:
-                    stream_deleted += deleted
-                processed_stream_ids.add(stream_id)
-        if removed_jobs:
-            depth = int(await self._redis.get(self._depth_key) or 0)
-            new_depth = max(0, depth - removed_jobs)
-            await self._redis.set(self._depth_key, new_depth)
+
+            try:
+                job = self._decode_job(data)
+                if job.status == JobStatus.RUNNING:
+                    running_job_ids.add(job.id)
+                else:
+                    await self._redis.delete(self._job_key(job.id))
+                    await self._redis.zrem(self._job_index, job.id)
+                    await self._redis.srem(self._path_index, job.path)
+                    await self._redis.delete(self._path_key(job.path))
+                    removed_jobs += 1
+            except Exception:
+                await self._redis.delete(self._job_key(job_id))
+                await self._redis.zrem(self._job_index, job_id)
+                removed_jobs += 1
+
+        # 2. Clean up Stream
+        stream_deleted, stream_pending_ack = await self._purge_stream_messages(running_job_ids)
+
+        # 3. Clean up Ghost PEL entries
+        pel_pending_ack = await self._purge_ghost_pel_entries()
+
         return {
             "removed_jobs": removed_jobs,
-            "pending_messages_acknowledged": pending_ack,
+            "pending_messages_acknowledged": stream_pending_ack + pel_pending_ack,
             "stream_entries_deleted": stream_deleted,
         }
 
@@ -640,7 +704,7 @@ class JobManager:
         await self.initialize()
         paused = await self._redis.get(self._paused_key)
         reason = await self._redis.get(self._pause_reason_key)
-        depth = int(await self._redis.get(self._depth_key) or 0)
+        depth = await self._redis.xlen(self._stream)
         pending_summary = await self._redis.xpending(self._stream, self._group)
         pending = pending_summary["pending"] if pending_summary else 0
         return {
@@ -719,7 +783,6 @@ class JobManager:
         await self._redis.xadd(
             self._stream, {"payload": json.dumps(payload)}, maxlen=10_000, approximate=True
         )
-        await self._redis.incr(self._depth_key)
         await self._redis.sadd(self._path_index, job.path)
         await self._redis.set(self._path_key(job.path), job.id)
         self._logger.info(
@@ -735,7 +798,7 @@ class JobManager:
         await self.initialize()
         try:
             await self._redis.xack(self._stream, self._group, message_id)
-            await self._redis.decr(self._depth_key)
+            await self._redis.xdel(self._stream, message_id)
         finally:
             data = await self._redis.hgetall(self._job_key(job_id))
             if data:
