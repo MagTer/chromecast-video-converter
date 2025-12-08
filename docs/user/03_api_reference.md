@@ -18,8 +18,10 @@ All endpoints live under the orchestrator base URL (default `http://localhost:90
 | --- | --- | --- |
 | List entries | `GET /api/library/entries?limit=100&offset=0&status=&library=` | Returns an array (no total count). Paths/output paths are normalized to `/media/...`. |
 | Reprocess entry | `POST /api/library/entries/{id}/reprocess` | Optional body `{ "profile_id": <int> }`. Fails with `404` if the entry or profile does not exist. |
+| Reprocess all | `POST /api/library/entries/reprocess-all` | Requeues all eligible entries for processing. |
 | Change entry profile | `PATCH /api/library/entries/{id}` | Body `{ "profile_id": <int> }` rewrites the stored profile without scheduling a job. |
 | Remove original | `POST /api/library/entries/{id}/remove-original` | Deletes the source file once the converted output is verified to exist. Returns `409` if the output is missing or empty. |
+| Remove all originals | `POST /api/library/entries/delete-all-originals` | Deletes source files for all entries with successful conversions. |
 
 ## Watcher events
 
@@ -71,7 +73,8 @@ Events are processed in order. Non-media files are ignored; delete events immedi
 | Action | Method & Path | Notes |
 | --- | --- | --- |
 | Get config snapshot | `GET /api/config` | Returns sanitized config including libraries, profile definitions, operational settings, log retention, optional Jellyfin block, and `environment.is_wsl2`. |
-| Upsert encoding profile | `POST /api/config/encoding` | Body matches `EncodingUpdatePayload` (one GPU block + one CPU block). |
+| Upsert encoding profile | `POST /api/config/encoding` | Body matches `EncodingUpdatePayload` (name, GPU block, CPU block). |
+| Update operational config | `POST /api/config/operational` | Body `{ "scan_interval_min": <int> }`. |
 | CRUD profiles | `GET/POST/PUT/DELETE /api/profiles[/{id}]` | Create/delete individual profiles without touching the library mappings. Delete returns `204` on success. |
 | Update log retention | `POST /api/config/logging` `{ "retention_days": 7 }` |
 | Reset config | `POST /api/config/reset` | Reverts to `DEFAULT_CONFIG`. Profiles already stored in `PROFILE_STORE` remain so existing IDs continue to match queued jobs. |
