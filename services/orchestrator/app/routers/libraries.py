@@ -238,6 +238,106 @@ async def reprocess_entry(
     return JSONResponse(jsonable_encoder(payload))
 
 
+@router.post("/api/library/entries/reprocess-all")
+async def reprocess_all_entries(background_tasks: BackgroundTasks) -> JSONResponse:
+    entries = get_app_dependencies().library_entry_store.list_entries(limit=100000)
+    queued_count = 0
+
+    # helper to run in background
+    async def _process_one(entry):
+        source = Path(entry.path)
+        if not source.exists():
+            return
+
+        profile_id = entry.profile_id
+        profile_name = entry.profile
+        if profile_id is None:
+            try:
+                _, profile = get_library_profile(entry.library)
+                profile_id = profile.id
+                profile_name = profile.name
+            except ValueError:
+                return
+
+        if profile_id is None:
+            return
+
+        try:
+            job = await get_app_dependencies().job_manager.add_job(
+                entry.path,
+                entry.library,
+                profile_name,
+                profile_id=profile_id,
+                encoding=encoding_payload(profile_id),
+                force=True,
+            )
+            updated = get_app_dependencies().library_entry_store.update_status(
+                entry.path,
+                LibraryStatus.PENDING,
+                job_id=job.id,
+                output_path=str(get_app_dependencies().job_manager.output_path(source)),
+                original_missing=False,
+                profile=profile_name,
+                profile_id=profile_id,
+            )
+            await NOTIFIER.broadcast({"type": "entry-update", "entry": entry_to_response(updated)})
+            await NOTIFIER.broadcast({"type": "job-update", "job": job_to_response(job)})
+        except Exception as e:
+            LOGGER.error("Failed to reprocess entry %s: %s", entry.id, e)
+
+    for entry in entries:
+        if entry.status == LibraryStatus.REMOVED:
+            continue
+        background_tasks.add_task(_process_one, entry)
+        queued_count += 1
+
+    return JSONResponse({"queued_count": queued_count})
+
+
+@router.post("/api/library/entries/delete-all-originals")
+async def delete_all_originals(background_tasks: BackgroundTasks) -> JSONResponse:
+    entries = get_app_dependencies().library_entry_store.list_entries(limit=100000)
+    queued_count = 0
+
+    async def _process_one(entry):
+        source = resolve_media_path(entry.path)
+        if not source.exists():
+            return
+
+        # Check for successful conversion
+        # We rely on output_path existing or entry having a completed status with output.
+        # But safest is to check if output exists.
+        output_path = Path(
+            entry.output_path or get_app_dependencies().job_manager.output_path(source)
+        )
+
+        if not output_path.exists() or output_path.stat().st_size == 0:
+            return
+
+        try:
+            job = await get_app_dependencies().job_manager.add_delete_job(entry.path)
+            updated = get_app_dependencies().library_entry_store.update_status(
+                entry.path,
+                LibraryStatus.PENDING,
+                job_id=job.id,
+                output_path=str(output_path),
+                original_missing=False,  # Will be true after job runs
+                profile=entry.profile,
+                profile_id=entry.profile_id,
+            )
+            await NOTIFIER.broadcast({"type": "entry-update", "entry": entry_to_response(updated)})
+        except Exception as e:
+            LOGGER.error("Failed to queue delete for entry %s: %s", entry.id, e)
+
+    for entry in entries:
+        if entry.status == LibraryStatus.REMOVED:
+            continue
+        background_tasks.add_task(_process_one, entry)
+        queued_count += 1
+
+    return JSONResponse({"queued_count": queued_count})
+
+
 @router.post("/api/library/entries/{entry_id}/remove-original")
 async def remove_original(entry_id: int) -> JSONResponse:
     entry = get_app_dependencies().library_entry_store.get(entry_id)

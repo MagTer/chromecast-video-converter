@@ -126,6 +126,12 @@ class LoggingUpdatePayload(BaseModel):
     retention_days: int = Field(ge=1, le=90)
 
 
+class OperationalUpdatePayload(BaseModel):
+    scan_interval_min: int = Field(
+        ge=0, description="Scheduled scan interval in minutes (0=disabled)"
+    )
+
+
 class LogIngestEvent(BaseModel):
     logger: str
     level: str

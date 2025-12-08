@@ -10,7 +10,7 @@ from ..dependencies import (
     get_app_dependencies,
 )
 from ..profiles import HardwareProfileData, ProfileData
-from ..schemas import EncodingUpdatePayload, LoggingUpdatePayload
+from ..schemas import EncodingUpdatePayload, LoggingUpdatePayload, OperationalUpdatePayload
 
 LOGGER = logging.getLogger("orchestrator.config")
 router = APIRouter()
@@ -197,6 +197,19 @@ async def update_logging(payload: LoggingUpdatePayload) -> JSONResponse:
     return JSONResponse(
         {
             "retention_days": snapshot.config.logging.retention_days,
+            "revision": snapshot.revision,
+        },
+        headers=cache_headers(snapshot),
+    )
+
+
+@router.post("/api/config/operational")
+async def update_operational(payload: OperationalUpdatePayload) -> JSONResponse:
+    snapshot = get_app_dependencies().config_service.update_operational(payload.scan_interval_min)
+    LOGGER.info("Updated scan interval to %s minutes", payload.scan_interval_min)
+    return JSONResponse(
+        {
+            "scan_interval_min": snapshot.config.operational.scan_interval_min,
             "revision": snapshot.revision,
         },
         headers=cache_headers(snapshot),

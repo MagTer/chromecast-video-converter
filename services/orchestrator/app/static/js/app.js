@@ -16,11 +16,13 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
     const configResult = document.querySelector("#config-result");
     const logRetention = document.querySelector("#log-retention");
     const logConfigResult = document.querySelector("#log-config-result");
+    const opsScanInterval = document.querySelector("#ops-scan-interval");
+    const opsConfigResult = document.querySelector("#ops-config-result");
     const gpuSummary = document.querySelector("#gpu-summary");
     const cpuSummary = document.querySelector("#cpu-summary");
     const logStats = document.querySelector("#log-stats");
-    const profileNameInput = document.querySelector("#profile-name");
-    const libraryProfiles = document.querySelector("#library-profiles");
+    // const profileNameInput = document.querySelector("#profile-name"); // Removed
+    // const libraryProfiles = document.querySelector("#library-profiles"); // Removed
     const entryRows = document.querySelector("#entry-rows");
     const entrySummary = document.querySelector("#entry-summary");
     const entrySearch = document.querySelector("#entry-search");
@@ -32,13 +34,14 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
     const entryLoadMore = document.querySelector("#entry-load-more");
     const entryLoading = document.querySelector("#entry-loading");
     const libraryStatus = document.querySelector("#library-status");
-    const libraryCreateForm = document.querySelector("#library-create-form");
-    const libraryNameInput = document.querySelector("#library-name");
-    const libraryPathInput = document.querySelector("#library-path");
-    const libraryProfileSelect = document.querySelector("#library-profile");
-    const libraryCreateResult = document.querySelector("#library-create-result");
+    // const libraryCreateForm = document.querySelector("#library-create-form"); // Removed
+    // const libraryNameInput = document.querySelector("#library-name"); // Removed
+    // const libraryPathInput = document.querySelector("#library-path"); // Removed
+    // const libraryProfileSelect = document.querySelector("#library-profile"); // Removed
+    // const libraryCreateResult = document.querySelector("#library-create-result"); // Removed
     const clearProcessedButton = document.querySelector("#clear-processed");
     const ffmpegPreview = document.querySelector("#ffmpeg-preview");
+    const cpuFfmpegPreview = document.querySelector("#cpu-ffmpeg-preview");
     const lookaheadInput = document.querySelector("#profile-lookahead");
     const lookaheadValue = document.querySelector("#lookahead-value");
     const bframesSelect = document.querySelector("#profile-bframes");
@@ -75,6 +78,8 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
     const cpuBframesSelect = document.querySelector("#cpu-profile-bframes");
     const cpuAdaptiveBframesSelect = document.querySelector("#cpu-profile-adaptive-bframes");
     const cpuAudioBitrateSelect = document.querySelector("#cpu-profile-audio-bitrate");
+    const reprocessAllBtn = document.querySelector("#reprocess-all");
+    const deleteAllOriginalsBtn = document.querySelector("#delete-all-originals");
     const setupWizard = document.querySelector("#setup-wizard");
     const wizardSetupBtn = document.querySelector("#wizard-setup-btn");
     const wizardSkipBtn = document.querySelector("#wizard-skip-btn");
@@ -182,13 +187,16 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
       if (Number.isFinite(job?.elapsed_seconds)) {
         return job.elapsed_seconds;
       }
+      const status = String(job?.status || "").toLowerCase();
+      if (status === "pending") {
+        return 0;
+      }
       const startTimeStr = job?.started_at || job?.created_at;
       const start = startTimeStr ? new Date(startTimeStr) : null;
 
       if (!start || Number.isNaN(start.getTime())) {
         return 0;
       }
-      const status = String(job?.status || "").toLowerCase();
       const updated = job?.updated_at ? new Date(job.updated_at) : null;
       const endDate =
         status === "completed" || status === "failed"
@@ -489,6 +497,56 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
       ffmpegPreview.textContent = parts.join(" ");
     }
 
+    function updateCpuFfmpegPreview() {
+      if (!cpuFfmpegPreview) return;
+      if (!cpuProfileRcSelect || !cpuProfileResolutionSelect || !cpuProfileFpsSelect) return;
+
+      let rc = cpuProfileRcSelect.value || "crf";
+      const resolution = cpuProfileResolutionSelect.value;
+      const [, height = "720"] = String(resolution || "1280x720").split("x");
+      const filterParts = [
+        `scale=-2:${height}`,
+        `fps=${cpuProfileFpsSelect.value || 30}`,
+      ];
+
+      const parts = [
+        "ffmpeg",
+        "-y",
+        "-i input.mkv",
+        `-vf ${filterParts.join(",")}`,
+        "-c:v libx264",
+        `-preset ${cpuProfilePresetSelect.value || "slow"}`,
+        `-profile:v ${cpuProfileTierSelect.value}`,
+        `-level ${cpuProfileLevelSelect.value}`,
+      ];
+
+      if (rc === "crf") {
+        parts.push(`-crf ${cpuProfileCqSelect.value || 20}`);
+      } else {
+        parts.push(`-b:v ${cpuProfileBitrateSelect.value || "5M"}`);
+        parts.push(`-maxrate ${cpuProfileMaxrateSelect.value || "8M"}`);
+        parts.push(`-bufsize ${cpuProfileBufsizeSelect.value || "16M"}`);
+      }
+
+      const bframes = Number(cpuBframesSelect.value || "0");
+      parts.push(`-bf ${bframes}`);
+
+      const lookahead = Number(cpuLookaheadInput.value || "0");
+      if (lookahead > 0) {
+        parts.push(`-rc-lookahead ${lookahead}`);
+      }
+
+      const adaptiveAllowed = lookahead > 0 && bframes > 0;
+      const adaptive = adaptiveAllowed && cpuAdaptiveBframesSelect.value === "1";
+      parts.push(`-b_adapt ${adaptive ? 1 : 0}`);
+
+      parts.push("-movflags +faststart");
+      parts.push("-c:a aac", `-b:a ${cpuAudioBitrateSelect.value || "192k"}`, "-ac 2");
+      parts.push("output.mp4");
+
+      cpuFfmpegPreview.textContent = parts.join(" ");
+    }
+
     function profileList() {
       if (!configCache) return [];
       const raw = configCache.profiles || [];
@@ -515,7 +573,6 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
         option.value = "";
         option.textContent = "No profiles available";
         profileSelect.appendChild(option);
-        profileNameInput.value = "";
         return;
       }
       profiles.forEach((profile) => {
@@ -529,88 +586,6 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
       } else if (!profileSelect.value) {
         profileSelect.value = profiles[0].name;
       }
-      profileNameInput.value = profileSelect.value;
-
-      if (libraryProfileSelect) {
-        libraryProfileSelect.innerHTML = "";
-        const previousLibrarySelection = libraryProfileSelect.value;
-        profiles.forEach((profile) => {
-          const option = document.createElement("option");
-          option.value = profile.id ?? profile.name;
-          option.textContent = profile.name;
-          libraryProfileSelect.appendChild(option);
-        });
-        if (previousLibrarySelection && profiles.some((profile) => String(profile.id ?? profile.name) === previousLibrarySelection)) {
-          libraryProfileSelect.value = previousLibrarySelection;
-        } else if (!libraryProfileSelect.value && profiles.length) {
-          libraryProfileSelect.value = profiles[0].id ?? profiles[0].name;
-        }
-      }
-    }
-
-    function renderLibraryProfiles() {
-      if (!libraryProfiles) return;
-      const libraries = libraryList();
-      const profiles = profileList();
-      libraryProfiles.innerHTML = "";
-      if (!libraries.length) {
-        const message = document.createElement("p");
-        message.classList.add("hint");
-        message.textContent = "No libraries configured.";
-        libraryProfiles.appendChild(message);
-        return;
-      }
-      libraries.forEach((library) => {
-        const row = document.createElement("div");
-        row.classList.add("grid-two", "library-row");
-        row.dataset.library = library.name;
-
-        const info = document.createElement("div");
-        const displayRoot = normalizeDisplayPath(library.root);
-        info.innerHTML = `<strong>${library.name}</strong><p class="hint" style="margin:0">${displayRoot} (depth ${library.depth || "max"})</p>`;
-
-        const controls = document.createElement("div");
-        controls.style.display = "flex";
-        controls.style.gap = "0.5rem";
-        controls.style.alignItems = "center";
-
-        const select = document.createElement("select");
-        select.dataset.library = library.name;
-        profiles.forEach((profile) => {
-          const option = document.createElement("option");
-          option.value = profile.id;
-          option.textContent = profile.name;
-          select.appendChild(option);
-        });
-        if (library.profile_id) {
-          select.value = library.profile_id;
-        }
-
-        const button = document.createElement("button");
-        button.type = "button";
-        button.dataset.library = library.name;
-        button.dataset.action = "update";
-        button.textContent = "Update profile";
-
-        const remove = document.createElement("button");
-        remove.type = "button";
-        remove.dataset.library = library.name;
-        remove.dataset.action = "remove";
-        remove.classList.add("secondary");
-        remove.textContent = "Remove";
-
-        const status = document.createElement("span");
-        status.classList.add("hint", "library-status");
-
-        controls.appendChild(select);
-        controls.appendChild(button);
-        controls.appendChild(remove);
-        controls.appendChild(status);
-
-        row.appendChild(info);
-        row.appendChild(controls);
-        libraryProfiles.appendChild(row);
-      });
     }
 
     function renderLibraryFilters() {
@@ -663,12 +638,15 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
       configCache = config;
       isWsl2 = Boolean(config.environment?.is_wsl2);
       logRetention.value = config.logging?.retention_days ?? 7;
+      if (opsScanInterval) {
+        opsScanInterval.value = config.operational?.scan_interval_min ?? 0;
+      }
       renderProfileSelect();
       const profileSelect = document.querySelector("#profile-select");
       if (profileSelect.value) {
         loadProfile(profileSelect.value);
       }
-      renderLibraryProfiles();
+      // renderLibraryProfiles(); // Removed
       renderLibraryFilters();
 
       if (Object.keys(config.libraries || {}).length === 0) {
@@ -685,7 +663,6 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
       const gpuProfile = profile.gpu || profile;
       const cpuProfile = profile.cpu || profile;
       document.querySelector("#profile-select").value = name;
-      profileNameInput.value = name;
       ensureOption(profileTierSelect, gpuProfile.profile);
       ensureOption(profileLevelSelect, gpuProfile.level);
       ensureOption(profileResolutionSelect, gpuProfile.resolution || gpuProfile.max_resolution);
@@ -775,6 +752,7 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
       updateCpuBframeState();
       updateAqState();
       updateFfmpegPreview();
+      updateCpuFfmpegPreview();
     }
 
     function renderJobTable() {
@@ -824,7 +802,6 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
           <td class="status-${status}">${statusLabel}</td>
           <td>${elapsed}</td>
           <td class="path-cell" title="${normalizedPath}">${fileName}</td>
-          <td>${job.profile}</td>
           <td>${pipelineText}</td>
           <td>${progress}%</td>
         `;
@@ -875,7 +852,6 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
           <td class="status-${status}">${statusLabel}</td>
           <td>${finished}</td>
           <td class="path-cell" title="${normalizedPath}">${fileName}</td>
-          <td>${job.profile}</td>
           <td>${pipelineText}</td>
           <td>${detailsLink}</td>
         `;
@@ -1010,12 +986,6 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
       return `<span class="status-chip status-${normalized}">${normalized}</span>`;
     }
 
-    function formatProfile(entry) {
-      const parts = [entry.profile];
-      if (entry.profile_id) parts.push(`#${entry.profile_id}`);
-      return `<span class="profile-chip">${parts.join(" ")}</span>`;
-    }
-
     function formatUpdated(value) {
       if (!value) return "";
       const date = new Date(value);
@@ -1076,10 +1046,8 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
 
         let statusHtml = formatStatusChip(entry.status);
         if (entry.status === "converting" && entry.last_job_id) {
-            const job = jobCache.find((j) => j.id === entry.last_job_id);
-            if (job && typeof job.progress === "number") {
-                statusHtml += ` <span class="hint">(${job.progress}%)</span>`;
-            }
+            // Keep status as "Converting" without percentage
+            // The percentage info is redundant here as per user request.
         }
 
         let errorHtml = "";
@@ -1095,7 +1063,6 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
             ${fileName}
             ${errorHtml}
           </td>
-          <td>${formatProfile(entry)}</td>
           <td>${encodingLabel}</td>
           <td>${formatUpdated(entry.updated_at)}</td>
           <td>
@@ -1554,6 +1521,92 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
       });
     });
 
+    [
+      cpuProfileRcSelect,
+      cpuProfileCqSelect,
+      cpuProfileBitrateSelect,
+      cpuProfileMaxrateSelect,
+      cpuProfileBufsizeSelect,
+      cpuProfilePresetSelect,
+      cpuProfileTierSelect,
+      cpuProfileLevelSelect,
+      cpuProfileResolutionSelect,
+      cpuProfileFpsSelect,
+      cpuBframesSelect,
+      cpuAdaptiveBframesSelect,
+      cpuAudioBitrateSelect,
+    ].forEach((element) => {
+        if (!element) return;
+        element.addEventListener("change", (event) => {
+            if (event.target === cpuProfileLevelSelect) {
+                enforceCpuLevelConstraints("level");
+            } else if (event.target === cpuProfileResolutionSelect) {
+                enforceCpuLevelConstraints("resolution");
+            } else if (event.target === cpuProfileFpsSelect) {
+                enforceCpuLevelConstraints("fps");
+            } else if (event.target === cpuBframesSelect) {
+                updateCpuBframeState();
+            } else if (event.target === cpuProfileRcSelect) {
+                updateCpuRateControlState();
+            }
+            updateCpuFfmpegPreview();
+        });
+    });
+
+    if (cpuLookaheadInput) {
+        cpuLookaheadInput.addEventListener("input", () => {
+            syncLookaheadDisplay();
+            updateCpuBframeState();
+            updateCpuFfmpegPreview();
+        });
+    }
+
+    if (reprocessAllBtn) {
+        reprocessAllBtn.addEventListener("click", async () => {
+            if (!confirm("Are you sure you want to reprocess ALL entries? This will delete existing converted files and queue them for conversion. Original files are required.")) return;
+            reprocessAllBtn.disabled = true;
+            reprocessAllBtn.textContent = "Processing...";
+            try {
+                const response = await fetch("/api/library/entries/reprocess-all", { method: "POST" });
+                const result = await response.json();
+                if (response.ok) {
+                    alert(`Queued reprocessing for ${result.queued_count} entries.`);
+                    refreshLibraryEntries();
+                } else {
+                    alert("Failed to reprocess: " + (result.detail || "Unknown error"));
+                }
+            } catch (e) {
+                alert("Error during reprocess request.");
+            } finally {
+                reprocessAllBtn.disabled = false;
+                reprocessAllBtn.textContent = "Reprocess All";
+            }
+        });
+    }
+
+    if (deleteAllOriginalsBtn) {
+        deleteAllOriginalsBtn.addEventListener("click", async () => {
+            if (!confirm("Are you sure you want to DELETE ALL ORIGINAL files where a successful conversion exists? This CANNOT be undone.")) return;
+            deleteAllOriginalsBtn.disabled = true;
+            deleteAllOriginalsBtn.textContent = "Processing...";
+            try {
+                const response = await fetch("/api/library/entries/delete-all-originals", { method: "POST" });
+                const result = await response.json();
+                if (response.ok) {
+                    alert(`Queued deletion for ${result.queued_count} original files.`);
+                    refreshLibraryEntries();
+                } else {
+                    alert("Failed to delete originals: " + (result.detail || "Unknown error"));
+                }
+            } catch (e) {
+                alert("Error during delete request.");
+            } finally {
+                deleteAllOriginalsBtn.disabled = false;
+                deleteAllOriginalsBtn.textContent = "Delete All Originals";
+            }
+        });
+    }
+
     document.querySelector("#log-config-form").addEventListener("submit", async (event) => {
       event.preventDefault();
       const retentionDays = Number(logRetention.value || "7");
@@ -1580,9 +1633,33 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
       }
     });
 
+    document.querySelector("#ops-config-form").addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const interval = Number(opsScanInterval.value || "0");
+      opsConfigResult.textContent = "Saving...";
+      const response = await fetch("/api/config/operational", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ scan_interval_min: interval }),
+      });
+      const result = await response.json();
+      if (response.ok) {
+        opsConfigResult.textContent = `Scan interval updated to ${result.scan_interval_min} minutes.`;
+        if (configCache) {
+          configCache.operational = configCache.operational || {};
+          configCache.operational.scan_interval_min = result.scan_interval_min;
+          if (result.revision) {
+            configCache.revision = result.revision;
+          }
+        }
+      } else {
+        opsConfigResult.textContent = `Save failed: ${result.detail || "Unknown error"}`;
+      }
+    });
+
     document.querySelector("#config-form").addEventListener("submit", async (event) => {
       event.preventDefault();
-      const profileName = (profileNameInput.value || document.querySelector("#profile-select").value).trim();
+      const profileName = document.querySelector("#profile-select").value.trim();
       if (!profileName) {
         configResult.textContent = "Profile name is required.";
         return;
@@ -1677,91 +1754,6 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
         loadProfile(profileName);
       } else {
         configResult.textContent = `Save failed: ${result.detail}`;
-      }
-    });
-
-    libraryCreateForm.addEventListener("submit", async (event) => {
-      event.preventDefault();
-      const name = (libraryNameInput.value || "").trim();
-      const path = (libraryPathInput.value || "").trim();
-      const profileId = Number(libraryProfileSelect.value || "0");
-      if (!name || !path || !Number.isFinite(profileId) || profileId <= 0) {
-        libraryCreateResult.textContent = "Name, path, and profile are required.";
-        return;
-      }
-      libraryCreateResult.textContent = "Adding library...";
-      const response = await fetch("/api/libraries", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name, root: path, profile_id: profileId }),
-      });
-      const result = await response.json();
-      if (response.ok) {
-        libraryCreateResult.textContent = `Added ${result.name}`;
-        libraryNameInput.value = "";
-        libraryPathInput.value = "";
-        configCache = configCache || {};
-        configCache.libraries = configCache.libraries || {};
-        configCache.libraries[result.name] = {
-          root: result.root,
-          depth: result.depth,
-          profile_id: result.profile_id,
-          profile: result.profile,
-        };
-        renderLibraryProfiles();
-        renderLibraryFilters();
-        refreshLibraryEntries();
-      } else {
-        libraryCreateResult.textContent = result.detail || "Unable to add library";
-      }
-    });
-
-    libraryProfiles.addEventListener("click", async (event) => {
-      const button = event.target.closest("button[data-library]");
-      if (!button) return;
-      const row = button.closest(".library-row");
-      const select = row?.querySelector("select[data-library]");
-      const status = row?.querySelector(".library-status");
-      const action = button.dataset.action || "update";
-      const libraryName = button.dataset.library;
-      if (action === "remove") {
-        if (!window.confirm(`Remove library ${libraryName}? Existing entries will be marked removed.`)) return;
-        if (status) status.textContent = "Removing...";
-        const response = await fetch(`/api/libraries/${libraryName}`, { method: "DELETE" });
-        const result = await response.json().catch(() => ({}));
-        if (response.ok) {
-          if (status) status.textContent = "Removed";
-          if (configCache?.libraries) {
-            delete configCache.libraries[libraryName];
-          }
-          renderLibraryProfiles();
-          renderLibraryFilters();
-          refreshLibraryEntries();
-        } else if (status) {
-          status.textContent = result.detail || "Remove failed";
-        }
-        return;
-      }
-
-      if (!select) return;
-      const profileId = Number(select.value);
-      if (status) status.textContent = "Saving...";
-      const response = await fetch(`/api/libraries/${libraryName}`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ profile_id: profileId }),
-      });
-      const result = await response.json();
-      if (response.ok) {
-        if (status) status.textContent = "Updated";
-        configCache.libraries = configCache.libraries || {};
-        configCache.libraries[libraryName] = {
-          ...(configCache.libraries[libraryName] || {}),
-          profile_id: profileId,
-          profile: result.profile,
-        };
-      } else if (status) {
-        status.textContent = result.detail || "Update failed";
       }
     });
 

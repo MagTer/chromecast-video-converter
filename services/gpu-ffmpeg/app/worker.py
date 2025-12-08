@@ -890,7 +890,7 @@ async def process_job(client: httpx.AsyncClient, job: dict) -> None:  # noqa: C9
         if pipeline:
             analysis["pipeline"] = pipeline
 
-        if await _validate_output(output_path, duration):
+        if not job.get("force", False) and await _validate_output(output_path, duration):
             message = f"Output already present at {output_path}; skipping encode"
             await update_job_status(client, job_id, "completed", 100, message)
             LOGGER.info("Job %s completed from existing output %s", job_id[:8], output_path)

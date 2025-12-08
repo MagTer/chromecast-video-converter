@@ -5,7 +5,11 @@ from pathlib import Path
 
 import fakeredis.aioredis
 import pytest
-from app.dependencies import AppDependencies
+
+try:
+    from app.dependencies import AppDependencies
+except ImportError:
+    AppDependencies = None
 
 
 @pytest.fixture
@@ -20,6 +24,10 @@ def fake_redis():
 
 @pytest.fixture(autouse=True)
 def isolated_app_dependencies(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    if AppDependencies is None:
+        yield
+        return
+
     # Ensure app.dependencies is reloaded for each test
     if "app.dependencies" in sys.modules:
         del sys.modules["app.dependencies"]

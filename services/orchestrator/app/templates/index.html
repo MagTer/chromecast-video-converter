@@ -71,7 +71,6 @@
               <th>Status</th>
               <th>Elapsed</th>
               <th>File</th>
-              <th>Profile</th>
               <th>Pipeline</th>
               <th>Progress</th>
             </tr>
@@ -99,7 +98,6 @@
               <th>Status</th>
               <th>Finished</th>
               <th>File</th>
-              <th>Profile</th>
               <th>Pipeline</th>
               <th>Details / Logs</th>
             </tr>
@@ -159,6 +157,8 @@
         </div>
         <div style="display:flex; gap:0.5rem; align-items:center;">
           <button id="refresh-entries" type="button">Refresh</button>
+          <button id="reprocess-all" type="button" class="secondary">Reprocess All</button>
+          <button id="delete-all-originals" type="button" class="secondary danger">Delete All Originals</button>
           <span id="library-status" class="hint"></span>
         </div>
       </header>
@@ -200,7 +200,6 @@
               <th>Status</th>
               <th>Library</th>
               <th>Path</th>
-              <th>Profile</th>
               <th>Encoding</th>
               <th>Updated</th>
               <th>Actions</th>
@@ -244,10 +243,6 @@
               <select id="profile-select"></select>
             </label>
             <label>
-              Profile name
-              <input id="profile-name" placeholder="movies" />
-            </label>
-            <label>
               <div class="label-title">
                 Rate control
                 <span
@@ -277,8 +272,9 @@
             <label data-rc-group="gpu" data-rc-field="bitrate">
               Bitrate (target)
               <select id="profile-bitrate">
+                <option value="3M" selected>3M (recommended)</option>
                 <option value="4M">4M</option>
-                <option value="5M" selected>5M (recommended)</option>
+                <option value="5M">5M</option>
                 <option value="6M">6M</option>
                 <option value="8M">8M</option>
                 <option value="10M">10M</option>
@@ -287,18 +283,20 @@
             <label data-rc-group="gpu" data-rc-field="maxrate">
               Max bitrate (<=12M)
               <select id="profile-maxrate">
+                <option value="5M">5M</option>
                 <option value="6M">6M</option>
-                <option value="8M">8M</option>
-                <option value="10M" selected>10M (recommended)</option>
+                <option value="8M" selected>8M (recommended)</option>
+                <option value="10M">10M</option>
                 <option value="12M">12M</option>
               </select>
             </label>
             <label data-rc-group="gpu" data-rc-field="bufsize">
               Buffer size (<=24M)
               <select id="profile-bufsize">
+                <option value="8M">8M</option>
                 <option value="12M">12M</option>
-                <option value="16M" selected>16M (recommended)</option>
-                <option value="20M">20M</option>
+                <option value="16M">16M</option>
+                <option value="20M" selected>20M (recommended)</option>
                 <option value="24M">24M</option>
               </select>
             </label>
@@ -345,7 +343,7 @@
               <select id="profile-level">
                 <option value="3.1">3.1</option>
                 <option value="4.0">4.0</option>
-                <option value="4.1">4.1</option>
+                <option value="4.1" selected>4.1</option>
                 <option value="4.2">4.2</option>
               </select>
             </label>
@@ -359,7 +357,7 @@
                 >ⓘ</span>
               </div>
               <select id="profile-resolution">
-                <option value="1280x720">1280x720</option>
+                <option value="1280x720" selected>1280x720</option>
                 <option value="1920x1080">1920x1080</option>
               </select>
             </label>
@@ -374,7 +372,7 @@
               </div>
               <select id="profile-maxfps">
                 <option value="24">24</option>
-                <option value="30">30</option>
+                <option value="30" selected>30</option>
                 <option value="60">60</option>
               </select>
             </label>
@@ -404,8 +402,8 @@
                 >ⓘ</span>
               </div>
               <div class="slider-row">
-                <input id="profile-lookahead" type="range" min="0" max="32" value="24" />
-                <span id="lookahead-value" class="hint">24</span>
+                <input id="profile-lookahead" type="range" min="0" max="32" value="32" />
+                <span id="lookahead-value" class="hint">32</span>
               </div>
             </label>
             <label>
@@ -504,8 +502,8 @@
                   >ⓘ</span>
                 </div>
                 <select id="cpu-profile-rc">
-                  <option value="crf" selected>CRF (quality first)</option>
-                  <option value="vbr">VBR</option>
+                  <option value="crf">CRF (quality first)</option>
+                  <option value="vbr" selected>VBR</option>
                   <option value="cbr">CBR</option>
                 </select>
               </label>
@@ -524,15 +522,18 @@
               <label data-rc-group="cpu" data-rc-field="bitrate">
                 Bitrate (target)
                 <select id="cpu-profile-bitrate">
+                  <option value="3M" selected>3M</option>
                   <option value="4M">4M</option>
-                  <option value="5M" selected>5M</option>
+                  <option value="5M">5M</option>
                   <option value="6M">6M</option>
                   <option value="8M">8M</option>
+                  <option value="10M">10M</option>
                 </select>
               </label>
               <label data-rc-group="cpu" data-rc-field="maxrate">
                 Max bitrate (<=12M)
                 <select id="cpu-profile-maxrate">
+                  <option value="5M">5M</option>
                   <option value="6M">6M</option>
                   <option value="8M" selected>8M</option>
                   <option value="10M">10M</option>
@@ -542,9 +543,10 @@
               <label data-rc-group="cpu" data-rc-field="bufsize">
                 Buffer size (<=24M)
                 <select id="cpu-profile-bufsize">
+                  <option value="8M">8M</option>
                   <option value="12M">12M</option>
-                  <option value="16M" selected>16M</option>
-                  <option value="20M">20M</option>
+                  <option value="16M">16M</option>
+                  <option value="20M" selected>20M</option>
                   <option value="24M">24M</option>
                 </select>
               </label>
@@ -582,7 +584,7 @@
                 <select id="cpu-profile-level">
                   <option value="3.1">3.1</option>
                   <option value="4.0">4.0</option>
-                  <option value="4.1">4.1</option>
+                  <option value="4.1" selected>4.1</option>
                   <option value="4.2">4.2</option>
                 </select>
               </label>
@@ -613,8 +615,8 @@
               <label>
                 Lookahead (0–32)
                 <div class="slider-row">
-                  <input id="cpu-profile-lookahead" type="range" min="0" max="32" value="0" />
-                  <span id="cpu-lookahead-value" class="hint">0</span>
+                  <input id="cpu-profile-lookahead" type="range" min="0" max="32" value="32" />
+                  <span id="cpu-lookahead-value" class="hint">32</span>
                 </div>
               </label>
               <label>
@@ -640,7 +642,10 @@
             <button type="button" class="secondary" id="discard-config">Discard Changes</button>
             <span id="config-result" class="hint"></span>
           </div>
+          <h4 style="margin:1rem 0 0.25rem 0;">GPU Encoding Command</h4>
           <pre id="ffmpeg-preview" class="ffmpeg-preview" aria-label="ffmpeg preview"></pre>
+          <h4 style="margin:1rem 0 0.25rem 0;">CPU Fallback Command</h4>
+          <pre id="cpu-ffmpeg-preview" class="ffmpeg-preview" aria-label="cpu ffmpeg preview"></pre>
           <div class="grid-two" style="margin-top:1rem;">
             <div>
               <h4 style="margin:0 0 0.25rem 0;">GPU Encoding Settings</h4>
@@ -656,37 +661,21 @@
       <div class="panel">
         <header>
           <div>
-            <h3 style="margin:0">Library defaults</h3>
-            <p class="hint" style="margin:0">Assign a profile to each monitored library.</p>
+            <h3 style="margin:0">Operational settings</h3>
+            <p class="hint" style="margin:0">Configure background tasks and limits.</p>
           </div>
         </header>
-        <div id="library-profiles" class="stacked" style="gap:0.75rem;"></div>
-      </div>
-      <div class="panel">
-        <header>
-          <div>
-            <h3 style="margin:0">Add library</h3>
-            <p class="hint" style="margin:0">Mount paths inside the container (UI normalizes /watch to /media automatically).</p>
-          </div>
-        </header>
-        <form id="library-create-form" class="stacked" style="gap:0.75rem;">
+        <form id="ops-config-form" class="stacked">
           <div class="grid-two">
             <label>
-              Library name
-              <input id="library-name" placeholder="movies" required />
-            </label>
-            <label>
-              Path (mounted)
-              <input id="library-path" placeholder="/media/movies" required />
-            </label>
-            <label>
-              Encoding profile
-              <select id="library-profile"></select>
+              Scan interval (minutes)
+              <span class="hint" style="margin-top:0;font-size:0.8rem;">0 to disable</span>
+              <input id="ops-scan-interval" type="number" min="0" max="1440" value="0" />
             </label>
           </div>
           <div style="display:flex; gap:0.5rem; align-items:center;">
-            <button type="submit">Add library</button>
-            <span id="library-create-result" class="hint"></span>
+            <button type="submit">Save settings</button>
+            <span id="ops-config-result" class="hint"></span>
           </div>
         </form>
       </div>
@@ -716,6 +705,6 @@
     </section>
   </main>
 
-    <script type="module" src="/static/js/app.js" defer></script>
+    <script type="module" src="/static/js/app.js?v=3" defer></script>
 </body>
 </html>

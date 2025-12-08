@@ -36,17 +36,17 @@ DEFAULT_CONFIG: Dict[str, Any] = {
                 "mode": "gpu",
                 "codec": "h264",
                 "profile": "high",
-                "level": "4.0",
+                "level": "4.1",
                 "resolution": "1280x720",
                 "max_fps": 30,
-                "bitrate": "5M",
-                "max_bitrate": "10M",
-                "bufsize": "16M",
+                "bitrate": "3M",
+                "max_bitrate": "8M",
+                "bufsize": "20M",
                 "preset": "p7",
                 "rc": "vbr_hq",
                 "cq": 18,
-                "bframes": 2,
-                "lookahead": 24,
+                "bframes": 3,
+                "lookahead": 32,
                 "adaptive_b_frames": True,
                 "aq": True,
                 "spatial_aq": True,
@@ -63,16 +63,16 @@ DEFAULT_CONFIG: Dict[str, Any] = {
                 "codec": "h264",
                 "profile": "high",
                 "level": "4.1",
-                "resolution": "1920x1080",
+                "resolution": "1280x720",
                 "max_fps": 30,
-                "bitrate": "5M",
+                "bitrate": "3M",
                 "max_bitrate": "8M",
-                "bufsize": "16M",
+                "bufsize": "20M",
                 "preset": "veryslow",
-                "rc": "crf",
+                "rc": "vbr",
                 "cq": 18,
                 "bframes": 3,
-                "lookahead": 60,
+                "lookahead": 32,
                 "adaptive_b_frames": True,
                 "aq": True,
                 "spatial_aq": True,
@@ -91,6 +91,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "gpu_temperature_cutoff": 85,
         "max_disk_usage_percent": 90,
         "remove_original_after_success": False,
+        "scan_interval_min": 0,
     },
     "logging": {"retention_days": 7},
     "notifiers": {
@@ -340,14 +341,14 @@ class HardwareProfile(BaseModel):
     level: str
     resolution: str
     max_fps: int = Field(default=30, gt=0, le=60)
-    bitrate: str = Field(default="8M")
+    bitrate: str = Field(default="3M")
     max_bitrate: str
     bufsize: str
     preset: str = Field(default="p6")
     cq: int = Field(default=18, ge=0, le=30)
     rc: str = Field(default="vbr")
-    bframes: int = Field(default=2, ge=0, le=3)
-    lookahead: int = Field(default=24, ge=0, le=60)
+    bframes: int = Field(default=3, ge=0, le=3)
+    lookahead: int = Field(default=32, ge=0, le=60)
     adaptive_b_frames: bool = Field(default=True)
     aq: bool = Field(default=True)
     spatial_aq: bool = Field(default=True)
@@ -415,6 +416,7 @@ class OperationConfig(BaseModel):
     gpu_temperature_cutoff: int
     max_disk_usage_percent: int
     remove_original_after_success: bool = False
+    scan_interval_min: int = Field(default=0, ge=0)
 
 
 class JellyfinConfig(BaseModel):
@@ -561,6 +563,13 @@ class ConfigService:
         config = self.snapshot.config
         config.logging.retention_days = retention_days
         LOGGER.info("Updated log retention to %s days", retention_days)
+        self._snapshot = self.store.save_config(config)
+        return self._snapshot
+
+    def update_operational(self, scan_interval_min: int) -> ConfigSnapshot:
+        config = self.snapshot.config
+        config.operational.scan_interval_min = scan_interval_min
+        LOGGER.info("Updated scan interval to %s minutes", scan_interval_min)
         self._snapshot = self.store.save_config(config)
         return self._snapshot
 
