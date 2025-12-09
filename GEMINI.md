@@ -13,18 +13,44 @@
 - Keep commits focused (code + matching docs/tests). Split large efforts into reviewable slices.
 - Reference the relevant doc section (`docs/README.md`, `docs/user/...`, `docs/architecture/README.md`) in PR descriptions when behavior changes.
 
-## Build & Test
+## Development & Testing Workflow
 
-Run the following from the repo root in the order listed. If you modify any tracked file after a step, restart the sequence from step 1.
+This project uses a unified root-level `pyproject.toml` for dependency management and testing configuration.
 
-1. `ruff check . --fix`
-2. `black .`
-3. `pytest services/orchestrator/tests/`
-4. `pytest services/gpu-ffmpeg/tests/`
-5. `pytest services/gpu-ffmpeg/test_worker.py`
-6. Final verification: `ruff check .` and `black --check .`
+### 1. Environment Setup
 
-Do not submit a PR if any command fails.
+Always work within the virtual environment to ensure tools and dependencies are correct.
+
+```bash
+# Create venv if not exists
+python3 -m venv .venv
+
+# Activate venv
+source .venv/bin/activate
+
+# Install all dependencies (including dev tools) in editable mode
+pip install -e .[dev]
+```
+
+### 2. Verify Code
+
+Use the `scripts/code_check.py` script to run the full suite of checks (linting, formatting, static analysis, and tests). This script ensures you are running inside the virtual environment and executing the same checks as the CI pipeline.
+
+```bash
+./scripts/code_check.py
+```
+
+This command runs:
+1. `ruff check .` (Linting)
+2. `black --check .` (Formatting check)
+3. `mypy .` (Static Type Checking)
+4. `pytest` (Unit Tests - configuration in `pyproject.toml` handles pythonpath)
+
+**Fixing Issues:**
+- To fix linting errors automatically: `ruff check . --fix`
+- To format code: `black .`
+
+Do not submit a PR if `scripts/code_check.py` fails.
 
 ## Code Style & Quality
 
@@ -53,7 +79,7 @@ Do not submit a PR if any command fails.
 
 ## Boundaries & Safety
 
-- **Always:** run the full lint/test suite before sharing work, keep configuration/documentation synchronized with code, and document any manual steps taken during testing.
+- **Always:** run `scripts/code_check.py` before sharing work, keep configuration/documentation synchronized with code, and document any manual steps taken during testing.
 - **Ask first:** when introducing new external services, changing the job queue/storage model, or altering ffmpeg/gpu runtime dependencies.
 - **Never:** commit secrets/credentials, edit production deployment settings outside `config/` unless requested, or re-enable CPU-only encoding paths as a silent fallback.
 
