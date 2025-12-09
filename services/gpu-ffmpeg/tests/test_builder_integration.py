@@ -217,11 +217,20 @@ def test_embedded_subtitles(tmp_path):
         "streams": [
             {"codec_type": "video"},
             {"codec_type": "audio", "tags": {"language": "eng"}},
-            {"codec_type": "subtitle", "tags": {"language": "swe"}, "index": 3},
-            {"codec_type": "subtitle", "tags": {"language": "eng"}, "index": 4},
+            {
+                "codec_type": "subtitle",
+                "codec_name": "subrip",
+                "tags": {"language": "swe"},
+                "index": 3,
+            },
+            {
+                "codec_type": "subtitle",
+                "codec_name": "subrip",
+                "tags": {"language": "eng"},
+                "index": 4,
+            },
         ],
     }
-
     builder = FFmpegBuilder(
         analysis,
         tmp_path / "in.mkv",
