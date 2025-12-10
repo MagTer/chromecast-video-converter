@@ -280,7 +280,7 @@ class JobManager:
             job.status = JobStatus.FAILED
             job.message = "Worker crashed repeatedly"
             job.updated_at = datetime.now(timezone.utc)
-            await redis_client.hset(self._job_key(job.id), mapping=self._encode_job(job))
+            await redis_client.hset(self._job_key(job.id), mapping=self._encode_job(job))  # type: ignore
             await redis_client.zadd(self._job_index, {job.id: job.updated_at.timestamp()})
             await redis_client.xack(self._stream, self._group, message_id)
             await redis_client.delete(delivery_count_key)
@@ -289,7 +289,7 @@ class JobManager:
         job.status = JobStatus.RUNNING
         job.worker_id = consumer
         job.updated_at = datetime.now(timezone.utc)
-        await redis_client.hset(self._job_key(job.id), mapping=self._encode_job(job))
+        await redis_client.hset(self._job_key(job.id), mapping=self._encode_job(job))  # type: ignore
         await redis_client.zadd(self._job_index, {job.id: job.updated_at.timestamp()})
         self._logger.warning(
             "Re-claimed stalled job %s (path=%s) for consumer %s (attempt %s)",
@@ -372,12 +372,12 @@ class JobManager:
         if existing_job:
             return existing_job
         encoded = self._encode_job(job)
-        await redis_client.hset(self._job_key(job.id), mapping=encoded)
+        await redis_client.hset(self._job_key(job.id), mapping=encoded)  # type: ignore
         await redis_client.zadd(self._job_index, {job.id: job.updated_at.timestamp()})
         await redis_client.sadd(self._path_index, resolved_path)
         await redis_client.set(self._path_key(resolved_path), job.id)
         await redis_client.xadd(
-            self._stream, {"payload": json.dumps(encoded)}, maxlen=10_000, approximate=True
+            self._stream, {"payload": json.dumps(encoded)}, maxlen=10_000, approximate=True  # type: ignore
         )
         if emit_log:
             self._logger.info(
@@ -405,23 +405,15 @@ class JobManager:
             pipeline={"max_attempts": 3},  # Simpler pipeline for delete
         )
 
-                encoded = self._encode_job(job)
+        encoded = self._encode_job(job)
+        await redis_client.hset(self._job_key(job.id), mapping=encoded)  # type: ignore
+        await redis_client.zadd(self._job_index, {job.id: job.updated_at.timestamp()})
 
-                await redis_client.hset(self._job_key(job.id), mapping=encoded)
-
-                await redis_client.zadd(self._job_index, {job.id: job.updated_at.timestamp()})
-
-        
-
-                await redis_client.xadd(
-
-                    self._stream, {"payload": json.dumps(encoded)}, maxlen=10_000, approximate=True
-
-                )
-
-                self._logger.info("Queued DELETE job %s for %s", job.id[:8], path)
-
-                return job
+        await redis_client.xadd(
+            self._stream, {"payload": json.dumps(encoded)}, maxlen=10_000, approximate=True  # type: ignore
+        )
+        self._logger.info("Queued DELETE job %s for %s", job.id[:8], path)
+        return job
 
     STALE_RUNNING_TIMEOUT = 300  # seconds
 
@@ -614,7 +606,7 @@ class JobManager:
             job.message = "Worker unavailable; job marked failed"
             job.updated_at = datetime.now(timezone.utc)
             assert self._redis is not None
-            await self._redis.hset(self._job_key(job_id), mapping=self._encode_job(job))
+            await self._redis.hset(self._job_key(job_id), mapping=self._encode_job(job))  # type: ignore
             await self._redis.zadd(self._job_index, {job.id: job.updated_at.timestamp()})
             self._logger.warning("Marked job %s as failed after missing worker", job_id[:8])
 
@@ -681,7 +673,7 @@ class JobManager:
                 job.progress = 0
                 job.updated_at = datetime.now(timezone.utc)
 
-                await self._redis.hset(self._job_key(job.id), mapping=self._encode_job(job))
+                await self._redis.hset(self._job_key(job.id), mapping=self._encode_job(job))  # type: ignore
                 await self._redis.zadd(self._job_index, {job.id: job.updated_at.timestamp()})
 
                 msg_id = pending_map.get(job.id)
