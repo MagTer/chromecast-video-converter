@@ -156,33 +156,36 @@ class JobManager:
     async def _fetch_existing_job(self, job_id: Optional[str]) -> Optional[Job]:
         if not job_id:
             return None
-        assert self._redis is not None
+        redis_client = self._redis
+        assert redis_client is not None
         job_key = self._job_key(job_id)
         for _ in range(self._JOB_FETCH_RETRIES):
-            data = await self._redis.hgetall(job_key)
+            data = await redis_client.hgetall(job_key)
             if data:
                 return self._decode_job(data)
             await asyncio.sleep(self._JOB_FETCH_DELAY)
         return None
 
     async def _set_nx(self, key: str, value: str) -> bool:
-        assert self._redis is not None
+        redis_client = self._redis
+        assert redis_client is not None
         try:
-            return await self._redis.set(key, value, nx=True)
+            return await redis_client.set(key, value, nx=True)
         except TypeError:
-            exists = await self._redis.get(key)
+            exists = await redis_client.get(key)
             if exists:
                 return False
-            await self._redis.set(key, value)
+            await redis_client.set(key, value)
             return True
         except redis.ResponseError:
             return False
 
     async def _reserve_path_for_job(self, path: str, job_id: str, *, force: bool) -> Optional[Job]:
-        assert self._redis is not None
+        redis_client = self._redis
+        assert redis_client is not None
         path_key = self._path_key(path)
         if force:
-            await self._redis.set(path_key, job_id)
+            await redis_client.set(path_key, job_id)
             return None
 
         reserved = False
@@ -190,7 +193,7 @@ class JobManager:
             reserved = await self._set_nx(path_key, job_id)
             if reserved:
                 break
-            existing_job_id = await self._redis.get(path_key)
+            existing_job_id = await redis_client.get(path_key)
             existing_job = await self._fetch_existing_job(existing_job_id)
             if existing_job:
                 self._logger.debug("Job already tracked for %s", path)
@@ -199,11 +202,11 @@ class JobManager:
                 self._logger.warning(
                     "Clearing stale reservation for %s (job=%s)", path, existing_job_id
                 )
-                await self._redis.delete(path_key)
+                await redis_client.delete(path_key)
 
         if not reserved:
             self._logger.warning("Unable to reserve job slot for %s; forcing reservation", path)
-            await self._redis.set(path_key, job_id)
+            await redis_client.set(path_key, job_id)
         return None
 
     def _encode_job(self, job: Job) -> dict[str, str]:
@@ -240,9 +243,10 @@ class JobManager:
         return Job(**parsed)
 
     async def _acquire_stalled(self, consumer: str) -> tuple[Optional[str], Optional[Job]]:
-        assert self._redis is not None
+        redis_client = self._redis
+        assert redis_client is not None
         try:
-            response = await self._redis.xautoclaim(
+            response = await redis_client.xautoclaim(
                 self._stream,
                 self._group,
                 consumer,
@@ -270,23 +274,23 @@ class JobManager:
 
         # Zombie detection
         delivery_count_key = f"job:{job.id}:delivery_count"
-        count = await self._redis.incr(delivery_count_key)
+        count = await redis_client.incr(delivery_count_key)
         if count > 3:
             self._logger.error("Job %s crashed repeatedly (count=%s); failing", job.id[:8], count)
             job.status = JobStatus.FAILED
             job.message = "Worker crashed repeatedly"
             job.updated_at = datetime.now(timezone.utc)
-            await self._redis.hset(self._job_key(job.id), mapping=self._encode_job(job))
-            await self._redis.zadd(self._job_index, {job.id: job.updated_at.timestamp()})
-            await self._redis.xack(self._stream, self._group, message_id)
-            await self._redis.delete(delivery_count_key)
+            await redis_client.hset(self._job_key(job.id), mapping=self._encode_job(job))
+            await redis_client.zadd(self._job_index, {job.id: job.updated_at.timestamp()})
+            await redis_client.xack(self._stream, self._group, message_id)
+            await redis_client.delete(delivery_count_key)
             return None, None
 
         job.status = JobStatus.RUNNING
         job.worker_id = consumer
         job.updated_at = datetime.now(timezone.utc)
-        await self._redis.hset(self._job_key(job.id), mapping=self._encode_job(job))
-        await self._redis.zadd(self._job_index, {job.id: job.updated_at.timestamp()})
+        await redis_client.hset(self._job_key(job.id), mapping=self._encode_job(job))
+        await redis_client.zadd(self._job_index, {job.id: job.updated_at.timestamp()})
         self._logger.warning(
             "Re-claimed stalled job %s (path=%s) for consumer %s (attempt %s)",
             job.id[:8],
@@ -327,7 +331,8 @@ class JobManager:
         emit_log: bool = True,
     ) -> Job:
         await self.initialize()
-        assert self._redis is not None
+        redis_client = self._redis
+        assert redis_client is not None
 
         # Offload blocking validation/resolution
         def _validate_and_resolve():
@@ -367,11 +372,11 @@ class JobManager:
         if existing_job:
             return existing_job
         encoded = self._encode_job(job)
-        await self._redis.hset(self._job_key(job.id), mapping=encoded)
-        await self._redis.zadd(self._job_index, {job.id: job.updated_at.timestamp()})
-        await self._redis.sadd(self._path_index, resolved_path)
-        await self._redis.set(self._path_key(resolved_path), job.id)
-        await self._redis.xadd(
+        await redis_client.hset(self._job_key(job.id), mapping=encoded)
+        await redis_client.zadd(self._job_index, {job.id: job.updated_at.timestamp()})
+        await redis_client.sadd(self._path_index, resolved_path)
+        await redis_client.set(self._path_key(resolved_path), job.id)
+        await redis_client.xadd(
             self._stream, {"payload": json.dumps(encoded)}, maxlen=10_000, approximate=True
         )
         if emit_log:
@@ -386,6 +391,8 @@ class JobManager:
 
     async def add_delete_job(self, path: str) -> Job:
         await self.initialize()
+        redis_client = self._redis
+        assert redis_client is not None
         path = self._canonical_path(path)
         # No extension check or converted check for delete jobs; we want to delete what's asked.
 
@@ -398,22 +405,11 @@ class JobManager:
             pipeline={"max_attempts": 3},  # Simpler pipeline for delete
         )
 
-        # No path reservation check? Or should we?
-        # If a conversion is running, we probably shouldn't delete.
-        # But "remove-original" usually happens after conversion or manual trigger.
-        # Let's skip reservation for now to avoid complexity, or use a different key?
-        # Actually, if we reserve, we prevent concurrent operations.
-        # Let's use force=True behavior effectively or just unique ID.
-        # But we want to track it.
-
         encoded = self._encode_job(job)
-        await self._redis.hset(self._job_key(job.id), mapping=encoded)
-        await self._redis.zadd(self._job_index, {job.id: job.updated_at.timestamp()})
-        # Do NOT add to _path_index or _path_key to avoid conflict with existing media tracking?
-        # If we do, it might block re-scanning.
-        # But `remove-original` implies the file IS there.
+        await redis_client.hset(self._job_key(job.id), mapping=encoded)
+        await redis_client.zadd(self._job_index, {job.id: job.updated_at.timestamp()})
 
-        await self._redis.xadd(
+        await redis_client.xadd(
             self._stream, {"payload": json.dumps(encoded)}, maxlen=10_000, approximate=True
         )
         self._logger.info("Queued DELETE job %s for %s", job.id[:8], path)
