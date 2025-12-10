@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from threading import Lock
 from typing import List, Optional
 
@@ -28,7 +28,7 @@ class JobHistory(Base):
     profile = Column(String(100), nullable=False)
     status = Column(String(50), nullable=False)
     message = Column(Text, nullable=True)
-    started_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    started_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
     completed_at = Column(DateTime, nullable=True)
 
 
@@ -58,7 +58,7 @@ class JobHistoryStore:
                 existing = session.scalar(
                     select(JobHistory).where(JobHistory.job_id == entry.job_id)
                 )
-                timestamp = datetime.utcnow()
+                timestamp = datetime.now(timezone.utc)
                 if existing:
                     existing.status = entry.status
                     existing.message = entry.message
