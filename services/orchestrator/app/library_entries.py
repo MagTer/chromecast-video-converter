@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import asdict, dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from threading import RLock
 from typing import Iterable, List, Optional
@@ -45,8 +45,12 @@ class LibraryEntry(Base):
     last_error = Column(String, nullable=True)
     last_job_id = Column(String, nullable=True)
     original_missing = Column(Boolean, default=False)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(
+        DateTime,
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
 
     def to_dict(self) -> dict:
         return {
@@ -145,7 +149,7 @@ class LibraryEntryStore:
             existing = session.scalar(
                 select(LibraryEntry).where(LibraryEntry.path == canonical_path)
             )
-            timestamp = datetime.utcnow()
+            timestamp = datetime.now(timezone.utc)
             payload_dict = asdict(payload)
             payload_dict["path"] = canonical_path
             if existing:
@@ -183,7 +187,7 @@ class LibraryEntryStore:
             if entry is None:
                 return None
             entry.last_job_id = job_id
-            entry.updated_at = datetime.utcnow()
+            entry.updated_at = datetime.now(timezone.utc)
             session.commit()
             session.refresh(entry)
             return entry
@@ -198,7 +202,7 @@ class LibraryEntryStore:
             for entry in session.scalars(stmt).all():
                 entry.status = LibraryStatus.REMOVED
                 entry.original_missing = True
-                entry.updated_at = datetime.utcnow()
+                entry.updated_at = datetime.now(timezone.utc)
                 session.add(entry)
                 updated += 1
             session.commit()
@@ -223,7 +227,7 @@ class LibraryEntryStore:
         canonical_path = _canonical_path(path)
         with self._lock, self._session() as session:
             entry = session.scalar(select(LibraryEntry).where(LibraryEntry.path == canonical_path))
-            timestamp = datetime.utcnow()
+            timestamp = datetime.now(timezone.utc)
             if entry is None:
                 if not library or not profile:
                     raise KeyError("Library and profile are required for new entries")
@@ -273,7 +277,7 @@ class LibraryEntryStore:
                 raise KeyError(entry.id)
             stored.status = LibraryStatus.REMOVED
             stored.original_missing = True
-            stored.updated_at = datetime.utcnow()
+            stored.updated_at = datetime.now(timezone.utc)
             session.commit()
             session.refresh(stored)
             return stored

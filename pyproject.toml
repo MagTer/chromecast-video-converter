@@ -59,6 +59,7 @@ exclude = ["data*", "media*", "config*", "docs*", "scripts*", "tests*"]
 files = "."
 explicit_package_bases = true
 namespace_packages = true
+plugins = ["pydantic.mypy", "sqlalchemy.ext.mypy.plugin"]
 # We need to ignore the duplicate 'app' module issue for now or exclude one
 # But ideally, explicit_package_bases helps if we define MYPYPATH correctly.
 # Given the user just asked for the pyproject structure, I will add some basic config.
