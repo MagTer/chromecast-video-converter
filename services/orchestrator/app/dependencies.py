@@ -186,10 +186,11 @@ except FileNotFoundError:
 
 
 def get_library_map() -> Dict[str, Any]:
-    return {
-        library.name: library
-        for library in get_app_dependencies().library_config_store.list_libraries()
-    }
+    """Return a mapping of library names to config objects."""
+    if _global_app_dependencies is None:
+        return {}
+    libs = _global_app_dependencies.library_config_store.list_libraries()
+    return {lib.name: lib for lib in libs}  # type: ignore
 
 
 HOST_ENVIRONMENT = {"is_wsl2": detect_wsl2()}

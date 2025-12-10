@@ -15,6 +15,9 @@ SERVICES = ["services/orchestrator", "services/gpu-ffmpeg", "services/folder-wat
 
 def check_venv():
     """Ensure we are running in a virtual environment."""
+    if os.environ.get("CI"):
+        return
+
     if sys.prefix == sys.base_prefix:
         print(f"{RED}❌ ERROR: strictly_venv_enforced.{RESET}")
         print("This script must be run within the active virtual environment.")

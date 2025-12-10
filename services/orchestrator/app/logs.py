@@ -370,7 +370,7 @@ class SQLiteLogHandler(logging.Handler):
         message = self.format(record)
         source = getattr(record, "source", None)
         category = getattr(record, "category", None)
-        severity = getattr(record, "severity", record.levelname)
+        severity = str(getattr(record, "severity", record.levelname))
         severity_value = getattr(record, "severity_value", _severity_value(severity))
         derived_source, derived_category = derive_source_category(record.name)
         request_id = getattr(record, "request_id", None)
@@ -380,10 +380,10 @@ class SQLiteLogHandler(logging.Handler):
             severity=severity,
             severity_value=severity_value,
             logger=record.name,
-            source=source or derived_source,
-            category=category or derived_category,
+            source=str(source or derived_source),
+            category=str(category or derived_category),
             message=message,
-            request_id=request_id,
+            request_id=str(request_id) if request_id else None,
         )
         try:
             self.store.add_entry(entry)
