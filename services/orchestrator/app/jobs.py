@@ -4,7 +4,7 @@ import asyncio
 import json
 import logging
 import os
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
@@ -37,9 +37,9 @@ class Job(BaseModel):
     status: str = JobStatus.PENDING
     worker_id: Optional[str] = None
     request_id: Optional[str] = None
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     started_at: Optional[datetime] = None
-    updated_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     progress: int = 0
     message: Optional[str] = None
     force: bool = Field(default=False)
@@ -141,6 +141,7 @@ class JobManager:
             if self._redis is None:
                 self._redis = redis.from_url(self._redis_url, decode_responses=True)
             try:
+                assert self._redis is not None
                 await self._redis.xgroup_create(self._stream, self._group, id="0-0", mkstream=True)
             except redis.ResponseError as exc:
                 if "BUSYGROUP" not in str(exc):
@@ -155,6 +156,7 @@ class JobManager:
     async def _fetch_existing_job(self, job_id: Optional[str]) -> Optional[Job]:
         if not job_id:
             return None
+        assert self._redis is not None
         job_key = self._job_key(job_id)
         for _ in range(self._JOB_FETCH_RETRIES):
             data = await self._redis.hgetall(job_key)
@@ -164,6 +166,7 @@ class JobManager:
         return None
 
     async def _set_nx(self, key: str, value: str) -> bool:
+        assert self._redis is not None
         try:
             return await self._redis.set(key, value, nx=True)
         except TypeError:
@@ -176,6 +179,7 @@ class JobManager:
             return False
 
     async def _reserve_path_for_job(self, path: str, job_id: str, *, force: bool) -> Optional[Job]:
+        assert self._redis is not None
         path_key = self._path_key(path)
         if force:
             await self._redis.set(path_key, job_id)
@@ -236,6 +240,7 @@ class JobManager:
         return Job(**parsed)
 
     async def _acquire_stalled(self, consumer: str) -> tuple[Optional[str], Optional[Job]]:
+        assert self._redis is not None
         try:
             response = await self._redis.xautoclaim(
                 self._stream,
@@ -270,7 +275,7 @@ class JobManager:
             self._logger.error("Job %s crashed repeatedly (count=%s); failing", job.id[:8], count)
             job.status = JobStatus.FAILED
             job.message = "Worker crashed repeatedly"
-            job.updated_at = datetime.utcnow()
+            job.updated_at = datetime.now(timezone.utc)
             await self._redis.hset(self._job_key(job.id), mapping=self._encode_job(job))
             await self._redis.zadd(self._job_index, {job.id: job.updated_at.timestamp()})
             await self._redis.xack(self._stream, self._group, message_id)
@@ -279,7 +284,7 @@ class JobManager:
 
         job.status = JobStatus.RUNNING
         job.worker_id = consumer
-        job.updated_at = datetime.utcnow()
+        job.updated_at = datetime.now(timezone.utc)
         await self._redis.hset(self._job_key(job.id), mapping=self._encode_job(job))
         await self._redis.zadd(self._job_index, {job.id: job.updated_at.timestamp()})
         self._logger.warning(
@@ -322,9 +327,16 @@ class JobManager:
         emit_log: bool = True,
     ) -> Job:
         await self.initialize()
-        path = self._canonical_path(path)
-        source = Path(path)
-        self._validate_job_path(source, force, emit_log, path)
+        assert self._redis is not None
+
+        # Offload blocking validation/resolution
+        def _validate_and_resolve():
+            resolved = self._canonical_path(path)
+            source_path = Path(resolved)
+            self._validate_job_path(source_path, force, emit_log, resolved)
+            return resolved
+
+        resolved_path = await asyncio.to_thread(_validate_and_resolve)
 
         pipeline = encoding.get("pipeline") if encoding else None
         max_attempts = 5
@@ -339,7 +351,7 @@ class JobManager:
             encoding["pipeline"] = pipeline
 
         job = Job(
-            path=path,
+            path=resolved_path,
             library=library,
             profile=profile,
             profile_id=profile_id,
@@ -351,14 +363,14 @@ class JobManager:
             job_type="convert",
             force=force,
         )
-        existing_job = await self._reserve_path_for_job(path, job.id, force=force)
+        existing_job = await self._reserve_path_for_job(resolved_path, job.id, force=force)
         if existing_job:
             return existing_job
         encoded = self._encode_job(job)
         await self._redis.hset(self._job_key(job.id), mapping=encoded)
         await self._redis.zadd(self._job_index, {job.id: job.updated_at.timestamp()})
-        await self._redis.sadd(self._path_index, path)
-        await self._redis.set(self._path_key(path), job.id)
+        await self._redis.sadd(self._path_index, resolved_path)
+        await self._redis.set(self._path_key(resolved_path), job.id)
         await self._redis.xadd(
             self._stream, {"payload": json.dumps(encoded)}, maxlen=10_000, approximate=True
         )
@@ -366,7 +378,7 @@ class JobManager:
             self._logger.info(
                 "Queued job %s for %s (library=%s, profile=%s)",
                 job.id[:8],
-                path,
+                resolved_path,
                 library,
                 profile,
             )
@@ -410,6 +422,7 @@ class JobManager:
     STALE_RUNNING_TIMEOUT = 300  # seconds
 
     async def _pending_message_map(self) -> dict[str, str]:
+        assert self._redis is not None
         pending_map: dict[str, str] = {}
         message_ids: list[str] = []
         if hasattr(self._redis, "xpending_range"):
@@ -440,6 +453,7 @@ class JobManager:
         return pending_map
 
     async def _pending_message_ids_from_xpending(self) -> list[str]:
+        assert self._redis is not None
         try:
             entries = await self._redis.xpending(self._stream, self._group, "-", "+", 1000)
         except Exception:
@@ -453,10 +467,12 @@ class JobManager:
     async def _ack_pending_message(self, message_id: str) -> None:
         if not message_id:
             return
+        assert self._redis is not None
         await self._redis.xack(self._stream, self._group, message_id)
         await self._redis.xdel(self._stream, message_id)
 
     async def _stream_messages_by_job(self, batch_size: int = 500) -> dict[str, list[str]]:
+        assert self._redis is not None
         mapping: dict[str, list[str]] = {}
         if not hasattr(self._redis, "xrange"):
             return mapping
@@ -482,6 +498,7 @@ class JobManager:
         return mapping
 
     async def _purge_stream_messages(self, running_job_ids: set[str]) -> tuple[int, int]:
+        assert self._redis is not None
         stream_deleted = 0
         pending_ack = 0
         start = "-"
@@ -518,6 +535,7 @@ class JobManager:
         return stream_deleted, pending_ack
 
     async def _purge_ghost_pel_entries(self) -> int:
+        assert self._redis is not None
         pending_ack = 0
         if hasattr(self._redis, "xpending_range"):
             try:
@@ -536,6 +554,7 @@ class JobManager:
 
     async def purge_inactive_jobs(self) -> dict[str, int]:
         await self.initialize()
+        assert self._redis is not None
 
         # 1. Identify running jobs and clean up inactive job metadata
         all_job_ids = await self._redis.zrange(self._job_index, 0, -1)
@@ -576,7 +595,7 @@ class JobManager:
         }
 
     async def _handle_stale_job(self, job_id: str, job: Job, pending_map: dict[str, str]) -> None:
-        threshold = datetime.utcnow() - timedelta(seconds=self.STALE_RUNNING_TIMEOUT)
+        threshold = datetime.now(timezone.utc) - timedelta(seconds=self.STALE_RUNNING_TIMEOUT)
         if not job.updated_at or job.updated_at > threshold:
             return
         self._logger.warning("Stale job detected: %s (status=%s)", job_id[:8], job.status)
@@ -589,12 +608,14 @@ class JobManager:
             job.status = JobStatus.FAILED
             job.progress = 0
             job.message = "Worker unavailable; job marked failed"
-            job.updated_at = datetime.utcnow()
+            job.updated_at = datetime.now(timezone.utc)
+            assert self._redis is not None
             await self._redis.hset(self._job_key(job_id), mapping=self._encode_job(job))
-            await self._redis.zadd(self._job_index, {job_id: job.updated_at.timestamp()})
+            await self._redis.zadd(self._job_index, {job.id: job.updated_at.timestamp()})
             self._logger.warning("Marked job %s as failed after missing worker", job_id[:8])
 
     async def _cleanup_stale_jobs(self, limit: int = 200) -> None:
+        assert self._redis is not None
         job_ids = await self._redis.zrange(self._job_index, 0, limit - 1)
         pending_map = await self._pending_message_map()
         for job_id in job_ids:
@@ -607,6 +628,7 @@ class JobManager:
 
     async def list_jobs(self, limit: int = 200) -> List[Job]:
         await self.initialize()
+        assert self._redis is not None
         await self._cleanup_stale_jobs(limit=limit)
         job_ids = await self._redis.zrevrange(self._job_index, 0, limit - 1)
         jobs: List[Job] = []
@@ -620,10 +642,11 @@ class JobManager:
 
     async def check_dead_workers(self, active_workers: Dict[str, Any]) -> int:
         await self.initialize()
+        assert self._redis is not None
         jobs = await self.list_jobs(limit=1000)
         pending_map = await self._pending_message_map()
         failed_count = 0
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         threshold_seconds = 90
 
         for job in jobs:
@@ -640,8 +663,8 @@ class JobManager:
                     reason = f"Worker {job.worker_id} missing"
             else:
                 last_seen = worker.checked_at
-                if last_seen.tzinfo:
-                    last_seen = last_seen.replace(tzinfo=None)
+                if last_seen.tzinfo is None:
+                    last_seen = last_seen.replace(tzinfo=timezone.utc)
                 if (now - last_seen).total_seconds() > threshold_seconds:
                     is_dead = True
                     reason = f"Worker {job.worker_id} timed out"
@@ -652,7 +675,7 @@ class JobManager:
                 job.status = JobStatus.FAILED
                 job.message = f"Worker Failure: {reason}"
                 job.progress = 0
-                job.updated_at = datetime.utcnow()
+                job.updated_at = datetime.now(timezone.utc)
 
                 await self._redis.hset(self._job_key(job.id), mapping=self._encode_job(job))
                 await self._redis.zadd(self._job_index, {job.id: job.updated_at.timestamp()})
@@ -667,6 +690,7 @@ class JobManager:
 
     async def acquire_next(self, consumer: str) -> Optional[tuple[str, Job]]:
         await self.initialize()
+        assert self._redis is not None
         paused_state = await self.queue_state()
         if paused_state["paused"]:
             return None
@@ -687,8 +711,8 @@ class JobManager:
         job.status = JobStatus.RUNNING
         job.progress = job.progress or 0
         job.worker_id = consumer
-        job.started_at = datetime.utcnow()
-        job.updated_at = datetime.utcnow()
+        job.started_at = datetime.now(timezone.utc)
+        job.updated_at = datetime.now(timezone.utc)
         await self._redis.hset(self._job_key(job.id), mapping=self._encode_job(job))
         await self._redis.zadd(self._job_index, {job.id: job.updated_at.timestamp()})
         self._logger.info(
@@ -702,6 +726,7 @@ class JobManager:
 
     async def queue_state(self) -> Dict[str, object]:
         await self.initialize()
+        assert self._redis is not None
         paused = await self._redis.get(self._paused_key)
         reason = await self._redis.get(self._pause_reason_key)
         depth = await self._redis.xlen(self._stream)
@@ -717,18 +742,21 @@ class JobManager:
 
     async def pause(self, reason: Optional[str] = None) -> None:
         await self.initialize()
+        assert self._redis is not None
         await self._redis.set(self._paused_key, 1)
         await self._redis.set(self._pause_reason_key, reason or "Paused via API")
         self._logger.warning("Job queue paused: %s", reason or "Paused via API")
 
     async def resume(self) -> None:
         await self.initialize()
+        assert self._redis is not None
         await self._redis.delete(self._paused_key)
         await self._redis.delete(self._pause_reason_key)
         self._logger.info("Job queue resumed")
 
     async def update_job(self, job_id: str, update: JobStatusUpdate) -> Job:
         await self.initialize()
+        assert self._redis is not None
         data = await self._redis.hgetall(self._job_key(job_id))
         if not data:
             raise KeyError(job_id)
@@ -745,9 +773,9 @@ class JobManager:
                 job.max_attempts = int(
                     update.pipeline.get("max_attempts", job.max_attempts) or job.max_attempts
                 )
-        job.updated_at = datetime.utcnow()
-        await self._redis.hset(self._job_key(job_id), mapping=self._encode_job(job))
-        await self._redis.zadd(self._job_index, {job_id: job.updated_at.timestamp()})
+        job.updated_at = datetime.now(timezone.utc)
+        await self._redis.hset(self._job_key(job.id), mapping=self._encode_job(job))
+        await self._redis.zadd(self._job_index, {job.id: job.updated_at.timestamp()})
         self._logger.debug(
             "Job %s updated: status=%s progress=%s message=%s",
             job_id[:8],
@@ -761,6 +789,7 @@ class JobManager:
         self, job: Job, pipeline: Dict[str, Any], message: Optional[str] = None
     ) -> Job:
         await self.initialize()
+        assert self._redis is not None
         next_attempt = job.attempt + 1
         if pipeline:
             pipeline = dict(pipeline)
@@ -773,13 +802,13 @@ class JobManager:
         job.progress = 0
         job.message = message
         job.pipeline = pipeline
-        job.updated_at = datetime.utcnow()
+        job.updated_at = datetime.now(timezone.utc)
         if job.encoding is None:
             job.encoding = {}
         job.encoding["pipeline"] = pipeline
         payload = self._encode_job(job)
         await self._redis.hset(self._job_key(job.id), mapping=payload)
-        await self._redis.zadd(self._job_index, {job.id: datetime.utcnow().timestamp()})
+        await self._redis.zadd(self._job_index, {job.id: datetime.now(timezone.utc).timestamp()})
         await self._redis.xadd(
             self._stream, {"payload": json.dumps(payload)}, maxlen=10_000, approximate=True
         )
@@ -796,6 +825,7 @@ class JobManager:
 
     async def acknowledge(self, message_id: str, job_id: str) -> None:
         await self.initialize()
+        assert self._redis is not None
         try:
             await self._redis.xack(self._stream, self._group, message_id)
             await self._redis.xdel(self._stream, message_id)
@@ -809,6 +839,7 @@ class JobManager:
 
     async def clear_processed(self) -> int:
         await self.initialize()
+        assert self._redis is not None
         job_ids = await self._redis.zrange(self._job_index, 0, -1)
         removed = 0
         for job_id in job_ids:
@@ -823,6 +854,31 @@ class JobManager:
                 removed += 1
         return removed
 
+    def _find_scan_candidates(self, root: str) -> List[str]:
+        root_path = Path(self._canonical_path(root))
+        if not root_path.exists():
+            return []
+
+        candidates: List[str] = []
+        try:
+            entries = list(root_path.rglob("*.*"))
+        except OSError:
+            return []
+
+        for entry in entries:
+            try:
+                if entry.suffix.lower() not in self._video_extensions:
+                    continue
+                if "-chromecast" in entry.stem.lower():
+                    continue
+                # fs check allowed in thread
+                if self._already_converted(entry, log=False):
+                    continue
+                candidates.append(str(entry))
+            except OSError:
+                continue
+        return candidates
+
     async def scan_directory(
         self,
         library: str,
@@ -832,31 +888,27 @@ class JobManager:
         profile_id: Optional[int] = None,
         encoding: Optional[Dict[str, Any]] = None,
     ) -> List[Job]:
-        root_path = Path(self._canonical_path(root))
-        if not root_path.exists():
-            return []
+        # Offload file discovery
+        candidates = await asyncio.to_thread(self._find_scan_candidates, root)
+
         jobs_added: List[Job] = []
-        entries = list(root_path.rglob("*.*"))
-        for entry in entries:
-            canonical_entry = Path(self._canonical_path(entry))
-            if canonical_entry.suffix.lower() not in self._video_extensions:
+        for path_str in candidates:
+            try:
+                job = await self.add_job(
+                    path_str,
+                    library,
+                    profile,
+                    profile_id=profile_id,
+                    encoding=encoding,
+                )
+                jobs_added.append(job)
+            except ValueError:
                 continue
-            if "-chromecast" in canonical_entry.stem.lower():
-                continue
-            if self._already_converted(canonical_entry):
-                continue
-            job = await self.add_job(
-                str(canonical_entry),
-                library,
-                profile,
-                profile_id=profile_id,
-                encoding=encoding,
-            )
-            jobs_added.append(job)
+
         self._logger.info(
             "Scan complete for %s: %s jobs queued (root=%s)",
             library,
             len(jobs_added),
-            root_path,
+            root,
         )
         return jobs_added

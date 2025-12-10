@@ -55,10 +55,10 @@ def _ensure_utc(timestamp: datetime) -> datetime:
 class LogEntry:
     timestamp: datetime
     level: str
-    severity: str
+    severity: str  # type: ignore
     severity_value: int
     source: str
-    category: str
+    category: str  # type: ignore
     logger: str
     message: str
     request_id: Optional[str] = None
