@@ -101,7 +101,7 @@ class LibraryEntryStore:
             self._Session, self._engine = create_session_factory(db_path)
         else:
             self._Session = session_factory
-            self._engine = engine or self._Session.kw.get("bind")
+            self._engine = engine or self._Session.kw.get("bind")  # type: ignore
             if self._engine is None:
                 _, self._engine = create_session_factory(db_path)
         LOGGER.info("Library entry store initialized at %s", db_path)

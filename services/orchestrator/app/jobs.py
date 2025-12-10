@@ -83,7 +83,7 @@ class JobManager:
         self._logger = logging.getLogger(__name__)
         self._video_extensions = {".mp4", ".m4v", ".mov", ".mkv", ".ts", ".flv"}
         self._redis_url = redis_url
-        self._redis = None
+        self._redis: Optional[redis.Redis] = None
         self._stream = os.environ.get("JOB_QUEUE_STREAM", "job_queue")
         self._group = os.environ.get("JOB_QUEUE_GROUP", "workers")
         self._visibility_timeout = visibility_timeout
@@ -405,15 +405,23 @@ class JobManager:
             pipeline={"max_attempts": 3},  # Simpler pipeline for delete
         )
 
-        encoded = self._encode_job(job)
-        await redis_client.hset(self._job_key(job.id), mapping=encoded)
-        await redis_client.zadd(self._job_index, {job.id: job.updated_at.timestamp()})
+                encoded = self._encode_job(job)
 
-        await redis_client.xadd(
-            self._stream, {"payload": json.dumps(encoded)}, maxlen=10_000, approximate=True
-        )
-        self._logger.info("Queued DELETE job %s for %s", job.id[:8], path)
-        return job
+                await redis_client.hset(self._job_key(job.id), mapping=encoded)
+
+                await redis_client.zadd(self._job_index, {job.id: job.updated_at.timestamp()})
+
+        
+
+                await redis_client.xadd(
+
+                    self._stream, {"payload": json.dumps(encoded)}, maxlen=10_000, approximate=True
+
+                )
+
+                self._logger.info("Queued DELETE job %s for %s", job.id[:8], path)
+
+                return job
 
     STALE_RUNNING_TIMEOUT = 300  # seconds
 
@@ -460,7 +468,7 @@ class JobManager:
                 message_ids.append(entry[0])
         return message_ids
 
-    async def _ack_pending_message(self, message_id: str) -> None:
+    async def _ack_pending_message(self, message_id: Optional[str]) -> None:
         if not message_id:
             return
         assert self._redis is not None

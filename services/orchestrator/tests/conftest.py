@@ -9,7 +9,7 @@ import pytest
 try:
     from app.dependencies import AppDependencies
 except ImportError:
-    AppDependencies = None
+    AppDependencies = None  # type: ignore
 
 
 @pytest.fixture
