@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import asdict, dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from threading import RLock
 from typing import List, Optional
 
@@ -42,13 +42,17 @@ class EncodingProfile(Base):
     audio_codec = Column(String, nullable=False, default="aac")
     audio_bitrate = Column(String, nullable=False, default="192k")
     audio_channels = Column(Integer, nullable=False, default=2)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(
+        DateTime,
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
 
     def to_payload(self) -> dict:
         definition = {}
         try:
-            definition = json.loads(self.definition or "{}")
+            definition = json.loads(self.definition or "{}")  # type: ignore
         except json.JSONDecodeError:
             definition = {}
         gpu = definition.get("gpu") or {
@@ -115,8 +119,12 @@ class LibraryConfig(Base):
     root = Column(String, nullable=False)
     depth = Column(String, nullable=False, default="max")
     profile_id = Column(Integer, ForeignKey("encoding_profiles.id"), nullable=False)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(
+        DateTime,
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
 
     def to_payload(self) -> dict:
         return {
@@ -195,33 +203,33 @@ class ProfileStore:
 
     def create(self, data: ProfileData) -> EncodingProfile:
         with self._lock, self._session() as session:
-            now = datetime.utcnow()
+            now = datetime.now(timezone.utc)
             profile = EncodingProfile(
-                name=data.name,
-                codec=data.gpu.codec,
-                profile_tier=data.gpu.profile,
-                max_resolution=data.gpu.resolution,
-                bitrate=data.gpu.bitrate,
-                max_bitrate=data.gpu.max_bitrate,
-                bufsize=data.gpu.bufsize,
-                preset=data.gpu.preset,
-                cq=data.gpu.cq,
-                rc=data.gpu.rc,
-                level=data.gpu.level,
-                max_fps=data.gpu.max_fps,
-                bframes=data.gpu.bframes,
-                lookahead=data.gpu.lookahead,
-                adaptive_b_frames=data.gpu.adaptive_b_frames,
-                aq=data.gpu.aq,
-                spatial_aq=data.gpu.spatial_aq,
-                temporal_aq=data.gpu.temporal_aq,
-                aq_strength=data.gpu.aq_strength,
-                audio_codec=data.gpu.audio_codec,
-                audio_bitrate=data.gpu.audio_bitrate,
-                audio_channels=data.gpu.audio_channels,
-                definition=json.dumps({"gpu": asdict(data.gpu), "cpu": asdict(data.cpu)}),
-                created_at=now,
-                updated_at=now,
+                name=data.name,  # type: ignore
+                codec=data.gpu.codec,  # type: ignore
+                profile_tier=data.gpu.profile,  # type: ignore
+                max_resolution=data.gpu.resolution,  # type: ignore
+                bitrate=data.gpu.bitrate,  # type: ignore
+                max_bitrate=data.gpu.max_bitrate,  # type: ignore
+                bufsize=data.gpu.bufsize,  # type: ignore
+                preset=data.gpu.preset,  # type: ignore
+                cq=data.gpu.cq,  # type: ignore
+                rc=data.gpu.rc,  # type: ignore
+                level=data.gpu.level,  # type: ignore
+                max_fps=data.gpu.max_fps,  # type: ignore
+                bframes=data.gpu.bframes,  # type: ignore
+                lookahead=data.gpu.lookahead,  # type: ignore
+                adaptive_b_frames=data.gpu.adaptive_b_frames,  # type: ignore
+                aq=data.gpu.aq,  # type: ignore
+                spatial_aq=data.gpu.spatial_aq,  # type: ignore
+                temporal_aq=data.gpu.temporal_aq,  # type: ignore
+                aq_strength=data.gpu.aq_strength,  # type: ignore
+                audio_codec=data.gpu.audio_codec,  # type: ignore
+                audio_bitrate=data.gpu.audio_bitrate,  # type: ignore
+                audio_channels=data.gpu.audio_channels,  # type: ignore
+                definition=json.dumps({"gpu": asdict(data.gpu), "cpu": asdict(data.cpu)}),  # type: ignore
+                created_at=now,  # type: ignore
+                updated_at=now,  # type: ignore
             )
             session.add(profile)
             session.commit()
@@ -234,30 +242,30 @@ class ProfileStore:
             profile = session.get(EncodingProfile, profile_id)
             if profile is None:
                 raise KeyError(profile_id)
-            profile.name = data.name
-            profile.codec = data.gpu.codec
-            profile.profile_tier = data.gpu.profile
-            profile.max_resolution = data.gpu.resolution
-            profile.bitrate = data.gpu.bitrate
-            profile.max_bitrate = data.gpu.max_bitrate
-            profile.bufsize = data.gpu.bufsize
-            profile.preset = data.gpu.preset
-            profile.cq = data.gpu.cq
-            profile.rc = data.gpu.rc
-            profile.level = data.gpu.level
-            profile.max_fps = data.gpu.max_fps
-            profile.bframes = data.gpu.bframes
-            profile.lookahead = data.gpu.lookahead
-            profile.adaptive_b_frames = data.gpu.adaptive_b_frames
-            profile.aq = data.gpu.aq
-            profile.spatial_aq = data.gpu.spatial_aq
-            profile.temporal_aq = data.gpu.temporal_aq
-            profile.aq_strength = data.gpu.aq_strength
-            profile.audio_codec = data.gpu.audio_codec
-            profile.audio_bitrate = data.gpu.audio_bitrate
-            profile.audio_channels = data.gpu.audio_channels
-            profile.definition = json.dumps({"gpu": asdict(data.gpu), "cpu": asdict(data.cpu)})
-            profile.updated_at = datetime.utcnow()
+            profile.name = data.name  # type: ignore
+            profile.codec = data.gpu.codec  # type: ignore
+            profile.profile_tier = data.gpu.profile  # type: ignore
+            profile.max_resolution = data.gpu.resolution  # type: ignore
+            profile.bitrate = data.gpu.bitrate  # type: ignore
+            profile.max_bitrate = data.gpu.max_bitrate  # type: ignore
+            profile.bufsize = data.gpu.bufsize  # type: ignore
+            profile.preset = data.gpu.preset  # type: ignore
+            profile.cq = data.gpu.cq  # type: ignore
+            profile.rc = data.gpu.rc  # type: ignore
+            profile.level = data.gpu.level  # type: ignore
+            profile.max_fps = data.gpu.max_fps  # type: ignore
+            profile.bframes = data.gpu.bframes  # type: ignore
+            profile.lookahead = data.gpu.lookahead  # type: ignore
+            profile.adaptive_b_frames = data.gpu.adaptive_b_frames  # type: ignore
+            profile.aq = data.gpu.aq  # type: ignore
+            profile.spatial_aq = data.gpu.spatial_aq  # type: ignore
+            profile.temporal_aq = data.gpu.temporal_aq  # type: ignore
+            profile.aq_strength = data.gpu.aq_strength  # type: ignore
+            profile.audio_codec = data.gpu.audio_codec  # type: ignore
+            profile.audio_bitrate = data.gpu.audio_bitrate  # type: ignore
+            profile.audio_channels = data.gpu.audio_channels  # type: ignore
+            profile.definition = json.dumps({"gpu": asdict(data.gpu), "cpu": asdict(data.cpu)})  # type: ignore
+            profile.updated_at = datetime.now(timezone.utc)  # type: ignore
             session.add(profile)
             session.commit()
             session.refresh(profile)
@@ -291,7 +299,7 @@ class ProfileStore:
     def upsert(self, data: ProfileData) -> EncodingProfile:
         existing = self.get_by_name(data.name)
         if existing:
-            return self.update(existing.id, data)
+            return self.update(existing.id, data)  # type: ignore
         return self.create(data)
 
 
@@ -316,7 +324,7 @@ class LibraryConfigStore:
     def upsert(self, data: LibraryData) -> LibraryConfig:
         with self._lock, self._session() as session:
             existing = session.scalar(select(LibraryConfig).where(LibraryConfig.name == data.name))
-            now = datetime.utcnow()
+            now = datetime.now(timezone.utc)
             if existing:
                 existing.root = data.root
                 existing.depth = data.depth
@@ -346,7 +354,7 @@ class LibraryConfigStore:
             if library is None:
                 raise KeyError(name)
             library.profile_id = profile_id
-            library.updated_at = datetime.utcnow()
+            library.updated_at = datetime.now(timezone.utc)
             session.add(library)
             session.commit()
             session.refresh(library)

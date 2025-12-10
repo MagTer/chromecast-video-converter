@@ -13,7 +13,7 @@ from contextlib import suppress
 from contextvars import ContextVar
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, Optional, Tuple
 
 import httpx
 from tenacity import retry, stop_after_attempt, wait_exponential
@@ -604,7 +604,7 @@ def _progress_callback_factory(
     loop: asyncio.AbstractEventLoop,
     client: httpx.AsyncClient,
     job_id: str,
-) -> tuple[callable, dict, dict]:
+) -> tuple[Callable[[int], None], dict, dict]:
     last_progress = {"value": 5}
     last_update_ts = {"value": time.monotonic()}
 

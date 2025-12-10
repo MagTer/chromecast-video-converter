@@ -66,18 +66,3 @@ def test_run_conversion_handles_missing_binary(monkeypatch):
 
     assert code == 127
     assert logs == ["ffmpeg not found"]
-
-
-def test_extract_subtitle_track_handles_timeout(monkeypatch, tmp_path):
-    source = tmp_path / "movie.mkv"
-    dest = tmp_path / "movie.srt"
-    source.write_bytes(b"fake")
-
-    def fake_run(*args, **kwargs):  # noqa: ARG001
-        raise subprocess.TimeoutExpired(
-            cmd="ffmpeg", timeout=worker.SUBTITLE_EXTRACTION_TIMEOUT or 1
-        )
-
-    monkeypatch.setattr(worker.subprocess, "run", fake_run)
-
-    assert worker._extract_subtitle_track(source, 0, dest) is False

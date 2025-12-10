@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import importlib
 import os
 import sys
@@ -130,60 +129,61 @@ def test_event_paths_normalized_to_canonical(tmp_path, monkeypatch, fake_redis):
     monkeypatch.setenv("LIBRARY_ROOT_PREFIXES", f"{watch_root},{media_root}")
 
     app, _main = _build_test_app(tmp_path, monkeypatch, fake_redis)
-    client = TestClient(app)
-    profile_id = _first_profile_id(client)
 
-    create_payload = {
-        "name": "mirror",
-        "root": str(media_root),
-        "depth": "max",
-        "profile_id": profile_id,
-    }
-    assert client.post("/api/libraries", json=create_payload).status_code == 201
+    with TestClient(app) as client:
+        profile_id = _first_profile_id(client)
 
-    media_file = media_root / "dup.mkv"
-    media_file.write_bytes(b"demo")
-    watch_path = watch_root / "dup.mkv"
+        create_payload = {
+            "name": "mirror",
+            "root": str(media_root),
+            "depth": "max",
+            "profile_id": profile_id,
+        }
+        assert client.post("/api/libraries", json=create_payload).status_code == 201
 
-    event_body = {
-        "events": [
-            {
-                "path": str(watch_path),
-                "library": "mirror",
-                "event": "created",
-                "is_directory": False,
-            }
-        ]
-    }
-    assert client.post("/api/events", json=event_body).status_code == 200
+        media_file = media_root / "dup.mkv"
+        media_file.write_bytes(b"demo")
+        watch_path = watch_root / "dup.mkv"
 
-    entries = client.get("/api/library/entries", params={"library": "mirror"}).json()
-    assert len(entries) == 1
-    assert entries[0]["path"] == str(media_file)
+        event_body = {
+            "events": [
+                {
+                    "path": str(watch_path),
+                    "library": "mirror",
+                    "event": "created",
+                    "is_directory": False,
+                }
+            ]
+        }
+        assert client.post("/api/events", json=event_body).status_code == 200
 
-    jobs_payload = client.get("/api/jobs").json()
-    assert len(jobs_payload) == 1
-    assert jobs_payload[0]["path"] == str(media_file)
+        entries = client.get("/api/library/entries", params={"library": "mirror"}).json()
+        assert len(entries) == 1
+        assert entries[0]["path"] == str(media_file)
 
-    # Re-send event using canonical path and ensure duplicates are not created.
-    second_event = {
-        "path": str(media_file),
-        "library": "mirror",
-        "event": "created",
-        "is_directory": False,
-    }
-    assert client.post("/api/events", json=second_event).status_code == 200
-    from app.dependencies import get_app_dependencies
+        jobs_payload = client.get("/api/jobs").json()
+        assert len(jobs_payload) == 1
+        assert jobs_payload[0]["path"] == str(media_file)
 
-    get_app_dependencies().job_manager._redis = None
+        # Re-send event using canonical path and ensure duplicates are not created.
+        second_event = {
+            "path": str(media_file),
+            "library": "mirror",
+            "event": "created",
+            "is_directory": False,
+        }
+        assert client.post("/api/events", json=second_event).status_code == 200
 
-    entries_after = client.get("/api/library/entries", params={"library": "mirror"}).json()
-    assert len(entries_after) == 1
-    assert entries_after[0]["path"] == str(media_file)
+        # No need to reset redis manually if using context manager properly
+        # get_app_dependencies().job_manager._redis = None
 
-    jobs_after = client.get("/api/jobs").json()
-    assert len(jobs_after) == 1
-    assert jobs_after[0]["path"] == str(media_file)
+        entries_after = client.get("/api/library/entries", params={"library": "mirror"}).json()
+        assert len(entries_after) == 1
+        assert entries_after[0]["path"] == str(media_file)
+
+        jobs_after = client.get("/api/jobs").json()
+        assert len(jobs_after) == 1
+        assert jobs_after[0]["path"] == str(media_file)
 
 
 def test_purge_inactive_jobs_endpoint(test_app, tmp_path):
@@ -331,12 +331,10 @@ def test_websocket_pushes_library_update(test_app, tmp_path):
 
 def test_clear_jobs_endpoint_removes_completed_jobs(test_app, tmp_path):
     client, main = test_app
-    import app.jobs as jobs_module
-    from app.dependencies import get_app_dependencies
-    from app.services.core import encoding_payload
+    # app.jobs already imported by conftest magic?
+    from app.jobs import JobStatus
 
     profile_id = _first_profile_id(client)
-    profile_name = _first_profile_name(client)
 
     media_root = tmp_path / "clear"
     media_root.mkdir()
@@ -347,34 +345,38 @@ def test_clear_jobs_endpoint_removes_completed_jobs(test_app, tmp_path):
     }
     assert client.post("/api/libraries", json=library_payload).status_code == 201
 
-    source = media_root / "sample.mkv"
+    source = media_root / "movie.mkv"
     source.write_bytes(b"data")
 
-    job = asyncio.run(
-        get_app_dependencies().job_manager.add_job(
-            str(source),
-            "clear-lib",
-            profile_name,
-            profile_id=profile_id,
-            encoding=encoding_payload(profile_id),
-        )
-    )
-    get_app_dependencies().job_manager._redis = None
+    # Create job via event
+    event_body = {
+        "events": [
+            {
+                "path": str(source),
+                "library": "clear-lib",
+                "event": "created",
+                "is_directory": False,
+            }
+        ]
+    }
+    assert client.post("/api/events", json=event_body).status_code == 200
 
-    asyncio.run(
-        get_app_dependencies().job_manager.update_job(
-            job.id,
-            jobs_module.JobStatusUpdate(status=jobs_module.JobStatus.COMPLETED, progress=100),
-        )
-    )
-    get_app_dependencies().job_manager._redis = None
+    # Retrieve job ID
+    jobs = client.get("/api/jobs").json()
+    assert len(jobs) == 1
+    job_id = jobs[0]["id"]
 
+    # Mark as completed via API
+    status_update = {"status": JobStatus.COMPLETED, "progress": 100}
+    assert client.post(f"/api/jobs/{job_id}/status", json=status_update).status_code == 200
+
+    # Clear completed
     response = client.post("/api/jobs/clear")
     assert response.status_code == 200
     assert response.json()["removed"] >= 1
 
     jobs_after = client.get("/api/jobs").json()
-    assert all(item["status"] != jobs_module.JobStatus.COMPLETED for item in jobs_after)
+    assert all(item["status"] != JobStatus.COMPLETED for item in jobs_after)
 
 
 def test_next_job_reports_queue_outage(test_app, monkeypatch):

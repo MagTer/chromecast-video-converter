@@ -1,6 +1,7 @@
+import asyncio
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
@@ -26,11 +27,11 @@ LOGGER = logging.getLogger("orchestrator.core")
 
 
 def _job_elapsed_seconds(job: jobs.Job) -> int:
-    start = job.created_at or datetime.utcnow()
+    start = job.created_at or datetime.now(timezone.utc)
     if job.status in {jobs.JobStatus.COMPLETED, jobs.JobStatus.FAILED}:
-        end = job.updated_at or datetime.utcnow()
+        end = job.updated_at or datetime.now(timezone.utc)
     else:
-        end = datetime.utcnow()
+        end = datetime.now(timezone.utc)
     try:
         return max(0, int((end - start).total_seconds()))
     except Exception:  # noqa: BLE001
@@ -62,7 +63,7 @@ def entry_to_response(entry: LibraryEntry) -> Dict[str, Any]:
 def record_job_history(
     job: jobs.Job, status: str, message: Optional[str] = None, *, completed: bool = False
 ) -> None:
-    completed_at = datetime.utcnow() if completed else None
+    completed_at = datetime.now(timezone.utc) if completed else None
     try:
         get_app_dependencies().job_history_store.record(
             JobHistoryEntry(
@@ -111,7 +112,7 @@ def encoding_payload(profile_id: int) -> Dict[str, Any]:
         raise HTTPException(status_code=404, detail="Profile not found")
     definition = {}
     try:
-        definition = json.loads(profile.definition or "{}")
+        definition = json.loads(profile.definition or "{}")  # type: ignore
     except json.JSONDecodeError:
         definition = {}
     gpu = definition.get("gpu") or profile.to_payload().get("gpu", {})
@@ -198,7 +199,12 @@ async def record_library_entry(
     emit_log: bool = True,
 ) -> Tuple[LibraryEntry, Optional[jobs.Job]]:
     resolved_path = resolve_media_path(path)
-    status, output_path, original_exists = entry_status_for_path(resolved_path)
+
+    # Offload blocking status check
+    status, output_path, original_exists = await asyncio.to_thread(
+        entry_status_for_path, resolved_path
+    )
+
     entry = get_app_dependencies().library_entry_store.upsert(
         EntryUpdate(
             path=str(resolved_path),
@@ -219,7 +225,7 @@ async def record_library_entry(
             encoding=encoding_payload(profile_id),
             emit_log=emit_log,
         )
-        get_app_dependencies().library_entry_store.attach_job(entry.id, job.id)
+        get_app_dependencies().library_entry_store.attach_job(entry.id, job.id)  # type: ignore
         record_job_history(job, JobHistoryStatus.PENDING)
         return entry, job
     return entry, None
@@ -229,7 +235,7 @@ def get_library_profile(library_name: str) -> Tuple[LibraryConfig, EncodingProfi
     library = get_app_dependencies().library_config_store.get(library_name)
     if library is None:
         raise HTTPException(status_code=404, detail="Library not found")
-    profile = get_app_dependencies().profile_store.get(library.profile_id)
+    profile = get_app_dependencies().profile_store.get(library.profile_id)  # type: ignore
     if profile is None:
         raise HTTPException(status_code=404, detail="Profile not found for library")
     return library, profile
@@ -253,9 +259,9 @@ async def process_event_payload(payload: EventPayload) -> Optional[Dict[str, Any
         entry = get_app_dependencies().library_entry_store.update_status(
             str(path),
             LibraryStatus.REMOVED,
-            library=library.name,
-            profile=profile.name,
-            profile_id=profile.id,
+            library=library.name,  # type: ignore
+            profile=profile.name,  # type: ignore
+            profile_id=profile.id,  # type: ignore
             output_path=str(get_app_dependencies().job_manager.output_path(path)),
             original_missing=True,
         )
@@ -268,7 +274,9 @@ async def process_event_payload(payload: EventPayload) -> Optional[Dict[str, Any
         return None
 
     try:
-        entry, job = await record_library_entry(library.name, path, profile.name, profile.id)
+        entry, job = await record_library_entry(
+            library.name, path, profile.name, profile.id  # type: ignore
+        )
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
 
@@ -282,6 +290,21 @@ async def process_event_payload(payload: EventPayload) -> Optional[Dict[str, Any
     return response
 
 
+def _reconcile_scan_helper(root_path: Path) -> Tuple[Set[str], List[Path]]:
+    seen: Set[str] = set()
+    valid_entries: List[Path] = []
+    try:
+        for entry in root_path.rglob("*.*"):
+            resolved_entry = resolve_media_path(entry)
+            if not should_track_file(resolved_entry):
+                continue
+            seen.add(str(resolved_entry))
+            valid_entries.append(resolved_entry)
+    except OSError:
+        pass
+    return seen, valid_entries
+
+
 async def reconcile_library(library_name: str, root: str, profile: str, profile_id: int) -> None:
     root_path = resolve_media_path(root)
     if not root_path.exists():
@@ -289,15 +312,15 @@ async def reconcile_library(library_name: str, root: str, profile: str, profile_
         get_app_dependencies().library_entry_store.mark_missing(library_name, set())
         return
 
-    seen: Set[str] = set()
+    # Offload recursive scan
+    seen, valid_entries = await asyncio.to_thread(_reconcile_scan_helper, root_path)
+
     queued = 0
     converted = 0
     tracked_pending = 0
-    for entry in root_path.rglob("*.*"):
-        resolved_entry = resolve_media_path(entry)
-        if not should_track_file(resolved_entry):
-            continue
-        seen.add(str(resolved_entry))
+
+    for resolved_entry in valid_entries:
+        # emit_log=False to reduce noise during bulk scans
         library_entry, job = await record_library_entry(
             library_name, resolved_entry, profile, profile_id, emit_log=False
         )
@@ -307,6 +330,7 @@ async def reconcile_library(library_name: str, root: str, profile: str, profile_
             converted += 1
         elif library_entry.status == LibraryStatus.PENDING:
             tracked_pending += 1
+
     removed = get_app_dependencies().library_entry_store.mark_missing(library_name, seen)
     LOGGER.info(
         (

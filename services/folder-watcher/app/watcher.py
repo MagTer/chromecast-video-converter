@@ -89,12 +89,12 @@ LOGGER = configure_logging()
 
 # Event Handling
 class WatcherEventHandler(FileSystemEventHandler):
-    def __init__(self, library_name: str, queue: asyncio.Queue):
+    def __init__(self, library_name: str, queue: asyncio.Queue[Dict[str, Any]]):
         self.library_name = library_name
         self.queue = queue
 
     def _process_event(self, event: FileSystemEvent, event_type: str):
-        path = Path(event.src_path)
+        path = Path(str(event.src_path))
         is_directory = event.is_directory
 
         # Determine event type mapping
@@ -172,7 +172,7 @@ class WatcherEventHandler(FileSystemEventHandler):
 class EventManager:
     def __init__(self, client: httpx.AsyncClient):
         self.client = client
-        self.queue = asyncio.Queue()
+        self.queue: asyncio.Queue[Dict[str, Any]] = asyncio.Queue()
 
     async def _send_payload(self, events: List[Dict[str, Any]]) -> bool:
         payload = {"events": events}

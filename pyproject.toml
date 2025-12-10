@@ -1,3 +1,46 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "chromecast-converter-monorepo"
+version = "0.1.0"
+description = "Monorepo for Chromecast Video Converter services"
+requires-python = ">=3.10"
+dependencies = [
+    "fastapi",
+    "uvicorn[standard]",
+    "pydantic",
+    "pyyaml",
+    "jinja2",
+    "httpx",
+    "sqlalchemy",
+    "redis[hiredis]",
+    "tenacity",
+    "watchdog"
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "ruff",
+    "black",
+    "mypy",
+    "types-requests",
+    "types-redis",
+    "fakeredis",
+    "pytest-asyncio",
+    "httpx"
+]
+
+[tool.pytest.ini_options]
+asyncio_default_fixture_loop_scope = "function"
+testpaths = [
+    "services/orchestrator/tests",
+    "services/gpu-ffmpeg/tests",
+    "services/folder-watcher/tests"
+]
+
 [tool.ruff]
 line-length = 100
 
@@ -7,5 +50,15 @@ select = ["E", "F", "W", "I", "C"]
 [tool.black]
 line-length = 100
 
-[tool.pytest.ini_options]
-asyncio_default_fixture_loop_scope = "function"
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["services*"]
+exclude = ["data*", "media*", "config*", "docs*", "scripts*", "tests*"]
+
+[tool.mypy]
+files = "."
+explicit_package_bases = true
+namespace_packages = true
+# We need to ignore the duplicate 'app' module issue for now or exclude one
+# But ideally, explicit_package_bases helps if we define MYPYPATH correctly.
+# Given the user just asked for the pyproject structure, I will add some basic config.

@@ -3,7 +3,7 @@ import re
 from dataclasses import dataclass
 from fractions import Fraction
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Sequence
 
 from .capabilities import EncoderCapabilities, FfmpegCapabilities
 
@@ -314,7 +314,7 @@ class FFmpegBuilder:
         title = (stream.title or "").lower()
         return bool(stream.disposition.comment or "commentary" in title)
 
-    def _pick_best_stream(self, candidates: list[AudioStreamInfo | SubtitleStreamInfo]):
+    def _pick_best_stream(self, candidates: Sequence[AudioStreamInfo | SubtitleStreamInfo]):
         if not candidates:
             return None
         original = next((s for s in candidates if s.disposition.original), None)
@@ -326,7 +326,7 @@ class FFmpegBuilder:
         return candidates[0]
 
     def _select_priority_streams(  # noqa: C901
-        self, stream_list: list[AudioStreamInfo | SubtitleStreamInfo]
+        self, stream_list: Sequence[AudioStreamInfo | SubtitleStreamInfo]
     ) -> tuple[list[AudioStreamInfo | SubtitleStreamInfo], int | None]:
         mapped: list[AudioStreamInfo | SubtitleStreamInfo] = []
         seen_inputs: set[int] = set()
