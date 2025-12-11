@@ -184,7 +184,7 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
       if (status === "pending") {
         return 0;
       }
-      const startTimeStr = job?.started_at || job?.created_at;
+      const startTimeStr = job?.started_at;
       const start = startTimeStr ? new Date(startTimeStr) : null;
 
       if (!start || Number.isNaN(start.getTime())) {
