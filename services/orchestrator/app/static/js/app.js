@@ -775,6 +775,7 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
           <td class="status-${status}">${statusLabel}</td>
           <td>${elapsed}</td>
           <td class="path-cell" title="${normalizedPath}">${fileName}</td>
+          <td>${pipelineText}</td>
           <td>${progress}%</td>
         `;
         jobRows.appendChild(tr);
