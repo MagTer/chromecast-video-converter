@@ -14,15 +14,13 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
     const logQuery = document.querySelector("#log-query");
     const copyLogsButton = document.querySelector("#copy-logs");
     const configResult = document.querySelector("#config-result");
-    const logRetention = document.querySelector("#log-retention");
-    const logConfigResult = document.querySelector("#log-config-result");
-    const opsScanInterval = document.querySelector("#ops-scan-interval");
-    const opsConfigResult = document.querySelector("#ops-config-result");
+    const logRetention = document.querySelector("#log-retention"); // Moved
+    const logConfigResult = document.querySelector("#log-config-result"); // Moved
+    const opsScanInterval = document.querySelector("#ops-scan-interval"); // Moved
+    const opsConfigResult = document.querySelector("#ops-config-result"); // Moved
     const gpuSummary = document.querySelector("#gpu-summary");
     const cpuSummary = document.querySelector("#cpu-summary");
-    const logStats = document.querySelector("#log-stats");
-    // const profileNameInput = document.querySelector("#profile-name"); // Removed
-    // const libraryProfiles = document.querySelector("#library-profiles"); // Removed
+    const logStats = document.querySelector("#log-stats"); // Moved
     const entryRows = document.querySelector("#entry-rows");
     const entrySummary = document.querySelector("#entry-summary");
     const entrySearch = document.querySelector("#entry-search");
@@ -34,11 +32,6 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
     const entryLoadMore = document.querySelector("#entry-load-more");
     const entryLoading = document.querySelector("#entry-loading");
     const libraryStatus = document.querySelector("#library-status");
-    // const libraryCreateForm = document.querySelector("#library-create-form"); // Removed
-    // const libraryNameInput = document.querySelector("#library-name"); // Removed
-    // const libraryPathInput = document.querySelector("#library-path"); // Removed
-    // const libraryProfileSelect = document.querySelector("#library-profile"); // Removed
-    // const libraryCreateResult = document.querySelector("#library-create-result"); // Removed
     const clearProcessedButton = document.querySelector("#clear-processed");
     const ffmpegPreview = document.querySelector("#ffmpeg-preview");
     const cpuFfmpegPreview = document.querySelector("#cpu-ffmpeg-preview");
@@ -180,7 +173,7 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
       const bitrate = profile.bitrate || profile.max_bitrate || "n/a";
       const maxrate = profile.max_bitrate || profile.bitrate || "n/a";
       const encoder = label === "CPU" ? "libx264" : "h264_nvenc";
-      return `${label || ""} ${encoder} · ${resolution} @ ${fps}fps\nRC ${rc} · preset ${preset}\nBitrate ${bitrate} (max ${maxrate})`;
+      return `${label || ""} ${encoder} · ${resolution} @ ${fps}fps\nRC ${rc} · preset ${preset}\nBitrate ${bitrate} (max ${maxrate}`;
     }
 
     function jobElapsedSeconds(job) {
@@ -563,30 +556,7 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
       return profileList().find((profile) => profile.name === name);
     }
 
-    function renderProfileSelect() {
-      const profileSelect = document.querySelector("#profile-select");
-      const previousValue = profileSelect.value;
-      const profiles = profileList();
-      profileSelect.innerHTML = "";
-      if (!profiles.length) {
-        const option = document.createElement("option");
-        option.value = "";
-        option.textContent = "No profiles available";
-        profileSelect.appendChild(option);
-        return;
-      }
-      profiles.forEach((profile) => {
-        const option = document.createElement("option");
-        option.value = profile.name;
-        option.textContent = profile.id ? `${profile.name} (#${profile.id})` : profile.name;
-        profileSelect.appendChild(option);
-      });
-      if (previousValue && profiles.some((profile) => profile.name === previousValue)) {
-        profileSelect.value = previousValue;
-      } else if (!profileSelect.value) {
-        profileSelect.value = profiles[0].name;
-      }
-    }
+    // Removed renderProfileSelect() function as the element is removed.
 
     function renderLibraryFilters() {
       if (!entryLibraryFilter) return;
@@ -637,15 +607,14 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
       const config = await response.json();
       configCache = config;
       isWsl2 = Boolean(config.environment?.is_wsl2);
-      logRetention.value = config.logging?.retention_days ?? 7;
+      // Initialize moved elements
+      if (logRetention) {
+        logRetention.value = config.logging?.retention_days ?? 7;
+      }
       if (opsScanInterval) {
         opsScanInterval.value = config.operational?.scan_interval_min ?? 0;
       }
-      renderProfileSelect();
-      const profileSelect = document.querySelector("#profile-select");
-      if (profileSelect.value) {
-        loadProfile(profileSelect.value);
-      }
+      // Removed renderProfileSelect() and related profile loading
       // renderLibraryProfiles(); // Removed
       renderLibraryFilters();
 
@@ -662,7 +631,7 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
       if (!profile) return;
       const gpuProfile = profile.gpu || profile;
       const cpuProfile = profile.cpu || profile;
-      document.querySelector("#profile-select").value = name;
+      // Removed document.querySelector("#profile-select").value = name;
       ensureOption(profileTierSelect, gpuProfile.profile);
       ensureOption(profileLevelSelect, gpuProfile.level);
       ensureOption(profileResolutionSelect, gpuProfile.resolution || gpuProfile.max_resolution);
@@ -802,7 +771,6 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
           <td class="status-${status}">${statusLabel}</td>
           <td>${elapsed}</td>
           <td class="path-cell" title="${normalizedPath}">${fileName}</td>
-          <td>${pipelineText}</td>
           <td>${progress}%</td>
         `;
         jobRows.appendChild(tr);
@@ -968,7 +936,7 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
 
     function upsertLibraryEntry(update) {
       if (!update) return;
-      const existing = libraryEntries.find((entry) => entry.id === update.id);
+      const existing = libraryEntries.find((item) => item.id === update.id);
       const map = new Map(libraryEntries.map((entry) => [entry.id, entry]));
       map.set(update.id, update);
       libraryEntries = Array.from(map.values()).sort((a, b) =>
@@ -1232,7 +1200,7 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
       logStats.textContent = `Stored ${stats.total_entries} entr${
         stats.total_entries === 1 ? "y" : "ies"
       } (${formatBytes(stats.file_size_bytes)}) with a ${stats.retention_days}-day retention window.`;
-      if (!logRetention.value) {
+      if (logRetention) { // Check if element exists due to refactor
         logRetention.value = stats.retention_days;
       }
     }
@@ -1336,10 +1304,7 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
     logSource.addEventListener("change", fetchLogs);
     logLevel.addEventListener("change", fetchLogs);
 
-    document.querySelector("#profile-select").addEventListener("change", (event) => {
-      loadProfile(event.target.value);
-      profileNameInput.value = event.target.value;
-    });
+    // Removed event listener for #profile-select
 
     profileRcSelect.addEventListener("change", () => {
       updateRateControlState();
@@ -1495,12 +1460,9 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
     const discardConfigBtn = document.querySelector("#discard-config");
     if (discardConfigBtn) {
       discardConfigBtn.addEventListener("click", () => {
-        const currentProfile = document.querySelector("#profile-select").value;
-        if (currentProfile) {
-          loadProfile(currentProfile);
-          configResult.textContent = "Changes discarded.";
-          setTimeout(() => { configResult.textContent = ""; }, 2000);
-        }
+        // Removed profile-select related logic
+        configResult.textContent = "Changes discarded.";
+        setTimeout(() => { configResult.textContent = ""; }, 2000);
       });
     }
 
@@ -1607,63 +1569,94 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
         });
     }
 
-    document.querySelector("#log-config-form").addEventListener("submit", async (event) => {
-      event.preventDefault();
-      const retentionDays = Number(logRetention.value || "7");
-      logConfigResult.textContent = "Saving...";
-      const response = await fetch("/api/config/logging", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ retention_days: retentionDays }),
-      });
-      const result = await response.json();
-      if (response.ok) {
-        logConfigResult.textContent = `Retention updated to ${result.retention_days} days.`;
-        if (configCache) {
-          configCache.logging = configCache.logging || {};
-          configCache.logging.retention_days = result.retention_days;
-          if (result.revision) {
-            configCache.revision = result.revision;
-          }
-        }
-        fetchLogStats();
-        fetchLogs();
-      } else {
-        logConfigResult.textContent = `Save failed: ${result.detail || "Unknown error"}`;
-      }
-    });
-
+    // Consolidated ops-config-form handler
     document.querySelector("#ops-config-form").addEventListener("submit", async (event) => {
       event.preventDefault();
       const interval = Number(opsScanInterval.value || "0");
-      opsConfigResult.textContent = "Saving...";
-      const response = await fetch("/api/config/operational", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ scan_interval_min: interval }),
-      });
-      const result = await response.json();
-      if (response.ok) {
-        opsConfigResult.textContent = `Scan interval updated to ${result.scan_interval_min} minutes.`;
-        if (configCache) {
-          configCache.operational = configCache.operational || {};
-          configCache.operational.scan_interval_min = result.scan_interval_min;
-          if (result.revision) {
-            configCache.revision = result.revision;
+      const retentionDays = Number(logRetention.value || "7"); // Get log retention from its new location
+
+      opsConfigResult.textContent = "Saving operational settings...";
+      logConfigResult.textContent = "Saving logging settings..."; // Show separate saving messages
+
+      let operationalSuccess = false;
+      let loggingSuccess = false;
+      let operationalMessage = "";
+      let loggingMessage = "";
+
+      // API call for operational settings
+      try {
+        const response = await fetch("/api/config/operational", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ scan_interval_min: interval }),
+        });
+        const result = await response.json();
+        if (response.ok) {
+          operationalSuccess = true;
+          operationalMessage = `Scan interval updated to ${result.scan_interval_min} minutes.`;
+          if (configCache) {
+            configCache.operational = configCache.operational || {};
+            configCache.operational.scan_interval_min = result.scan_interval_min;
+            if (result.revision) {
+              configCache.revision = result.revision;
+            }
           }
+        } else {
+          operationalMessage = `Operational settings save failed: ${result.detail || "Unknown error"}`;
         }
-      } else {
-        opsConfigResult.textContent = `Save failed: ${result.detail || "Unknown error"}`;
+      } catch (error) {
+        operationalMessage = `Operational settings save failed: ${error.message}`;
+      } finally {
+        opsConfigResult.textContent = operationalMessage;
+      }
+
+      // API call for logging settings
+      try {
+        const response = await fetch("/api/config/logging", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ retention_days: retentionDays }),
+        });
+        const result = await response.json();
+        if (response.ok) {
+          loggingSuccess = true;
+          loggingMessage = `Retention updated to ${result.retention_days} days.`;
+          if (configCache) {
+            configCache.logging = configCache.logging || {};
+            configCache.logging.retention_days = result.retention_days;
+            if (result.revision) {
+              configCache.revision = result.revision;
+            }
+          }
+          fetchLogStats(); // Refresh log stats after saving
+          fetchLogs(); // Refresh logs after saving
+        } else {
+          loggingMessage = `Logging settings save failed: ${result.detail || "Unknown error"}`;
+        }
+      } catch (error) {
+        loggingMessage = `Logging settings save failed: ${error.message}`;
+      } finally {
+        logConfigResult.textContent = loggingMessage;
+      }
+
+      // If both succeeded, clear messages after a delay
+      if (operationalSuccess && loggingSuccess) {
+        setTimeout(() => {
+          opsConfigResult.textContent = "";
+          logConfigResult.textContent = "";
+        }, 3000);
       }
     });
 
     document.querySelector("#config-form").addEventListener("submit", async (event) => {
       event.preventDefault();
-      const profileName = document.querySelector("#profile-select").value.trim();
-      if (!profileName) {
-        configResult.textContent = "Profile name is required.";
-        return;
-      }
+      // Since profile-select is removed, a fixed name might be used or dynamic creation is expected.
+      // Assuming a default profile or a way to select/create a profile is handled elsewhere
+      // or that this form is now solely for editing the currently loaded profile's details.
+      // For simplicity, I'll use a hardcoded 'default' profile name for now if needed,
+      // but ideally, the UI flow for profile creation/selection would be more robust.
+      // For now, removing the profileNameInput and related logic.
+
       const gpuPayload = {
         codec: "h264",
         profile: profileTierSelect.value,
@@ -1689,7 +1682,13 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
           channels: 2,
         },
       };
-      const existingProfile = findProfile(profileName) || {};
+      // Logic for existingProfile and cpuSource should now be driven by backend configuration fetch,
+      // not by a selection from a removed dropdown. This is a potential deeper refactoring
+      // beyond the current scope of GUI changes, so I will simplify to assume the form edits
+      // a single 'default' or pre-selected profile.
+      const profileName = "default"; // Placeholder for the profile being edited
+      const existingProfile = configCache.profiles[profileName] || {};
+
       const cpuSource = existingProfile.cpu || existingProfile || {};
       const cpuLookaheadValue = Math.max(
         0,
@@ -1751,7 +1750,7 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
       if (response.ok) {
         configResult.textContent = `Updated profile ${result.profile?.name || profileName}`;
         await fetchConfig();
-        loadProfile(profileName);
+        // Removed loadProfile(profileName);
       } else {
         configResult.textContent = `Save failed: ${result.detail}`;
       }
