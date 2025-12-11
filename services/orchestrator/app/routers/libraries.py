@@ -105,9 +105,9 @@ async def create_library(
     background_tasks.add_task(
         reconcile_library, library.name, library.root, profile.name, profile.id
     )
-    payload = {**library.to_payload(), "profile": profile.name}
-    await emit_library_update("created", payload)
-    return JSONResponse(payload, headers=cache_headers(snapshot), status_code=201)
+    response_payload = {**library.to_payload(), "profile": profile.name}
+    await emit_library_update("created", response_payload)
+    return JSONResponse(response_payload, headers=cache_headers(snapshot), status_code=201)
 
 
 @router.patch("/api/libraries/{library_name}")
@@ -208,9 +208,9 @@ async def reprocess_entry(
         profile_id = profile.id
         profile_name = profile.name
     else:
-        profile = get_app_dependencies().profile_store.get(profile_id)
-        if profile:
-            profile_name = profile.name
+        fetched_profile = get_app_dependencies().profile_store.get(profile_id)
+        if fetched_profile:
+            profile_name = fetched_profile.name
     if profile_id is None:
         raise HTTPException(status_code=404, detail="Profile not available for entry")
     job = await get_app_dependencies().job_manager.add_job(
@@ -234,8 +234,8 @@ async def reprocess_entry(
     await NOTIFIER.broadcast({"type": "entry-update", "entry": entry_payload})
     job_payload = job_to_response(job)
     await NOTIFIER.broadcast({"type": "job-update", "job": job_payload})
-    payload = {"entry": entry_payload, "job": job_payload}
-    return JSONResponse(jsonable_encoder(payload))
+    response_payload = {"entry": entry_payload, "job": job_payload}
+    return JSONResponse(jsonable_encoder(response_payload))
 
 
 @router.post("/api/library/entries/reprocess-all")
