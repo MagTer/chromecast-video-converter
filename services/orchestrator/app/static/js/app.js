@@ -793,15 +793,29 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
     }
 
     async function fetchJobs() {
-      const response = await fetch("/api/jobs");
-      jobCache = await response.json();
-      renderJobTable();
+      try {
+        const response = await fetch("/api/jobs");
+        if (response.ok) {
+          const data = await response.json();
+          jobCache = Array.isArray(data) ? data : [];
+          renderJobTable();
+        }
+      } catch (e) {
+        console.error("fetchJobs failed", e);
+      }
     }
 
     async function fetchHistory() {
-      const response = await fetch("/api/history?limit=50");
-      historyCache = await response.json();
-      renderHistoryTable();
+      try {
+        const response = await fetch("/api/history?limit=50");
+        if (response.ok) {
+          const data = await response.json();
+          historyCache = Array.isArray(data) ? data : [];
+          renderHistoryTable();
+        }
+      } catch (e) {
+        console.error("fetchHistory failed", e);
+      }
     }
 
     function renderHistoryTable() {
@@ -902,25 +916,31 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
       if (logCategory.value) params.set("category", logCategory.value);
       if (logLevel.value) params.set("min_severity", logLevel.value);
       if (logQuery.value) params.set("query", logQuery.value);
-      const response = await fetch(`/api/logs?${params.toString()}`);
-      const entries = await response.json();
-      logCacheEntries = entries || [];
-      logList.innerHTML = "";
-      entries.forEach((entry) => {
-        const container = document.createElement("div");
-        container.className = "log-entry";
-        const severity = entry.severity || entry.level;
-        container.innerHTML = `
-          <div class="log-meta">
-            <span class="log-pill ${severityClass(severity)}">${severity}</span>
-            <span class="log-pill pill-muted">${entry.source || entry.logger}</span>
-            <span class="log-pill pill-outline">${entry.category || entry.logger}</span>
-            <span class="log-timestamp log-pill pill-outline">${formatLogTimestamp(entry.timestamp)}</span>
-          </div>
-          <div class="log-message">${entry.message}</div>
-        `;
-        logList.appendChild(container);
-      });
+      try {
+        const response = await fetch(`/api/logs?${params.toString()}`);
+        if (response.ok) {
+          const entries = await response.json();
+          logCacheEntries = Array.isArray(entries) ? entries : [];
+          logList.innerHTML = "";
+          logCacheEntries.forEach((entry) => {
+            const container = document.createElement("div");
+            container.className = "log-entry";
+            const severity = entry.severity || entry.level;
+            container.innerHTML = `
+              <div class="log-meta">
+                <span class="log-pill ${severityClass(severity)}">${severity}</span>
+                <span class="log-pill pill-muted">${entry.source || entry.logger}</span>
+                <span class="log-pill pill-outline">${entry.category || entry.logger}</span>
+                <span class="log-timestamp log-pill pill-outline">${formatLogTimestamp(entry.timestamp)}</span>
+              </div>
+              <div class="log-message">${entry.message}</div>
+            `;
+            logList.appendChild(container);
+          });
+        }
+      } catch (e) {
+        console.error("fetchLogs failed", e);
+      }
     }
 
     function summarizeEntries(entries) {
