@@ -6,7 +6,6 @@ PORT="${PORT:-9000}"
 
 DATA_DIR="${DATA_DIR:-/app/data}"
 mkdir -p "${DATA_DIR}"
-rm -f "${DATA_DIR}/config.db" "${DATA_DIR}/library.db" "${DATA_DIR}/events.db"
 
 if [[ -n "${LIBRARY_DB_PATH:-}" ]]; then
   DB_PATH="${LIBRARY_DB_PATH}"
@@ -16,7 +15,5 @@ fi
 
 DATABASE_URL="${DATABASE_URL:-sqlite:////${DB_PATH#'/'}}"
 export DATABASE_URL LIBRARY_DB_PATH DATA_DIR
-
-rm -f "${DATA_DIR}/config.db" "${DATA_DIR}/library.db" "${DATA_DIR}/events.db"
 
 exec uvicorn app.main:app --host 0.0.0.0 --port "${PORT}"

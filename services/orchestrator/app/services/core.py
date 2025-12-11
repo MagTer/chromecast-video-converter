@@ -27,7 +27,9 @@ LOGGER = logging.getLogger("orchestrator.core")
 
 
 def _job_elapsed_seconds(job: jobs.Job) -> int:
-    start = job.created_at or datetime.now(timezone.utc)
+    start = job.started_at
+    if not start:
+        return 0
     if job.status in {jobs.JobStatus.COMPLETED, jobs.JobStatus.FAILED}:
         end = job.updated_at or datetime.now(timezone.utc)
     else:

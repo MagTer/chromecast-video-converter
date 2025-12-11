@@ -163,7 +163,7 @@
         </div>
       </header>
       <div class="panel" style="display:grid; gap:0.75rem;">
-        <div class="filters">
+        <div class="filters grid-two">
           <label style="flex:1; min-width:260px;">
             Search path or library
             <input id="entry-search" placeholder="/library/movies/..." />
@@ -225,23 +225,10 @@
           <button id="reset-config" type="button" class="secondary danger">Reset to Defaults</button>
         </div>
       </header>
-      <div class="panel" style="margin-bottom:1rem;">
-        <header style="margin-bottom:0.5rem;">
-          <h3 style="margin:0;">Queue maintenance</h3>
-          <p class="hint" style="margin:0;">Use these tools to clear Redis entries when workers are offline.</p>
-        </header>
-        <div class="button-group" style="margin-bottom:0.5rem;">
-          <button id="purge-inactive-jobs" type="button" class="danger">Purge inactive jobs</button>
-        </div>
-        <p id="purge-jobs-result" class="hint"></p>
-      </div>
       <div class="panel">
         <form id="config-form">
           <div class="grid-two">
-            <label>
-              Profile preset
-              <select id="profile-select"></select>
-            </label>
+            <!-- Removed "Profile preset" label and select -->
             <label>
               <div class="label-title">
                 Rate control
@@ -662,49 +649,43 @@
         <header>
           <div>
             <h3 style="margin:0">Operational settings</h3>
-            <p class="hint" style="margin:0">Configure background tasks and limits.</p>
+            <p class="hint" style="margin:0">Configure background tasks, job maintenance, and logging.</p>
           </div>
         </header>
-        <form id="ops-config-form" class="stacked">
+        <form id="ops-config-form" class="stacked" style="margin-bottom: 2rem;">
           <div class="grid-two">
             <label>
               Scan interval (minutes)
-              <span class="hint" style="margin-top:0;font-size:0.8rem;">0 to disable</span>
               <input id="ops-scan-interval" type="number" min="0" max="1440" value="0" />
+              <span class="hint" style="margin-top:0.25rem; font-size:0.8rem;">Set to 0 to disable automatic scanning.</span>
             </label>
-          </div>
-          <div style="display:flex; gap:0.5rem; align-items:center;">
-            <button type="submit">Save settings</button>
-            <span id="ops-config-result" class="hint"></span>
-          </div>
-        </form>
-      </div>
-      <div class="panel">
-        <header>
-          <div>
-            <h3 style="margin:0">Logging retention</h3>
-            <p class="hint" style="margin:0">Centralized log storage across orchestrator and workers.</p>
-          </div>
-        </header>
-        <form id="log-config-form" class="stacked">
-          <div class="grid-two">
             <label>
               Retain logs (days)
               <input id="log-retention" type="number" min="1" max="90" value="7" />
+              <span id="log-stats" class="hint" style="margin-top:0.25rem; font-size:0.8rem;">Loading log stats...</span>
             </label>
-            <div>
-              <p id="log-stats" class="hint" style="margin:0">Loading log stats…</p>
-            </div>
           </div>
-          <div style="display:flex; gap:0.5rem; align-items:center;">
-            <button type="submit">Save log settings</button>
+          <div style="display:flex; gap:0.5rem; align-items:center; margin-top: 1rem;">
+            <button type="submit">Save settings</button>
+            <span id="ops-config-result" class="hint"></span>
             <span id="log-config-result" class="hint"></span>
           </div>
         </form>
+
+        <div style="border-top: 1px solid var(--border-color, #e5e7eb); padding-top: 1.5rem;">
+          <h4 style="margin:0 0 0.5rem 0;">Maintenance Actions</h4>
+          <div style="display:flex; align-items:center; gap: 1rem; flex-wrap: wrap;">
+              <p class="hint" style="margin:0; flex:1; min-width: 250px;">
+                  Clear stuck or zombie jobs from the queue. This does not affect active workers.
+              </p>
+              <button id="purge-inactive-jobs" type="button" class="danger">Purge inactive jobs</button>
+          </div>
+          <p id="purge-jobs-result" class="hint" style="margin-top:0.5rem; min-height: 1.2em;"></p>
+        </div>
       </div>
     </section>
   </main>
 
-    <script type="module" src="/static/js/app.js?v=3" defer></script>
+    <script type="module" src="/static/js/app.js?v=5" defer></script>
 </body>
 </html>
