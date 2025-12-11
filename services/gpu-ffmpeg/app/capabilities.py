@@ -128,6 +128,7 @@ class FfmpegCapabilities:
         )
 
     def _choices_from_help(self, help_text: str, option: str) -> Set[str]:
+        # 1. Try legacy "choices:" pattern first (inline)
         matches = re.findall(rf"-{option}\b[^\n]*choices:?\s*([\w_, ]+)", help_text, re.IGNORECASE)
         choices: set[str] = set()
         for match in matches:
@@ -136,6 +137,45 @@ class FfmpegCapabilities:
                 cleaned = cleaned.split(" ")[0]
                 if cleaned:
                     choices.add(cleaned.lower())
+
+        if choices:
+            return choices
+
+        # 2. Try indented list pattern
+        return self._parse_indented_choices(help_text, option)
+
+    def _parse_indented_choices(self, help_text: str, option: str) -> Set[str]:
+        choices: set[str] = set()
+        lines = help_text.splitlines()
+        in_option_block = False
+        # Matches "-option" at start of line (ignoring whitespace).
+        # Ensures we match the exact option name (e.g., "-rc" vs "-rc-lookahead")
+        # by looking for space, <, or end of line after the name.
+        option_regex = re.compile(rf"^\s*-{option}(?:\s|<|$)")
+
+        for line in lines:
+            stripped = line.strip()
+            if not stripped:
+                continue
+
+            # Check if this line defines our option
+            if option_regex.match(line):
+                in_option_block = True
+                continue
+
+            # If we are in the block, check for indented choices
+            if in_option_block:
+                # If we hit another option (starts with -), we are done
+                if stripped.startswith("-"):
+                    break
+
+                # Check for indented choice line.
+                # Format: "     constqp         0            E..V......."
+                # We expect significant indentation (at least 2 spaces).
+                match = re.match(r"^\s{2,}([a-zA-Z0-9_]+)\s", line)
+                if match:
+                    choices.add(match.group(1).lower())
+
         return choices
 
     def supports_filter(self, name: str) -> bool:
