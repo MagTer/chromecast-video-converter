@@ -16,6 +16,7 @@ SERVICES = ["services/orchestrator", "services/gpu-ffmpeg", "services/folder-wat
 def check_venv():
     """Ensure we are running in a virtual environment."""
     if os.environ.get("CI"):
+        print(f"{BLUE}ℹ️  Running in CI environment, skipping venv check.{RESET}")
         return
 
     if sys.prefix == sys.base_prefix:
@@ -25,8 +26,10 @@ def check_venv():
         sys.exit(1)
 
 
-def run_command(command, cwd=None, env=None, description=None):
-    """Run a command and return its exit code."""
+def run_python_tool(tool_name, args, cwd=None, env=None, description=None):
+    """Run a python tool as a module using the current interpreter."""
+    command = [sys.executable, "-m", tool_name] + args
+
     if description:
         print(f"\n{BLUE}=== {description} ==={RESET}")
     else:
@@ -35,9 +38,6 @@ def run_command(command, cwd=None, env=None, description=None):
     try:
         # Use current env if not provided, else merge
         run_env = os.environ.copy()
-        # Ensure venv bin is in PATH
-        venv_bin = os.path.join(sys.prefix, "bin")
-        run_env["PATH"] = venv_bin + os.pathsep + run_env.get("PATH", "")
 
         if env:
             run_env.update(env)
@@ -62,9 +62,9 @@ def main():
 
     # 1. Global Linters (Fast, file-based)
     print(f"\n{BLUE}📊 Running Global Linters...{RESET}")
-    if run_command(["ruff", "check", "."], description="Global Ruff") != 0:
+    if run_python_tool("ruff", ["check", "."], description="Global Ruff") != 0:
         failures.append("Global Ruff")
-    if run_command(["black", "--check", "."], description="Global Black") != 0:
+    if run_python_tool("black", ["--check", "."], description="Global Black") != 0:
         failures.append("Global Black")
 
     # 2. Per-Service Type Checking & Tests (Isolated)
@@ -81,10 +81,10 @@ def main():
         service_env = {"PYTHONPATH": str(service_path)}
 
         # Mypy
-        # Run inside the service dir to capture local config if any, or point to it
         if (
-            run_command(
-                ["mypy", "."],
+            run_python_tool(
+                "mypy",
+                ["."],
                 cwd=service_path,
                 env=service_env,
                 description=f"Mypy ({service_name})",
@@ -95,8 +95,9 @@ def main():
 
         # Pytest
         if (
-            run_command(
-                ["pytest"],
+            run_python_tool(
+                "pytest",
+                [],
                 cwd=service_path,
                 env=service_env,
                 description=f"Pytest ({service_name})",

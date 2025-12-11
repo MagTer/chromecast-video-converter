@@ -22,10 +22,10 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
-    "pytest",
-    "ruff",
-    "black",
-    "mypy",
+    "pytest==8.3.2",
+    "ruff==0.6.2",
+    "black==24.8.0",
+    "mypy==1.11.1",
     "types-requests",
     "types-redis",
     "fakeredis",
