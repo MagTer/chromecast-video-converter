@@ -173,7 +173,7 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
       const bitrate = profile.bitrate || profile.max_bitrate || "n/a";
       const maxrate = profile.max_bitrate || profile.bitrate || "n/a";
       const encoder = label === "CPU" ? "libx264" : "h264_nvenc";
-      return `${label || ""} ${encoder} · ${resolution} @ ${fps}fps\nRC ${rc} · preset ${preset}\nBitrate ${bitrate} (max ${maxrate}`;
+      return `${label || ""} ${encoder} · ${resolution} @ ${fps}fps\nRC ${rc} · preset ${preset}\nBitrate ${bitrate} (max ${maxrate})`;
     }
 
     function jobElapsedSeconds(job) {
