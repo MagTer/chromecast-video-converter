@@ -154,7 +154,7 @@ async def update_job_status(job_id: str, payload: JobStatusPayload) -> JSONRespo
             entry = sync_entry_from_job(job, LibraryStatus.PENDING, retry_message)
             record_job_history(job, JobHistoryStatus.RUNNING, retry_message, completed=False)
             return await _respond_with_updates(job, entry)
-        failure_message = payload.message or classification.get("message")
+        failure_message = payload.message or str(classification.get("message") or "")
         entry = sync_entry_from_job(job, LibraryStatus.FAILED, failure_message)
         record_job_history(job, payload.status, failure_message, completed=True)
         return await _respond_with_updates(job, entry)

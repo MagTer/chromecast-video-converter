@@ -295,9 +295,9 @@ class LogStore:
         entries = []
         for row in rows:
             row_keys = set(row.keys())
-            severity = row["severity"] if "severity" in row_keys else row["level"]
-            category = row["category"] if "category" in row_keys else row["logger"]
-            source = row["source"] if "source" in row_keys else ""
+            severity = str(row["severity"]) if "severity" in row_keys else str(row["level"])
+            category = str(row["category"]) if "category" in row_keys else str(row["logger"])
+            source = str(row["source"]) if "source" in row_keys else ""
             req_id = row["request_id"] if "request_id" in row_keys else None
             entries.append(
                 LogEntry(

@@ -7,9 +7,9 @@ from pathlib import Path
 from threading import RLock
 from typing import Iterable, List, Optional
 
-from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Integer, String, func, select
+from sqlalchemy import Boolean, ForeignKey, Integer, String, func, select
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy.orm import Mapped, Session, mapped_column, sessionmaker
 
 from .db import Base, create_session_factory
 from .utils import resolve_media_path
@@ -32,22 +32,23 @@ class LibraryStatus(str):
 class LibraryEntry(Base):
     __tablename__ = "library_entries"
 
-    id = Column(Integer, primary_key=True)
-    path = Column(String, unique=True, nullable=False)
-    library = Column(String, nullable=False)
-    profile = Column(String, nullable=False)
-    profile_id = Column(Integer, ForeignKey("encoding_profiles.id"), nullable=True, index=True)
-    decode_type = Column(String, nullable=True)
-    scale_type = Column(String, nullable=True)
-    encode_type = Column(String, nullable=True)
-    status = Column(String, nullable=False, default=LibraryStatus.PENDING)
-    output_path = Column(String, nullable=True)
-    last_error = Column(String, nullable=True)
-    last_job_id = Column(String, nullable=True)
-    original_missing = Column(Boolean, default=False)
-    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
-    updated_at = Column(
-        DateTime,
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    path: Mapped[str] = mapped_column(String, unique=True, nullable=False)
+    library: Mapped[str] = mapped_column(String, nullable=False)
+    profile: Mapped[str] = mapped_column(String, nullable=False)
+    profile_id: Mapped[Optional[int]] = mapped_column(
+        Integer, ForeignKey("encoding_profiles.id"), nullable=True, index=True
+    )
+    decode_type: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    scale_type: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    encode_type: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    status: Mapped[str] = mapped_column(String, nullable=False, default=LibraryStatus.PENDING)
+    output_path: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    last_error: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    last_job_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    original_missing: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(default=lambda: datetime.now(timezone.utc))
+    updated_at: Mapped[datetime] = mapped_column(
         default=lambda: datetime.now(timezone.utc),
         onupdate=lambda: datetime.now(timezone.utc),
     )
@@ -106,7 +107,7 @@ class LibraryEntryStore:
                 _, self._engine = create_session_factory(db_path)
         LOGGER.info("Library entry store initialized at %s", db_path)
 
-    def _session(self):
+    def _session(self) -> Session:
         return self._Session()
 
     def list_entries(

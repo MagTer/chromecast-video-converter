@@ -170,7 +170,7 @@ class JobManager:
         redis_client = self._redis
         assert redis_client is not None
         try:
-            return await redis_client.set(key, value, nx=True)
+            return bool(await redis_client.set(key, value, nx=True))
         except TypeError:
             exists = await redis_client.get(key)
             if exists:
@@ -451,7 +451,7 @@ class JobManager:
     async def _pending_message_ids_from_xpending(self) -> list[str]:
         assert self._redis is not None
         try:
-            entries = await self._redis.xpending(self._stream, self._group, "-", "+", 1000)
+            entries = await self._redis.xpending(self._stream, self._group, "-", "+", 1000)  # type: ignore
         except Exception:
             return []
         message_ids: list[str] = []
@@ -693,6 +693,7 @@ class JobManager:
 
         pending_id, pending_job = await self._acquire_stalled(consumer)
         if pending_job:
+            assert pending_id is not None
             return pending_id, pending_job
 
         result = await self._redis.xreadgroup(
@@ -709,7 +710,7 @@ class JobManager:
         job.worker_id = consumer
         job.started_at = datetime.now(timezone.utc)
         job.updated_at = datetime.now(timezone.utc)
-        await self._redis.hset(self._job_key(job.id), mapping=self._encode_job(job))
+        await self._redis.hset(self._job_key(job.id), mapping=self._encode_job(job))  # type: ignore
         await self._redis.zadd(self._job_index, {job.id: job.updated_at.timestamp()})
         self._logger.info(
             "Handing off job %s to consumer %s (path=%s, library=%s)",
@@ -770,7 +771,7 @@ class JobManager:
                     update.pipeline.get("max_attempts", job.max_attempts) or job.max_attempts
                 )
         job.updated_at = datetime.now(timezone.utc)
-        await self._redis.hset(self._job_key(job.id), mapping=self._encode_job(job))
+        await self._redis.hset(self._job_key(job.id), mapping=self._encode_job(job))  # type: ignore
         await self._redis.zadd(self._job_index, {job.id: job.updated_at.timestamp()})
         self._logger.debug(
             "Job %s updated: status=%s progress=%s message=%s",
@@ -803,7 +804,7 @@ class JobManager:
             job.encoding = {}
         job.encoding["pipeline"] = pipeline
         payload = self._encode_job(job)
-        await self._redis.hset(self._job_key(job.id), mapping=payload)
+        await self._redis.hset(self._job_key(job.id), mapping=payload)  # type: ignore
         await self._redis.zadd(self._job_index, {job.id: datetime.now(timezone.utc).timestamp()})
         await self._redis.xadd(
             self._stream, {"payload": json.dumps(payload)}, maxlen=10_000, approximate=True

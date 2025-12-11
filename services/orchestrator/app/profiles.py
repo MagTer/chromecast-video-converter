@@ -7,8 +7,8 @@ from datetime import datetime, timezone
 from threading import RLock
 from typing import List, Optional
 
-from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Integer, String, select
-from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy import Boolean, ForeignKey, Integer, String, select
+from sqlalchemy.orm import Mapped, Session, mapped_column, sessionmaker
 
 from .db import Base
 
@@ -18,33 +18,32 @@ LOGGER = logging.getLogger("orchestrator.profiles")
 class EncodingProfile(Base):
     __tablename__ = "encoding_profiles"
 
-    id = Column(Integer, primary_key=True)
-    name = Column(String, unique=True, nullable=False)
-    codec = Column(String, nullable=False)
-    definition = Column(String, nullable=False, default="{}")
-    profile_tier = Column(String, nullable=False, default="high")
-    max_resolution = Column(String, nullable=False)
-    bitrate = Column(String, nullable=False, default="8M")
-    max_bitrate = Column(String, nullable=False)
-    bufsize = Column(String, nullable=False)
-    preset = Column(String, nullable=False)
-    cq = Column(Integer, nullable=False, default=18)
-    rc = Column(String, nullable=False, default="vbr")
-    level = Column(String, nullable=False, default="4.1")
-    max_fps = Column(Integer, nullable=False, default=30)
-    bframes = Column(Integer, nullable=False, default=2)
-    lookahead = Column(Integer, nullable=False, default=24)
-    adaptive_b_frames = Column(Boolean, nullable=False, default=True)
-    aq = Column(Boolean, nullable=False, default=True)
-    spatial_aq = Column(Boolean, nullable=False, default=True)
-    temporal_aq = Column(Boolean, nullable=False, default=True)
-    aq_strength = Column(Integer, nullable=False, default=7)
-    audio_codec = Column(String, nullable=False, default="aac")
-    audio_bitrate = Column(String, nullable=False, default="192k")
-    audio_channels = Column(Integer, nullable=False, default=2)
-    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
-    updated_at = Column(
-        DateTime,
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String, unique=True, nullable=False)
+    codec: Mapped[str] = mapped_column(String, nullable=False)
+    definition: Mapped[str] = mapped_column(String, nullable=False, default="{}")
+    profile_tier: Mapped[str] = mapped_column(String, nullable=False, default="high")
+    max_resolution: Mapped[str] = mapped_column(String, nullable=False)
+    bitrate: Mapped[str] = mapped_column(String, nullable=False, default="8M")
+    max_bitrate: Mapped[str] = mapped_column(String, nullable=False)
+    bufsize: Mapped[str] = mapped_column(String, nullable=False)
+    preset: Mapped[str] = mapped_column(String, nullable=False)
+    cq: Mapped[int] = mapped_column(Integer, nullable=False, default=18)
+    rc: Mapped[str] = mapped_column(String, nullable=False, default="vbr")
+    level: Mapped[str] = mapped_column(String, nullable=False, default="4.1")
+    max_fps: Mapped[int] = mapped_column(Integer, nullable=False, default=30)
+    bframes: Mapped[int] = mapped_column(Integer, nullable=False, default=2)
+    lookahead: Mapped[int] = mapped_column(Integer, nullable=False, default=24)
+    adaptive_b_frames: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    aq: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    spatial_aq: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    temporal_aq: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    aq_strength: Mapped[int] = mapped_column(Integer, nullable=False, default=7)
+    audio_codec: Mapped[str] = mapped_column(String, nullable=False, default="aac")
+    audio_bitrate: Mapped[str] = mapped_column(String, nullable=False, default="192k")
+    audio_channels: Mapped[int] = mapped_column(Integer, nullable=False, default=2)
+    created_at: Mapped[datetime] = mapped_column(default=lambda: datetime.now(timezone.utc))
+    updated_at: Mapped[datetime] = mapped_column(
         default=lambda: datetime.now(timezone.utc),
         onupdate=lambda: datetime.now(timezone.utc),
     )
@@ -52,7 +51,7 @@ class EncodingProfile(Base):
     def to_payload(self) -> dict:
         definition = {}
         try:
-            definition = json.loads(self.definition or "{}")  # type: ignore
+            definition = json.loads(self.definition or "{}")
         except json.JSONDecodeError:
             definition = {}
         gpu = definition.get("gpu") or {
@@ -114,14 +113,13 @@ class EncodingProfile(Base):
 class LibraryConfig(Base):
     __tablename__ = "libraries"
 
-    id = Column(Integer, primary_key=True)
-    name = Column(String, unique=True, nullable=False)
-    root = Column(String, nullable=False)
-    depth = Column(String, nullable=False, default="max")
-    profile_id = Column(Integer, ForeignKey("encoding_profiles.id"), nullable=False)
-    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
-    updated_at = Column(
-        DateTime,
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String, unique=True, nullable=False)
+    root: Mapped[str] = mapped_column(String, nullable=False)
+    depth: Mapped[str] = mapped_column(String, nullable=False, default="max")
+    profile_id: Mapped[int] = mapped_column(ForeignKey("encoding_profiles.id"), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(default=lambda: datetime.now(timezone.utc))
+    updated_at: Mapped[datetime] = mapped_column(
         default=lambda: datetime.now(timezone.utc),
         onupdate=lambda: datetime.now(timezone.utc),
     )
@@ -205,31 +203,31 @@ class ProfileStore:
         with self._lock, self._session() as session:
             now = datetime.now(timezone.utc)
             profile = EncodingProfile(
-                name=data.name,  # type: ignore
-                codec=data.gpu.codec,  # type: ignore
-                profile_tier=data.gpu.profile,  # type: ignore
-                max_resolution=data.gpu.resolution,  # type: ignore
-                bitrate=data.gpu.bitrate,  # type: ignore
-                max_bitrate=data.gpu.max_bitrate,  # type: ignore
-                bufsize=data.gpu.bufsize,  # type: ignore
-                preset=data.gpu.preset,  # type: ignore
-                cq=data.gpu.cq,  # type: ignore
-                rc=data.gpu.rc,  # type: ignore
-                level=data.gpu.level,  # type: ignore
-                max_fps=data.gpu.max_fps,  # type: ignore
-                bframes=data.gpu.bframes,  # type: ignore
-                lookahead=data.gpu.lookahead,  # type: ignore
-                adaptive_b_frames=data.gpu.adaptive_b_frames,  # type: ignore
-                aq=data.gpu.aq,  # type: ignore
-                spatial_aq=data.gpu.spatial_aq,  # type: ignore
-                temporal_aq=data.gpu.temporal_aq,  # type: ignore
-                aq_strength=data.gpu.aq_strength,  # type: ignore
-                audio_codec=data.gpu.audio_codec,  # type: ignore
-                audio_bitrate=data.gpu.audio_bitrate,  # type: ignore
-                audio_channels=data.gpu.audio_channels,  # type: ignore
-                definition=json.dumps({"gpu": asdict(data.gpu), "cpu": asdict(data.cpu)}),  # type: ignore
-                created_at=now,  # type: ignore
-                updated_at=now,  # type: ignore
+                name=data.name,
+                codec=data.gpu.codec,
+                profile_tier=data.gpu.profile,
+                max_resolution=data.gpu.resolution,
+                bitrate=data.gpu.bitrate,
+                max_bitrate=data.gpu.max_bitrate,
+                bufsize=data.gpu.bufsize,
+                preset=data.gpu.preset,
+                cq=data.gpu.cq,
+                rc=data.gpu.rc,
+                level=data.gpu.level,
+                max_fps=data.gpu.max_fps,
+                bframes=data.gpu.bframes,
+                lookahead=data.gpu.lookahead,
+                adaptive_b_frames=data.gpu.adaptive_b_frames,
+                aq=data.gpu.aq,
+                spatial_aq=data.gpu.spatial_aq,
+                temporal_aq=data.gpu.temporal_aq,
+                aq_strength=data.gpu.aq_strength,
+                audio_codec=data.gpu.audio_codec,
+                audio_bitrate=data.gpu.audio_bitrate,
+                audio_channels=data.gpu.audio_channels,
+                definition=json.dumps({"gpu": asdict(data.gpu), "cpu": asdict(data.cpu)}),
+                created_at=now,
+                updated_at=now,
             )
             session.add(profile)
             session.commit()
@@ -242,30 +240,30 @@ class ProfileStore:
             profile = session.get(EncodingProfile, profile_id)
             if profile is None:
                 raise KeyError(profile_id)
-            profile.name = data.name  # type: ignore
-            profile.codec = data.gpu.codec  # type: ignore
-            profile.profile_tier = data.gpu.profile  # type: ignore
-            profile.max_resolution = data.gpu.resolution  # type: ignore
-            profile.bitrate = data.gpu.bitrate  # type: ignore
-            profile.max_bitrate = data.gpu.max_bitrate  # type: ignore
-            profile.bufsize = data.gpu.bufsize  # type: ignore
-            profile.preset = data.gpu.preset  # type: ignore
-            profile.cq = data.gpu.cq  # type: ignore
-            profile.rc = data.gpu.rc  # type: ignore
-            profile.level = data.gpu.level  # type: ignore
-            profile.max_fps = data.gpu.max_fps  # type: ignore
-            profile.bframes = data.gpu.bframes  # type: ignore
-            profile.lookahead = data.gpu.lookahead  # type: ignore
-            profile.adaptive_b_frames = data.gpu.adaptive_b_frames  # type: ignore
-            profile.aq = data.gpu.aq  # type: ignore
-            profile.spatial_aq = data.gpu.spatial_aq  # type: ignore
-            profile.temporal_aq = data.gpu.temporal_aq  # type: ignore
-            profile.aq_strength = data.gpu.aq_strength  # type: ignore
-            profile.audio_codec = data.gpu.audio_codec  # type: ignore
-            profile.audio_bitrate = data.gpu.audio_bitrate  # type: ignore
-            profile.audio_channels = data.gpu.audio_channels  # type: ignore
-            profile.definition = json.dumps({"gpu": asdict(data.gpu), "cpu": asdict(data.cpu)})  # type: ignore
-            profile.updated_at = datetime.now(timezone.utc)  # type: ignore
+            profile.name = data.name
+            profile.codec = data.gpu.codec
+            profile.profile_tier = data.gpu.profile
+            profile.max_resolution = data.gpu.resolution
+            profile.bitrate = data.gpu.bitrate
+            profile.max_bitrate = data.gpu.max_bitrate
+            profile.bufsize = data.gpu.bufsize
+            profile.preset = data.gpu.preset
+            profile.cq = data.gpu.cq
+            profile.rc = data.gpu.rc
+            profile.level = data.gpu.level
+            profile.max_fps = data.gpu.max_fps
+            profile.bframes = data.gpu.bframes
+            profile.lookahead = data.gpu.lookahead
+            profile.adaptive_b_frames = data.gpu.adaptive_b_frames
+            profile.aq = data.gpu.aq
+            profile.spatial_aq = data.gpu.spatial_aq
+            profile.temporal_aq = data.gpu.temporal_aq
+            profile.aq_strength = data.gpu.aq_strength
+            profile.audio_codec = data.gpu.audio_codec
+            profile.audio_bitrate = data.gpu.audio_bitrate
+            profile.audio_channels = data.gpu.audio_channels
+            profile.definition = json.dumps({"gpu": asdict(data.gpu), "cpu": asdict(data.cpu)})
+            profile.updated_at = datetime.now(timezone.utc)
             session.add(profile)
             session.commit()
             session.refresh(profile)
@@ -299,7 +297,7 @@ class ProfileStore:
     def upsert(self, data: ProfileData) -> EncodingProfile:
         existing = self.get_by_name(data.name)
         if existing:
-            return self.update(existing.id, data)  # type: ignore
+            return self.update(existing.id, data)
         return self.create(data)
 
 
