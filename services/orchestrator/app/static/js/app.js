@@ -614,8 +614,12 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
       if (opsScanInterval) {
         opsScanInterval.value = config.operational?.scan_interval_min ?? 0;
       }
-      // Removed renderProfileSelect() and related profile loading
-      // renderLibraryProfiles(); // Removed
+      
+      const profiles = profileList();
+      if (profiles.length > 0) {
+        loadProfile(profiles[0].name);
+      }
+
       renderLibraryFilters();
 
       if (Object.keys(config.libraries || {}).length === 0) {
