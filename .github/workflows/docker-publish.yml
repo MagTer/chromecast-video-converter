@@ -5,8 +5,6 @@ on:
   push:
     branches:
       - main
-      # Temporary: build images for the open PR branch as well.
-      - fix/chromecast-resolution-and-updates
     tags:
       - "v*"
 
