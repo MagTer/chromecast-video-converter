@@ -111,6 +111,15 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
       logLevel.value = "INFO";
     }
 
+    function escapeHtml(value) {
+      return String(value ?? "")
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;")
+        .replaceAll("'", "&#39;");
+    }
+
     function ensureOption(select, value, label) {
       if (value === undefined || value === null) return;
       const stringValue = String(value);
@@ -904,18 +913,18 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
             <button
               type="button"
               class="link-button job-link"
-              data-job-id="${truncatedId}"
-              data-job-id-full="${job.id}"
-              data-job-path="${normalizedPath}"
+              data-job-id="${escapeHtml(truncatedId)}"
+              data-job-id-full="${escapeHtml(job.id)}"
+              data-job-path="${escapeHtml(normalizedPath)}"
             >
-              ${truncatedId}
+              ${escapeHtml(truncatedId)}
             </button>
           </td>
-          <td class="status-${status}">${statusLabel}</td>
-          <td>${elapsed}</td>
-          <td class="path-cell" title="${normalizedPath}">${fileName}</td>
-          <td>${pipelineText}</td>
-          <td>${progress}%</td>
+          <td class="status-${escapeHtml(status)}">${escapeHtml(statusLabel)}</td>
+          <td>${escapeHtml(elapsed)}</td>
+          <td class="path-cell" title="${escapeHtml(normalizedPath)}">${escapeHtml(fileName)}</td>
+          <td>${escapeHtml(pipelineText)}</td>
+          <td>${Number(progress) || 0}%</td>
         `;
         jobRows.appendChild(tr);
       });
@@ -972,15 +981,15 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
         // Inline onclick handlers cannot reach module-scoped functions; use a
         // data attribute and the delegated listener on the table body instead.
         const detailsLink = job.id
-            ? `<button type="button" class="link-button history-log-link" data-job-id="${job.id}">View Logs</button>`
-            : (job.message || "-");
+            ? `<button type="button" class="link-button history-log-link" data-job-id="${escapeHtml(job.id)}">View Logs</button>`
+            : escapeHtml(job.message || "-");
 
         tr.innerHTML = `
-          <td>${job.id.slice(0, 8)}</td>
-          <td class="status-${status}">${statusLabel}</td>
-          <td>${finished}</td>
-          <td class="path-cell" title="${normalizedPath}">${fileName}</td>
-          <td>${pipelineText}</td>
+          <td>${escapeHtml(job.id ? job.id.slice(0, 8) : "")}</td>
+          <td class="status-${escapeHtml(status)}">${escapeHtml(statusLabel)}</td>
+          <td>${escapeHtml(finished)}</td>
+          <td class="path-cell" title="${escapeHtml(normalizedPath)}">${escapeHtml(fileName)}</td>
+          <td>${escapeHtml(pipelineText)}</td>
           <td>${detailsLink}</td>
         `;
         historyRows.appendChild(tr);
@@ -1076,12 +1085,12 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
             const severity = entry.severity || entry.level;
             container.innerHTML = `
               <div class="log-meta">
-                <span class="log-pill ${severityClass(severity)}">${severity}</span>
-                <span class="log-pill pill-muted">${entry.source || entry.logger}</span>
-                <span class="log-pill pill-outline">${entry.category || entry.logger}</span>
-                <span class="log-timestamp log-pill pill-outline">${formatLogTimestamp(entry.timestamp)}</span>
+                <span class="log-pill ${severityClass(severity)}">${escapeHtml(severity)}</span>
+                <span class="log-pill pill-muted">${escapeHtml(entry.source || entry.logger)}</span>
+                <span class="log-pill pill-outline">${escapeHtml(entry.category || entry.logger)}</span>
+                <span class="log-timestamp log-pill pill-outline">${escapeHtml(formatLogTimestamp(entry.timestamp))}</span>
               </div>
-              <div class="log-message">${entry.message}</div>
+              <div class="log-message">${escapeHtml(entry.message)}</div>
             `;
             logList.appendChild(container);
           });
@@ -1122,7 +1131,7 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
     }
 
     function formatStatusChip(status) {
-      const normalized = status || "unknown";
+      const normalized = escapeHtml(status || "unknown");
       return `<span class="status-chip status-${normalized}">${normalized}</span>`;
     }
 
@@ -1192,19 +1201,19 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
 
         let errorHtml = "";
         if (entry.status === "failed" && entry.last_error) {
-            errorHtml = `<div class="warn" style="margin-top:0.25rem; font-size:0.85rem;">${entry.last_error}</div>`;
+            errorHtml = `<div class="warn" style="margin-top:0.25rem; font-size:0.85rem;">${escapeHtml(entry.last_error)}</div>`;
         }
 
         tr.innerHTML = `
-          <td>${entry.id}</td>
+          <td>${Number(entry.id)}</td>
           <td>${statusHtml}</td>
-          <td>${entry.library}</td>
-          <td class="path-cell" title="${normalizedPath}">
-            ${fileName}
+          <td>${escapeHtml(entry.library)}</td>
+          <td class="path-cell" title="${escapeHtml(normalizedPath)}">
+            ${escapeHtml(fileName)}
             ${errorHtml}
           </td>
-          <td>${encodingLabel}</td>
-          <td>${formatUpdated(entry.updated_at)}</td>
+          <td>${escapeHtml(encodingLabel)}</td>
+          <td>${escapeHtml(formatUpdated(entry.updated_at))}</td>
           <td>
             <div class="row-actions">
               <button type="button" data-action="reprocess" data-entry-id="${entry.id}">Reprocess</button>
