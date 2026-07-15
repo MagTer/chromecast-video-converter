@@ -33,6 +33,7 @@ class JobStatusPayload(BaseModel):
     return_code: Optional[int] = None
     logs: Optional[list] = None
     pipeline: Optional[dict] = None
+    compliance: Optional[dict] = None
 
 
 class JobAckPayload(BaseModel):
@@ -86,6 +87,7 @@ class LibraryEntryResponse(BaseModel):
     last_error: Optional[str] = None
     last_job_id: Optional[str] = None
     original_missing: bool
+    output_compliant: Optional[bool] = None
     created_at: datetime
     updated_at: datetime
 

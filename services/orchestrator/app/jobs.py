@@ -43,6 +43,7 @@ class Job(BaseModel):
     progress: int = 0
     message: Optional[str] = None
     force: bool = Field(default=False)
+    compliance: Optional[Dict[str, Any]] = None
 
     class Config:
         json_encoders = {datetime: lambda value: value.isoformat()}
@@ -72,6 +73,7 @@ class JobStatusUpdate(BaseModel):
     return_code: Optional[int] = None
     logs: Optional[list] = None
     pipeline: Optional[Dict[str, Any]] = None
+    compliance: Optional[Dict[str, Any]] = None
 
 
 class JobManager:
@@ -236,7 +238,7 @@ class JobManager:
                 parsed[key] = int(value) if value else 0
             elif key == "profile_id":
                 parsed[key] = int(value) if value else None
-            elif key in {"encoding", "pipeline"}:
+            elif key in {"encoding", "pipeline", "compliance"}:
                 parsed[key] = json.loads(value) if value else None
             else:
                 parsed[key] = value or None
@@ -389,6 +391,59 @@ class JobManager:
                 profile,
             )
         return job
+
+    def _verify_key(self, path: str) -> str:
+        return f"{self._path_key(path)}:verify"
+
+    async def add_verify_job(
+        self,
+        path: str,
+        library: str,
+        profile: str,
+        profile_id: Optional[int] = None,
+        *,
+        force: bool = False,
+    ) -> Optional[Job]:
+        """Queue a compliance check of an existing output. Returns None when a
+        verify job for the path is already pending (unless force=True)."""
+        await self.initialize()
+        redis_client = self._redis
+        assert redis_client is not None
+        path = self._canonical_path(path)
+
+        verify_key = self._verify_key(path)
+        if force:
+            await redis_client.set(verify_key, "1", ex=600)
+        else:
+            reserved = await redis_client.set(verify_key, "1", nx=True, ex=600)
+            if not reserved:
+                return None
+
+        job = Job(
+            path=path,
+            library=library,
+            profile=profile,
+            profile_id=profile_id,
+            job_type="verify",
+            request_id=get_request_id(),
+            pipeline={"max_attempts": 1},
+        )
+        encoded = self._encode_job(job)
+        await redis_client.hset(self._job_key(job.id), mapping=encoded)  # type: ignore
+        await redis_client.zadd(self._job_index, {job.id: job.updated_at.timestamp()})
+        await redis_client.xadd(
+            self._stream, {"payload": json.dumps(encoded)}, maxlen=10_000, approximate=True  # type: ignore
+        )
+        self._logger.info("Queued VERIFY job %s for %s", job.id[:8], path)
+        return job
+
+    async def release_verify_reservation(self, path: str) -> None:
+        await self.initialize()
+        assert self._redis is not None
+        try:
+            await self._redis.delete(self._verify_key(self._canonical_path(path)))
+        except redis.RedisError:  # pragma: no cover - the TTL cleans up eventually
+            pass
 
     async def add_delete_job(self, path: str) -> Job:
         await self.initialize()
@@ -771,6 +826,8 @@ class JobManager:
                 job.max_attempts = int(
                     update.pipeline.get("max_attempts", job.max_attempts) or job.max_attempts
                 )
+        if update.compliance is not None:
+            job.compliance = update.compliance
         job.updated_at = datetime.now(timezone.utc)
         await self._redis.hset(self._job_key(job.id), mapping=self._encode_job(job))  # type: ignore
         await self._redis.zadd(self._job_index, {job.id: job.updated_at.timestamp()})

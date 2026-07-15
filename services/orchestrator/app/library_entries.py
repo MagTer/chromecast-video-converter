@@ -47,6 +47,8 @@ class LibraryEntry(Base):
     last_error: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     last_job_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     original_missing: Mapped[bool] = mapped_column(Boolean, default=False)
+    output_compliant: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
+    compliance_detail: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     created_at: Mapped[datetime] = mapped_column(default=lambda: datetime.now(timezone.utc))
     updated_at: Mapped[datetime] = mapped_column(
         default=lambda: datetime.now(timezone.utc),
@@ -68,6 +70,8 @@ class LibraryEntry(Base):
             "last_error": self.last_error,
             "last_job_id": self.last_job_id,
             "original_missing": bool(self.original_missing),
+            "output_compliant": self.output_compliant,
+            "compliance_detail": self.compliance_detail,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
         }
@@ -105,7 +109,34 @@ class LibraryEntryStore:
             self._engine = engine or self._Session.kw.get("bind")  # type: ignore
             if self._engine is None:
                 _, self._engine = create_session_factory(db_path)
+        self._ensure_schema()
         LOGGER.info("Library entry store initialized at %s", db_path)
+
+    def _ensure_schema(self) -> None:
+        """Add columns introduced after the initial schema to existing DBs.
+
+        SQLAlchemy's create_all only creates missing tables, so pre-existing
+        installations need lightweight ALTER TABLE migrations here.
+        """
+        added_columns = (
+            ("output_compliant", "BOOLEAN"),
+            ("compliance_detail", "VARCHAR"),
+        )
+        try:
+            with self._engine.connect() as conn:
+                rows = conn.exec_driver_sql("PRAGMA table_info(library_entries)").fetchall()
+                existing = {row[1] for row in rows}
+                if not existing:
+                    return  # Table does not exist yet; create_all handles it.
+                for column, ddl_type in added_columns:
+                    if column not in existing:
+                        conn.exec_driver_sql(
+                            f"ALTER TABLE library_entries ADD COLUMN {column} {ddl_type}"
+                        )
+                        LOGGER.info("Added column %s to library_entries", column)
+                conn.commit()
+        except SQLAlchemyError as exc:  # pragma: no cover - defensive
+            LOGGER.warning("Library entry schema migration failed: %s", exc)
 
     def _session(self) -> Session:
         return self._Session()
@@ -224,6 +255,8 @@ class LibraryEntryStore:
         job_id: Optional[str] = None,
         output_path: Optional[str] = None,
         original_missing: bool = False,
+        output_compliant: Optional[bool] = None,
+        compliance_detail: Optional[str] = None,
     ) -> LibraryEntry:
         canonical_path = _canonical_path(path)
         with self._lock, self._session() as session:
@@ -255,6 +288,13 @@ class LibraryEntryStore:
             entry.last_error = message if status == LibraryStatus.FAILED else None
             entry.last_job_id = job_id or entry.last_job_id
             entry.original_missing = original_missing
+            if output_compliant is not None:
+                entry.output_compliant = output_compliant
+                entry.compliance_detail = compliance_detail
+            elif status == LibraryStatus.PENDING:
+                # A new conversion is queued; the previous verdict no longer applies.
+                entry.output_compliant = None
+                entry.compliance_detail = None
             entry.updated_at = timestamp
             session.add(entry)
             session.commit()
@@ -267,6 +307,24 @@ class LibraryEntryStore:
         except SQLAlchemyError as exc:
             LOGGER.error("Failed to persist library entry update: %s", exc)
             return None
+
+    def update_compliance(
+        self, path: str, *, compliant: bool, detail: Optional[str] = None
+    ) -> Optional[LibraryEntry]:
+        """Persist a compliance verdict without touching the entry status."""
+        canonical_path = _canonical_path(path)
+        with self._lock, self._session() as session:
+            entry = session.scalar(select(LibraryEntry).where(LibraryEntry.path == canonical_path))
+            if entry is None:
+                LOGGER.warning("No library entry for %s; dropping compliance verdict", path)
+                return None
+            entry.output_compliant = compliant
+            entry.compliance_detail = detail
+            entry.updated_at = datetime.now(timezone.utc)
+            session.add(entry)
+            session.commit()
+            session.refresh(entry)
+            return entry
 
     def delete_original(self, entry: LibraryEntry) -> LibraryEntry:
         source = Path(entry.path)

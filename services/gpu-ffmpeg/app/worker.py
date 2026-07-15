@@ -19,6 +19,7 @@ import httpx
 from tenacity import retry, stop_after_attempt, wait_exponential
 
 from .capabilities import FfmpegCapabilities
+from .compliance import compliance_failure, evaluate_chromecast_compliance
 from .ffmpeg_builder import DEFAULT_LANGUAGE_PREFERENCES, FFmpegBuilder
 from .utils import detect_host_environment, resolve_media_path
 
@@ -706,16 +707,17 @@ async def update_job_status(
     return_code: int | None = None,
     logs: list[str] | None = None,
     pipeline: dict | None = None,
+    compliance: dict | None = None,
 ) -> None:
-    payload = {"status": status, "progress": progress}
-    if message:
-        payload["message"] = message
-    if return_code is not None:
-        payload["return_code"] = return_code
-    if logs is not None:
-        payload["logs"] = logs
-    if pipeline is not None:
-        payload["pipeline"] = pipeline
+    payload: dict = {"status": status, "progress": progress}
+    optional_fields = {
+        "message": message,
+        "return_code": return_code,
+        "logs": logs,
+        "pipeline": pipeline,
+        "compliance": compliance,
+    }
+    payload.update({key: value for key, value in optional_fields.items() if value is not None})
     try:
         response = await client.post(f"/api/jobs/{job_id}/status", json=payload)
         response.raise_for_status()
@@ -822,6 +824,48 @@ async def _maybe_remove_original(source: Path, output_path: Path, expected_durat
     return True
 
 
+async def _probe_output_compliance(output_path: Path) -> dict:
+    if not output_path.exists():
+        return compliance_failure([f"Output file not found at {output_path}"])
+    analysis = await asyncio.to_thread(probe_file, output_path)
+    return evaluate_chromecast_compliance(analysis)
+
+
+async def handle_verify_job(client: httpx.AsyncClient, job: dict) -> None:
+    """Probe an existing converted output and report Chromecast compliance.
+
+    Verify jobs never fail: problems are reported as compliance issues so the
+    library entry keeps its converted state.
+    """
+    job_id = job["id"]
+    source_path = job["path"]
+    request_id = job.get("request_id")
+    token = _current_request_id.set(request_id)
+    try:
+        output_path = _build_output_path(resolve_media_path(source_path))
+        LOGGER.info("Verifying output %s for job %s", output_path, job_id[:8])
+        compliance = await _probe_output_compliance(output_path)
+        if compliance.get("compliant"):
+            message = "Output verified Chromecast compliant"
+        else:
+            issues = "; ".join(compliance.get("issues") or [])
+            message = f"Output is not Chromecast compliant: {issues}"
+            LOGGER.warning("Job %s: %s", job_id[:8], message)
+        await update_job_status(client, job_id, "completed", 100, message, compliance=compliance)
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.error("Verify job %s failed: %s", job_id[:8], exc)
+        await update_job_status(
+            client,
+            job_id,
+            "completed",
+            100,
+            f"Verification error: {exc}",
+            compliance=compliance_failure([f"Verification error: {exc}"]),
+        )
+    finally:
+        _current_request_id.reset(token)
+
+
 async def handle_delete_job(client: httpx.AsyncClient, job: dict) -> None:
     job_id = job["id"]
     source_path = job["path"]
@@ -851,6 +895,9 @@ async def process_job(client: httpx.AsyncClient, job: dict) -> None:  # noqa: C9
     job_id = job["id"]
     if job.get("job_type") == "delete":
         await handle_delete_job(client, job)
+        return
+    if job.get("job_type") == "verify":
+        await handle_verify_job(client, job)
         return
 
     request_id = job.get("request_id")
@@ -895,7 +942,10 @@ async def process_job(client: httpx.AsyncClient, job: dict) -> None:  # noqa: C9
 
         if not job.get("force", False) and await _validate_output(output_path, duration):
             message = f"Output already present at {output_path}; skipping encode"
-            await update_job_status(client, job_id, "completed", 100, message)
+            compliance = await _probe_output_compliance(output_path)
+            await update_job_status(
+                client, job_id, "completed", 100, message, compliance=compliance
+            )
             LOGGER.info("Job %s completed from existing output %s", job_id[:8], output_path)
             if await _maybe_remove_original(playback_target, output_path, duration):
                 await update_job_status(
@@ -904,6 +954,7 @@ async def process_job(client: httpx.AsyncClient, job: dict) -> None:  # noqa: C9
                     "completed",
                     100,
                     f"{message}. Original removed",
+                    compliance=compliance,
                 )
             return
 
@@ -960,10 +1011,19 @@ async def process_job(client: httpx.AsyncClient, job: dict) -> None:  # noqa: C9
                     f"Encoding finished but output missing or invalid at {output_path}",
                 )
                 return
+            compliance = await _probe_output_compliance(output_path)
+            if not compliance.get("compliant"):
+                LOGGER.warning(
+                    "Job %s output is not Chromecast compliant: %s",
+                    job_id[:8],
+                    "; ".join(compliance.get("issues") or []),
+                )
             removed = await _maybe_remove_original(playback_target, output_path, duration)
             if removed:
                 message = f"{message} (original removed)"
-            await update_job_status(client, job_id, "completed", 100, message)
+            await update_job_status(
+                client, job_id, "completed", 100, message, compliance=compliance
+            )
             LOGGER.info("Job %s completed, output: %s", job_id[:8], output_path)
         else:
             classification = classify_ffmpeg_error(ffmpeg_logs, return_code)

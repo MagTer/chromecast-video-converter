@@ -72,6 +72,7 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
     const cpuAdaptiveBframesSelect = document.querySelector("#cpu-profile-adaptive-bframes");
     const cpuAudioBitrateSelect = document.querySelector("#cpu-profile-audio-bitrate");
     const reprocessAllBtn = document.querySelector("#reprocess-all");
+    const verifyAllBtn = document.querySelector("#verify-all");
     const deleteAllOriginalsBtn = document.querySelector("#delete-all-originals");
     const setupWizard = document.querySelector("#setup-wizard");
     const wizardSetupBtn = document.querySelector("#wizard-setup-btn");
@@ -925,7 +926,8 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
         const fileName = fileNameFromPath(normalizedPath);
         const recordedElapsed = Number(job?.elapsed_seconds ?? Number.NaN);
         const pipeline = job.pipeline || (job.encoding ? job.encoding.pipeline : null);
-        const pipelineText = formatPipeline(pipeline);
+        const jobType = String(job.job_type || "convert").toLowerCase();
+        const pipelineText = jobType === "convert" ? formatPipeline(pipeline) : jobType;
         
         let elapsed = "-";
         if (status === "running") {
@@ -1144,10 +1146,14 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
         converting: 0,
         converted: 0,
         failed: 0,
+        noncompliant: 0,
       };
       entries.forEach((entry) => {
         if (summary[entry.status] !== undefined) {
           summary[entry.status] += 1;
+        }
+        if (entry.output_compliant === false) {
+          summary.noncompliant += 1;
         }
       });
       return summary;
@@ -1171,6 +1177,21 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
     function formatStatusChip(status) {
       const normalized = escapeHtml(status || "unknown");
       return `<span class="status-chip status-${normalized}">${normalized}</span>`;
+    }
+
+    function complianceChip(entry) {
+      if (entry.output_compliant === true) {
+        const video = entry.compliance?.video;
+        const summary = video
+          ? `${video.width}x${video.height} ${video.codec || ""} L${(video.level ?? 0) / 10}`
+          : "Verified Chromecast compliant";
+        return `<span class="status-chip status-converted" title="${escapeHtml(summary)}">OK</span>`;
+      }
+      if (entry.output_compliant === false) {
+        const issues = (entry.compliance?.issues || []).join("; ") || "Not compliant";
+        return `<span class="status-chip status-failed" title="${escapeHtml(issues)}">Not compliant</span>`;
+      }
+      return '<span class="hint" title="Not verified yet">—</span>';
     }
 
     function formatUpdated(value) {
@@ -1203,6 +1224,7 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
         { label: "Converting", key: "converting" },
         { label: "Converted", key: "converted" },
         { label: "Failed", key: "failed" },
+        { label: "Non-compliant", key: "noncompliant" },
       ];
       entrySummary.innerHTML = "";
       entries.forEach((item) => {
@@ -1242,6 +1264,11 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
             errorHtml = `<div class="warn" style="margin-top:0.25rem; font-size:0.85rem;">${escapeHtml(entry.last_error)}</div>`;
         }
 
+        const verifiable = entry.status === "converted" || entry.status === "removed";
+        const verifyButton = verifiable
+          ? `<button type="button" class="secondary" data-action="verify" data-entry-id="${Number(entry.id)}">Verify</button>`
+          : "";
+
         tr.innerHTML = `
           <td>${Number(entry.id)}</td>
           <td>${statusHtml}</td>
@@ -1251,12 +1278,14 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
             ${errorHtml}
           </td>
           <td>${escapeHtml(encodingLabel)}</td>
+          <td>${complianceChip(entry)}</td>
           <td>${escapeHtml(formatUpdated(entry.updated_at))}</td>
           <td>
             <div class="row-actions">
-              <button type="button" data-action="reprocess" data-entry-id="${entry.id}">Reprocess</button>
-              <button type="button" class="secondary" data-action="remove" data-entry-id="${entry.id}">Delete original</button>
-              <button type="button" class="secondary" data-action="logs" data-entry-id="${entry.id}">View logs</button>
+              <button type="button" data-action="reprocess" data-entry-id="${Number(entry.id)}">Reprocess</button>
+              <button type="button" class="secondary" data-action="remove" data-entry-id="${Number(entry.id)}">Delete original</button>
+              ${verifyButton}
+              <button type="button" class="secondary" data-action="logs" data-entry-id="${Number(entry.id)}">View logs</button>
             </div>
           </td>
         `;
@@ -1380,10 +1409,13 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
         fetchLogs();
         return;
       }
-      const endpoint =
-        action === "reprocess"
-          ? `/api/library/entries/${entryId}/reprocess`
-          : `/api/library/entries/${entryId}/remove-original`;
+      const endpoints = {
+        reprocess: `/api/library/entries/${entryId}/reprocess`,
+        remove: `/api/library/entries/${entryId}/remove-original`,
+        verify: `/api/library/entries/${entryId}/verify`,
+      };
+      const endpoint = endpoints[action];
+      if (!endpoint) return;
       const label = button.textContent;
       button.textContent = "Working...";
       button.disabled = true;
@@ -1393,7 +1425,13 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
           const detail = await response.json();
           alert(detail.detail || "Request failed");
         }
-        await refreshLibraryEntries();
+        if (action === "verify") {
+          // The verdict arrives via the entry-update websocket message once
+          // the worker has probed the output; no need to reset pagination.
+          libraryStatus.textContent = "Verification queued";
+        } else {
+          await refreshLibraryEntries();
+        }
       } finally {
         button.textContent = label;
         button.disabled = false;
@@ -1880,6 +1918,29 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
             syncLookaheadDisplay();
             updateCpuBframeState();
             updateCpuFfmpegPreview();
+        });
+    }
+
+    if (verifyAllBtn) {
+        verifyAllBtn.addEventListener("click", async () => {
+            verifyAllBtn.disabled = true;
+            verifyAllBtn.textContent = "Queueing...";
+            try {
+                const response = await fetch("/api/library/entries/verify-all", { method: "POST" });
+                const result = await response.json();
+                if (response.ok) {
+                    libraryStatus.textContent =
+                        `Queued verification for ${result.queued_count} entries; ` +
+                        "results appear as workers finish.";
+                } else {
+                    alert("Failed to queue verification: " + (result.detail || "Unknown error"));
+                }
+            } catch (e) {
+                alert("Error during verify request.");
+            } finally {
+                verifyAllBtn.disabled = false;
+                verifyAllBtn.textContent = "Verify outputs";
+            }
         });
     }
 

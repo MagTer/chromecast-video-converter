@@ -59,6 +59,13 @@ def entry_to_response(entry: LibraryEntry) -> Dict[str, Any]:
     payload["path"] = normalize_display_path(payload.get("path"))
     if payload.get("output_path"):
         payload["output_path"] = normalize_display_path(payload.get("output_path"))
+    payload["compliance"] = None
+    detail = getattr(entry, "compliance_detail", None)
+    if detail:
+        try:
+            payload["compliance"] = json.loads(detail)
+        except json.JSONDecodeError:
+            payload["compliance"] = None
     return payload
 
 
@@ -92,6 +99,13 @@ def sync_entry_from_job(
     if status == LibraryStatus.CONVERTED and original_missing:
         final_status = LibraryStatus.REMOVED
     pipeline = job.pipeline or (job.encoding or {}).get("pipeline") or {}
+    compliance = getattr(job, "compliance", None)
+    compliance_kwargs: Dict[str, Any] = {}
+    if compliance:
+        compliance_kwargs = {
+            "output_compliant": bool(compliance.get("compliant")),
+            "compliance_detail": json.dumps(compliance),
+        }
     return get_app_dependencies().library_entry_store.safe_update_status(
         job.path,
         final_status,
@@ -105,6 +119,7 @@ def sync_entry_from_job(
         decode_type=pipeline.get("decode_type"),
         scale_type=pipeline.get("scale_type"),
         encode_type=pipeline.get("encode_type"),
+        **compliance_kwargs,
     )
 
 
@@ -230,6 +245,16 @@ async def record_library_entry(
         get_app_dependencies().library_entry_store.attach_job(entry.id, job.id)  # type: ignore
         record_job_history(job, JobHistoryStatus.PENDING)
         return entry, job
+    if status == LibraryStatus.CONVERTED and entry.output_compliant is None:
+        # Existing output without a compliance verdict (e.g. converted before
+        # compliance tracking existed): queue a verification so the GUI can
+        # show whether it is Chromecast-safe. Deduplicated per path in Redis.
+        verify_job = await get_app_dependencies().job_manager.add_verify_job(
+            str(resolved_path), library_name, profile, profile_id=profile_id
+        )
+        if verify_job:
+            record_job_history(verify_job, JobHistoryStatus.PENDING)
+            return entry, verify_job
     return entry, None
 
 

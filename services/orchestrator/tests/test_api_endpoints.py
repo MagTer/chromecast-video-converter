@@ -284,6 +284,74 @@ def test_reprocess_endpoint_adds_job(test_app, tmp_path):
     assert payload["job"]["library"] == "runtime"
 
 
+def test_verify_endpoint_persists_compliance_without_status_change(test_app, tmp_path):
+    client, main = test_app
+    from app.dependencies import get_app_dependencies
+
+    client.delete("/api/libraries/runtime")
+    profile_id = _first_profile_id(client)
+    profile_name = client.get(f"/api/profiles/{profile_id}").json()["name"]
+
+    media_root = tmp_path / "verify"
+    media_root.mkdir()
+    library_payload = {
+        "name": "runtime",
+        "root": str(media_root),
+        "depth": "max",
+        "profile_id": profile_id,
+    }
+    assert client.post("/api/libraries", json=library_payload).status_code == 201
+
+    source = media_root / "movie.mkv"
+    source.write_bytes(b"content")
+    entry = get_app_dependencies().library_entry_store.update_status(
+        str(source),
+        LibraryStatus.CONVERTED,
+        library="runtime",
+        profile=profile_name,
+        profile_id=profile_id,
+        job_id="seed-job",
+        output_path=str(get_app_dependencies().job_manager.output_path(source)),
+        original_missing=False,
+    )
+
+    response = client.post(f"/api/library/entries/{entry.id}/verify")
+    assert response.status_code == 200
+    job_payload = response.json()["job"]
+    assert job_payload["job_type"] == "verify"
+
+    compliance = {
+        "compliant": False,
+        "issues": ["Width 2592 exceeds 1920"],
+        "checked_at": "2026-07-15T00:00:00+00:00",
+        "video": {"width": 2592, "height": 1080},
+    }
+    status_response = client.post(
+        f"/api/jobs/{job_payload['id']}/status",
+        json={"status": "completed", "progress": 100, "compliance": compliance},
+    )
+    assert status_response.status_code == 200
+
+    entries = client.get("/api/library/entries", params={"library": "runtime"}).json()
+    stored = next(item for item in entries if item["id"] == entry.id)
+    assert stored["status"] == LibraryStatus.CONVERTED
+    assert stored["output_compliant"] is False
+    assert stored["compliance"]["issues"] == ["Width 2592 exceeds 1920"]
+
+    # Entries without a converted output cannot be verified.
+    pending_source = media_root / "pending.mkv"
+    pending_source.write_bytes(b"content")
+    pending_entry = get_app_dependencies().library_entry_store.update_status(
+        str(pending_source),
+        LibraryStatus.PENDING,
+        library="runtime",
+        profile=profile_name,
+        profile_id=profile_id,
+    )
+    denied = client.post(f"/api/library/entries/{pending_entry.id}/verify")
+    assert denied.status_code == 409
+
+
 def test_library_add_and_delete_marks_entries(test_app, tmp_path):
     client, main = test_app
     profile_id = _first_profile_id(client)
