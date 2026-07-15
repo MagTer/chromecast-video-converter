@@ -40,9 +40,8 @@
         </div>
         <div class="queue-actions">
           <div class="queue-buttons">
-            <div class="button-group">
-              <button id="scan-movies" type="button">Scan Movies</button>
-              <button id="scan-series" type="button">Scan Series</button>
+            <div class="button-group" id="scan-buttons">
+              <button id="scan-all" type="button">Scan all libraries</button>
             </div>
             <div class="button-group">
               <button id="pause-toggle" type="button">Pause</button>
@@ -218,14 +217,68 @@
     <section class="page" data-page="config">
       <header>
         <div>
-          <h2>Encoding configuration</h2>
-          <p class="subtitle">Values are constrained to Chromecast Gen 2 capabilities.</p>
+          <h2>Configuration</h2>
+          <p class="subtitle">Libraries, encoding profiles, and operational settings. Encoding values are constrained to Chromecast Gen 2 capabilities.</p>
         </div>
         <div style="display:flex; gap:0.5rem; align-items:center;">
           <button id="reset-config" type="button" class="secondary danger">Reset to Defaults</button>
         </div>
       </header>
+      <div class="panel" id="libraries-panel">
+        <header>
+          <div>
+            <h3 style="margin:0">Libraries</h3>
+            <p class="hint" style="margin:0">Each library maps a watched folder to an encoding profile.</p>
+          </div>
+        </header>
+        <table>
+          <thead>
+            <tr>
+              <th>Name</th>
+              <th>Root path</th>
+              <th>Encoding profile</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody id="library-rows"></tbody>
+        </table>
+        <form id="library-form" class="filters" style="align-items:flex-end; margin-top:0.75rem;">
+          <label class="compact">
+            Name
+            <input id="library-name" placeholder="movies" required />
+          </label>
+          <label class="wide">
+            Root path
+            <input id="library-root" placeholder="/watch/movies" required />
+          </label>
+          <label class="compact">
+            Profile
+            <select id="library-profile"></select>
+          </label>
+          <button type="submit">Add library</button>
+          <span id="library-form-result" class="hint"></span>
+        </form>
+      </div>
       <div class="panel">
+        <header>
+          <div>
+            <h3 style="margin:0">Encoding profile</h3>
+            <p class="hint" style="margin:0">Select a profile to edit, or create a new one. Libraries above choose which profile applies.</p>
+          </div>
+        </header>
+        <div class="filters" style="align-items:flex-end; margin-bottom:0.75rem;">
+          <label class="compact">
+            Profile
+            <select id="profile-select"></select>
+          </label>
+          <label class="compact">
+            Profile name
+            <input id="profile-name" placeholder="chromecast" required />
+          </label>
+          <button id="new-profile" type="button" class="secondary">New profile</button>
+          <button id="delete-profile" type="button" class="secondary danger">Delete profile</button>
+          <span id="profile-toolbar-result" class="hint"></span>
+        </div>
         <form id="config-form">
           <div class="grid-two">
             <!-- Removed "Profile preset" label and select -->
@@ -686,6 +739,6 @@
     </section>
   </main>
 
-    <script type="module" src="/static/js/app.js?v=5" defer></script>
+    <script type="module" src="/static/js/app.js?v=7" defer></script>
 </body>
 </html>
