@@ -145,16 +145,22 @@ async def list_library_entries(
     library: Optional[str] = None,
     limit: int = 100,
     offset: int = 0,
+    include_total: bool = False,
 ) -> JSONResponse:
     if limit <= 0:
         raise HTTPException(status_code=400, detail="Limit must be greater than zero")
     if offset < 0:
         raise HTTPException(status_code=400, detail="Offset cannot be negative")
 
-    entries = get_app_dependencies().library_entry_store.list_entries(
-        status=status, library=library, limit=limit, offset=offset
-    )
-    return JSONResponse(jsonable_encoder([entry_to_response(entry) for entry in entries]))
+    store = get_app_dependencies().library_entry_store
+    entries = store.list_entries(status=status, library=library, limit=limit, offset=offset)
+    items = [entry_to_response(entry) for entry in entries]
+    if include_total:
+        total = store.count_entries(status=status, library=library)
+        return JSONResponse(
+            jsonable_encoder({"items": items, "total": total, "limit": limit, "offset": offset})
+        )
+    return JSONResponse(jsonable_encoder(items))
 
 
 @router.patch("/api/library/entries/{entry_id}")

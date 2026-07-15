@@ -115,6 +115,21 @@ def test_events_ingest_creates_entry(test_app, tmp_path):
     assert items[0]["path"] == str(media_file)
     assert items[0]["status"] in {LibraryStatus.PENDING, LibraryStatus.CONVERTING}
 
+    # include_total wraps the response in an envelope with pagination metadata.
+    envelope = client.get(
+        "/api/library/entries",
+        params={"library": "runtime", "include_total": "true", "limit": 1, "offset": 0},
+    ).json()
+    assert isinstance(envelope, dict)
+    assert envelope["total"] >= 1
+    assert envelope["limit"] == 1
+    assert envelope["offset"] == 0
+    assert len(envelope["items"]) == 1
+
+    # Without include_total the legacy bare-list shape is preserved.
+    bare = client.get("/api/library/entries", params={"library": "runtime"}).json()
+    assert isinstance(bare, list)
+
 
 def test_event_paths_normalized_to_canonical(tmp_path, monkeypatch, fake_redis):
     media_root = tmp_path / "canon-root"

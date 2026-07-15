@@ -80,8 +80,22 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
     const resetConfigBtn = document.querySelector("#reset-config");
     const purgeJobsBtn = document.querySelector("#purge-inactive-jobs");
     const purgeJobsResult = document.querySelector("#purge-jobs-result");
+    const profileSelect = document.querySelector("#profile-select");
+    const profileNameInput = document.querySelector("#profile-name");
+    const newProfileBtn = document.querySelector("#new-profile");
+    const deleteProfileBtn = document.querySelector("#delete-profile");
+    const profileToolbarResult = document.querySelector("#profile-toolbar-result");
+    const libraryRows = document.querySelector("#library-rows");
+    const libraryForm = document.querySelector("#library-form");
+    const libraryNameInput = document.querySelector("#library-name");
+    const libraryRootInput = document.querySelector("#library-root");
+    const libraryProfileSelect = document.querySelector("#library-profile");
+    const libraryFormResult = document.querySelector("#library-form-result");
+    const scanButtons = document.querySelector("#scan-buttons");
 
     let configCache = null;
+    let selectedProfileId = null;
+    let creatingProfile = false;
     let libraryEntries = [];
     let entryOffset = 0;
     let entryTotal = null;
@@ -552,11 +566,127 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
       return Object.entries(configCache.libraries).map(([name, library]) => ({ name, ...library }));
     }
 
-    function findProfile(name) {
-      return profileList().find((profile) => profile.name === name);
+    function findProfileById(profileId) {
+      if (profileId === null || profileId === undefined) return null;
+      return profileList().find((profile) => Number(profile.id) === Number(profileId)) || null;
     }
 
-    // Removed renderProfileSelect() function as the element is removed.
+    function renderProfileSelect() {
+      if (!profileSelect) return;
+      const profiles = profileList();
+      profileSelect.innerHTML = "";
+      profiles.forEach((profile) => {
+        const option = document.createElement("option");
+        option.value = String(profile.id);
+        option.textContent = profile.name;
+        profileSelect.appendChild(option);
+      });
+      if (creatingProfile) {
+        profileSelect.selectedIndex = -1;
+      } else if (selectedProfileId !== null && findProfileById(selectedProfileId)) {
+        profileSelect.value = String(selectedProfileId);
+      }
+    }
+
+    function renderProfileOptionsInto(select, selectedId) {
+      if (!select) return;
+      select.innerHTML = "";
+      profileList().forEach((profile) => {
+        const option = document.createElement("option");
+        option.value = String(profile.id);
+        option.textContent = profile.name;
+        select.appendChild(option);
+      });
+      if (selectedId !== null && selectedId !== undefined) {
+        select.value = String(selectedId);
+      }
+    }
+
+    function renderLibraryTable() {
+      if (!libraryRows) return;
+      libraryRows.innerHTML = "";
+      libraryList().forEach((library) => {
+        const tr = document.createElement("tr");
+
+        const nameCell = document.createElement("td");
+        nameCell.textContent = library.name;
+        tr.appendChild(nameCell);
+
+        const rootCell = document.createElement("td");
+        rootCell.className = "path-cell";
+        rootCell.textContent = normalizeDisplayPath(library.root);
+        rootCell.title = library.root || "";
+        tr.appendChild(rootCell);
+
+        const profileCell = document.createElement("td");
+        const select = document.createElement("select");
+        renderProfileOptionsInto(select, library.profile_id);
+        select.addEventListener("change", async () => {
+          select.disabled = true;
+          try {
+            const response = await fetch(`/api/libraries/${encodeURIComponent(library.name)}`, {
+              method: "PATCH",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ profile_id: Number(select.value) }),
+            });
+            if (!response.ok) {
+              const detail = await response.json().catch(() => ({}));
+              alert(detail.detail || "Failed to update library profile");
+            }
+            await fetchConfig();
+          } finally {
+            select.disabled = false;
+          }
+        });
+        profileCell.appendChild(select);
+        tr.appendChild(profileCell);
+
+        const actionsCell = document.createElement("td");
+        const removeBtn = document.createElement("button");
+        removeBtn.type = "button";
+        removeBtn.className = "secondary danger";
+        removeBtn.textContent = "Delete";
+        removeBtn.addEventListener("click", async () => {
+          if (
+            !confirm(
+              `Delete library "${library.name}"? Tracked entries are marked as removed; files on disk are not touched.`,
+            )
+          ) {
+            return;
+          }
+          removeBtn.disabled = true;
+          try {
+            const response = await fetch(`/api/libraries/${encodeURIComponent(library.name)}`, {
+              method: "DELETE",
+            });
+            if (!response.ok) {
+              const detail = await response.json().catch(() => ({}));
+              alert(detail.detail || "Failed to delete library");
+            }
+            await fetchConfig();
+            refreshLibraryEntries();
+          } finally {
+            removeBtn.disabled = false;
+          }
+        });
+        actionsCell.appendChild(removeBtn);
+        tr.appendChild(actionsCell);
+
+        libraryRows.appendChild(tr);
+      });
+    }
+
+    function renderScanButtons() {
+      if (!scanButtons) return;
+      scanButtons.querySelectorAll("button[data-scan-library]").forEach((btn) => btn.remove());
+      libraryList().forEach((library) => {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.dataset.scanLibrary = library.name;
+        button.textContent = `Scan ${library.name}`;
+        scanButtons.appendChild(button);
+      });
+    }
 
     function renderLibraryFilters() {
       if (!entryLibraryFilter) return;
@@ -616,9 +746,18 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
       }
       
       const profiles = profileList();
-      if (profiles.length > 0) {
-        loadProfile(profiles[0].name);
+      if (!creatingProfile) {
+        const current = findProfileById(selectedProfileId) || profiles[0] || null;
+        if (current) {
+          selectedProfileId = current.id ?? null;
+          loadProfile(current);
+          if (profileNameInput) profileNameInput.value = current.name || "";
+        }
       }
+      renderProfileSelect();
+      renderProfileOptionsInto(libraryProfileSelect, libraryProfileSelect?.value || null);
+      renderLibraryTable();
+      renderScanButtons();
 
       renderLibraryFilters();
 
@@ -629,9 +768,7 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
       }
     }
 
-    function loadProfile(name) {
-      if (!configCache) return;
-      const profile = findProfile(name);
+    function loadProfile(profile) {
       if (!profile) return;
       const gpuProfile = profile.gpu || profile;
       const cpuProfile = profile.cpu || profile;
@@ -755,7 +892,9 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
         if (status === "running") {
              elapsed = formatElapsed(jobElapsedSeconds(job));
         } else if (status !== "pending") {
-             const val = Number.isFinite(recordedElapsed) ? recordedElapsed : 0;
+             // /api/jobs does not include elapsed_seconds; fall back to the
+             // started_at/updated_at delta instead of showing "<1s".
+             const val = Number.isFinite(recordedElapsed) ? recordedElapsed : jobElapsedSeconds(job);
              elapsed = formatElapsed(val);
         }
 
@@ -830,8 +969,10 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
         const fileName = fileNameFromPath(normalizedPath);
         const finished = job.updated_at ? new Date(job.updated_at).toLocaleString() : "-";
         const pipelineText = formatPipeline(job.pipeline || (job.encoding ? job.encoding.pipeline : null));
-        const detailsLink = job.id 
-            ? `<a href="?job_id=${job.id}" class="link-button" onclick="event.preventDefault(); logQuery.value='${job.id}'; switchPage('logs'); fetchLogs();">View Logs</a>` 
+        // Inline onclick handlers cannot reach module-scoped functions; use a
+        // data attribute and the delegated listener on the table body instead.
+        const detailsLink = job.id
+            ? `<button type="button" class="link-button history-log-link" data-job-id="${job.id}">View Logs</button>`
             : (job.message || "-");
 
         tr.innerHTML = `
@@ -847,17 +988,23 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
     }
 
     async function enqueueLibraryScan(library) {
-      scanResult.textContent = `Enqueuing ${library} scan...`;
-      const response = await fetch("/api/scan", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ library }),
-      });
-      const result = await response.json();
-      if (response.ok) {
-        scanResult.textContent = `Scan scheduled for: ${result.scheduled.join(", ")}`;
-      } else {
-        scanResult.textContent = `Scan failed: ${result.detail || "Unknown error"}`;
+      scanResult.textContent = library
+        ? `Enqueuing ${library} scan...`
+        : "Enqueuing scan for all libraries...";
+      try {
+        const response = await fetch("/api/scan", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(library ? { library } : {}),
+        });
+        const result = await response.json();
+        if (response.ok) {
+          scanResult.textContent = `Scan scheduled for: ${(result.scheduled || []).join(", ")}`;
+        } else {
+          scanResult.textContent = `Scan failed: ${result.detail || "Unknown error"}`;
+        }
+      } catch (error) {
+        scanResult.textContent = `Scan failed: ${error.message}`;
       }
     }
 
@@ -1267,12 +1414,17 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
       };
     }
 
-    document
-      .querySelector("#scan-movies")
-      .addEventListener("click", () => enqueueLibraryScan("movies"));
-    document
-      .querySelector("#scan-series")
-      .addEventListener("click", () => enqueueLibraryScan("series"));
+    if (scanButtons) {
+      scanButtons.addEventListener("click", (event) => {
+        const button = event.target.closest("button");
+        if (!button) return;
+        if (button.id === "scan-all") {
+          enqueueLibraryScan(null);
+        } else if (button.dataset.scanLibrary) {
+          enqueueLibraryScan(button.dataset.scanLibrary);
+        }
+      });
+    }
 
     pauseToggle.addEventListener("click", async () => {
       const paused = pauseToggle.textContent === "Resume";
@@ -1425,6 +1577,8 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
       wizardSetupBtn.addEventListener("click", () => {
         setupWizard.close();
         switchPage("config");
+        document.querySelector("#libraries-panel")?.scrollIntoView({ behavior: "smooth" });
+        libraryNameInput?.focus();
       });
       wizardSkipBtn.addEventListener("click", () => {
         setupWizard.close();
@@ -1485,9 +1639,107 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
     const discardConfigBtn = document.querySelector("#discard-config");
     if (discardConfigBtn) {
       discardConfigBtn.addEventListener("click", () => {
-        // Removed profile-select related logic
+        const profile = findProfileById(selectedProfileId) || profileList()[0] || null;
+        if (profile) {
+          creatingProfile = false;
+          selectedProfileId = profile.id ?? null;
+          loadProfile(profile);
+          if (profileNameInput) profileNameInput.value = profile.name || "";
+          renderProfileSelect();
+        }
         configResult.textContent = "Changes discarded.";
         setTimeout(() => { configResult.textContent = ""; }, 2000);
+      });
+    }
+
+    if (profileSelect) {
+      profileSelect.addEventListener("change", () => {
+        const profile = findProfileById(profileSelect.value);
+        if (!profile) return;
+        creatingProfile = false;
+        selectedProfileId = profile.id;
+        loadProfile(profile);
+        if (profileNameInput) profileNameInput.value = profile.name || "";
+        if (profileToolbarResult) profileToolbarResult.textContent = "";
+      });
+    }
+
+    if (newProfileBtn) {
+      newProfileBtn.addEventListener("click", () => {
+        creatingProfile = true;
+        selectedProfileId = null;
+        if (profileSelect) profileSelect.selectedIndex = -1;
+        if (profileNameInput) {
+          profileNameInput.value = "";
+          profileNameInput.focus();
+        }
+        if (profileToolbarResult) {
+          profileToolbarResult.textContent =
+            "Creating a new profile from the current values — name it and save.";
+        }
+      });
+    }
+
+    if (deleteProfileBtn) {
+      deleteProfileBtn.addEventListener("click", async () => {
+        const profile = findProfileById(selectedProfileId);
+        if (!profile) {
+          if (profileToolbarResult) profileToolbarResult.textContent = "No saved profile selected.";
+          return;
+        }
+        if (!confirm(`Delete profile "${profile.name}"?`)) return;
+        deleteProfileBtn.disabled = true;
+        try {
+          const response = await fetch(`/api/profiles/${profile.id}`, { method: "DELETE" });
+          if (response.ok) {
+            selectedProfileId = null;
+            if (profileToolbarResult) {
+              profileToolbarResult.textContent = `Deleted profile ${profile.name}.`;
+            }
+            await fetchConfig();
+          } else {
+            const detail = await response.json().catch(() => ({}));
+            if (profileToolbarResult) {
+              profileToolbarResult.textContent =
+                detail.detail || "Delete failed (profile may be in use by a library).";
+            }
+          }
+        } finally {
+          deleteProfileBtn.disabled = false;
+        }
+      });
+    }
+
+    if (libraryForm) {
+      libraryForm.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        const name = (libraryNameInput?.value || "").trim();
+        const root = (libraryRootInput?.value || "").trim();
+        const profileId = Number(libraryProfileSelect?.value || "0");
+        if (!name || !root || !profileId) {
+          libraryFormResult.textContent = "Name, root path, and profile are required.";
+          return;
+        }
+        libraryFormResult.textContent = "Adding library...";
+        try {
+          const response = await fetch("/api/libraries", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ name, root, profile_id: profileId }),
+          });
+          const result = await response.json().catch(() => ({}));
+          if (response.ok) {
+            libraryFormResult.textContent = `Library ${name} added; initial scan scheduled.`;
+            libraryNameInput.value = "";
+            libraryRootInput.value = "";
+            await fetchConfig();
+            refreshLibraryEntries();
+          } else {
+            libraryFormResult.textContent = result.detail || "Failed to add library.";
+          }
+        } catch (error) {
+          libraryFormResult.textContent = `Failed to add library: ${error.message}`;
+        }
       });
     }
 
@@ -1675,12 +1927,12 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
 
     document.querySelector("#config-form").addEventListener("submit", async (event) => {
       event.preventDefault();
-      // Since profile-select is removed, a fixed name might be used or dynamic creation is expected.
-      // Assuming a default profile or a way to select/create a profile is handled elsewhere
-      // or that this form is now solely for editing the currently loaded profile's details.
-      // For simplicity, I'll use a hardcoded 'default' profile name for now if needed,
-      // but ideally, the UI flow for profile creation/selection would be more robust.
-      // For now, removing the profileNameInput and related logic.
+      const profileName = (profileNameInput?.value || "").trim();
+      if (!profileName) {
+        configResult.textContent = "Profile name is required.";
+        profileNameInput?.focus();
+        return;
+      }
 
       const gpuPayload = {
         codec: "h264",
@@ -1707,14 +1959,8 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
           channels: 2,
         },
       };
-      // Logic for existingProfile and cpuSource should now be driven by backend configuration fetch,
-      // not by a selection from a removed dropdown. This is a potential deeper refactoring
-      // beyond the current scope of GUI changes, so I will simplify to assume the form edits
-      // a single 'default' or pre-selected profile.
-      const profileName = "default"; // Placeholder for the profile being edited
-      const existingProfile = configCache.profiles[profileName] || {};
-
-      const cpuSource = existingProfile.cpu || existingProfile || {};
+      const existingProfile = findProfileById(selectedProfileId) || {};
+      const cpuSource = existingProfile.cpu || {};
       const cpuLookaheadValue = Math.max(
         0,
         Number(cpuLookaheadInput?.value ?? cpuSource.lookahead ?? 0),
@@ -1765,19 +2011,31 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
         },
       };
       const payload = { name: profileName, gpu: gpuPayload, cpu: cpuPayload };
+      // Update the selected profile in place (PUT keeps the id that libraries
+      // reference); POST only when explicitly creating a new profile.
+      const isUpdate = !creatingProfile && selectedProfileId !== null;
+      const endpoint = isUpdate ? `/api/profiles/${selectedProfileId}` : "/api/profiles";
       configResult.textContent = "Saving...";
-      const response = await fetch("/api/config/encoding", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
-      const result = await response.json();
-      if (response.ok) {
-        configResult.textContent = `Updated profile ${result.profile?.name || profileName}`;
-        await fetchConfig();
-        // Removed loadProfile(profileName);
-      } else {
-        configResult.textContent = `Save failed: ${result.detail}`;
+      try {
+        const response = await fetch(endpoint, {
+          method: isUpdate ? "PUT" : "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+        const result = await response.json().catch(() => ({}));
+        if (response.ok) {
+          creatingProfile = false;
+          selectedProfileId = result.profile?.id ?? selectedProfileId;
+          configResult.textContent = `${isUpdate ? "Updated" : "Created"} profile ${
+            result.profile?.name || profileName
+          }`;
+          if (profileToolbarResult) profileToolbarResult.textContent = "";
+          await fetchConfig();
+        } else {
+          configResult.textContent = `Save failed: ${result.detail || response.statusText}`;
+        }
+      } catch (error) {
+        configResult.textContent = `Save failed: ${error.message}`;
       }
     });
 
@@ -1809,6 +2067,16 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
       switchPage("logs");
       fetchLogs();
     });
+
+    if (historyRows) {
+      historyRows.addEventListener("click", (event) => {
+        const link = event.target.closest(".history-log-link");
+        if (!link) return;
+        logQuery.value = link.dataset.jobId || "";
+        switchPage("logs");
+        fetchLogs();
+      });
+    }
 
     async function copyLogsToClipboard() {
       if (!copyLogsButton) return;
