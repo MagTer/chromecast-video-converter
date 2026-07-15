@@ -717,7 +717,34 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
       }
     }
 
+    function activePageName() {
+      return document.querySelector(".page.active")?.dataset.page || "queue";
+    }
+
+    function pollWhen(pages, fn) {
+      return () => {
+        if (document.hidden) return;
+        if (pages.length && !pages.includes(activePageName())) return;
+        fn();
+      };
+    }
+
+    function refreshPageData(pageName) {
+      const refreshers = {
+        queue: () => {
+          fetchJobs();
+          refreshQueueState();
+        },
+        history: () => fetchHistory(),
+        logs: () => fetchLogs(),
+        library: () => softRefreshLibraryEntries(),
+        config: () => fetchLogStats(),
+      };
+      refreshers[pageName]?.();
+    }
+
     function switchPage(pageName) {
+      const changed = activePageName() !== pageName;
       pages.forEach((page) => {
         page.classList.toggle("active", page.dataset.page === pageName);
       });
@@ -726,6 +753,9 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
       });
       if (window.location.hash !== `#${pageName}`) {
         window.location.hash = `#${pageName}`;
+      }
+      if (changed) {
+        refreshPageData(pageName);
       }
     }
 
@@ -1067,6 +1097,8 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
       return "severity-info";
     }
 
+    let logRenderSignature = "";
+
     async function fetchLogs() {
       const params = new URLSearchParams();
       if (logSource.value) params.set("source", logSource.value);
@@ -1078,6 +1110,11 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
         if (response.ok) {
           const entries = await response.json();
           logCacheEntries = Array.isArray(entries) ? entries : [];
+          // Skip re-render (and the scroll reset it causes) when nothing changed.
+          const signature = JSON.stringify(logCacheEntries);
+          if (signature === logRenderSignature) return;
+          logRenderSignature = signature;
+          const previousScrollTop = logList.scrollTop;
           logList.innerHTML = "";
           logCacheEntries.forEach((entry) => {
             const container = document.createElement("div");
@@ -1094,6 +1131,7 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
             `;
             logList.appendChild(container);
           });
+          logList.scrollTop = previousScrollTop;
         }
       } catch (e) {
         console.error("fetchLogs failed", e);
@@ -1295,6 +1333,42 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
       await loadLibraryEntries({ reset: true });
     }
 
+    // Background refresh that re-fetches the already-loaded window instead of
+    // resetting pagination — "Load more" progress and scroll survive.
+    async function softRefreshLibraryEntries() {
+      if (entryLoadingState) return;
+      const pageSize = Number(entryPageSize.value || "20");
+      const windowSize = Math.max(libraryEntries.length, pageSize);
+      entryLoadingState = true;
+      try {
+        const params = new URLSearchParams({
+          limit: String(windowSize),
+          offset: "0",
+          include_total: "true",
+        });
+        if (entryStatusFilter.value) params.set("status", entryStatusFilter.value);
+        if (entryLibraryFilter.value) params.set("library", entryLibraryFilter.value);
+        const response = await fetch(`/api/library/entries?${params.toString()}`);
+        const result = await response.json();
+        const items = Array.isArray(result) ? result : result.items || [];
+        if (!Array.isArray(result) && result.total !== undefined && result.total !== null) {
+          entryTotal = result.total;
+        }
+        libraryEntries = [...items].sort(
+          (a, b) => new Date(b.updated_at || 0) - new Date(a.updated_at || 0),
+        );
+        entryOffset = items.length;
+        entryHasMore =
+          entryTotal !== null ? entryOffset < entryTotal : items.length === windowSize;
+        renderEntrySummary();
+        renderEntryTable();
+      } catch (error) {
+        console.error("softRefreshLibraryEntries failed", error);
+      } finally {
+        entryLoadingState = false;
+      }
+    }
+
     async function handleEntryAction(action, entryId, button) {
       if (!entryId) return;
       if (action === "logs") {
@@ -1404,7 +1478,7 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
             upsertJob(data.job);
           } else if (data.type === "library-update") {
             fetchConfig();
-            refreshLibraryEntries();
+            softRefreshLibraryEntries();
           }
         } catch (error) {
           console.error("Failed to process websocket message", error);
@@ -2165,10 +2239,19 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
     });
 
     switchPage(initialPage);
-    setInterval(fetchJobs, 5000);
-    setInterval(fetchHistory, 15000);
-    setInterval(fetchLogs, 6000);
-    setInterval(fetchLogFilters, 15000);
-    setInterval(fetchLogStats, 20000);
-    setInterval(refreshQueueState, 7000);
-    setInterval(refreshLibraryEntries, 30000);
+
+    // Poll only what the visible page needs, and nothing while the tab is
+    // hidden; the WebSocket carries live job/entry updates in between.
+    setInterval(pollWhen(["queue"], fetchJobs), 5000);
+    setInterval(pollWhen(["queue"], refreshQueueState), 7000);
+    setInterval(pollWhen(["history"], fetchHistory), 15000);
+    setInterval(pollWhen(["logs"], fetchLogs), 6000);
+    setInterval(pollWhen(["logs"], fetchLogFilters), 30000);
+    setInterval(pollWhen(["config"], fetchLogStats), 30000);
+    setInterval(pollWhen(["library"], softRefreshLibraryEntries), 30000);
+
+    document.addEventListener("visibilitychange", () => {
+      if (!document.hidden) {
+        refreshPageData(activePageName());
+      }
+    });
