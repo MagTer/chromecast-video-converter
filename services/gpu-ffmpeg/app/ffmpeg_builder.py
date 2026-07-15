@@ -11,6 +11,16 @@ LOGGER = logging.getLogger("gpu-ffmpeg.builder")
 
 DEFAULT_LANGUAGE_PREFERENCES = ("swe", "eng")
 
+# Hard device limits for Chromecast Gen 2/3 (H.264 High @ L4.1/4.2).
+# The hardware decoder rejects anything wider/taller than 1080p regardless
+# of the H.264 level signalled in the stream.
+CHROMECAST_MAX_WIDTH = 1920
+CHROMECAST_MAX_HEIGHT = 1080
+CHROMECAST_MAX_FPS = 60
+DEFAULT_TARGET_RESOLUTION = (1280, 720)
+
+INTERLACED_FIELD_ORDERS = {"tt", "bb", "tb", "bt"}
+
 SUPPORTED_SUBTITLE_CODECS = {
     "subrip",
     "ass",
@@ -51,6 +61,10 @@ class VideoStreamInfo:
     side_data_list: list | None = None
     avg_frame_rate: str | None = None
     r_frame_rate: str | None = None
+    width: int | None = None
+    height: int | None = None
+    field_order: str | None = None
+    bit_rate: str | int | None = None
 
     def bit_depth(self) -> int | None:
         if self.bits_per_raw_sample:
@@ -80,6 +94,16 @@ class VideoStreamInfo:
             except (ValueError, ZeroDivisionError):
                 continue
         return None
+
+    def is_interlaced(self) -> bool:
+        return (self.field_order or "").lower() in INTERLACED_FIELD_ORDERS
+
+    def video_bit_rate(self) -> int | None:
+        try:
+            value = int(self.bit_rate) if self.bit_rate is not None else 0
+        except (TypeError, ValueError):
+            return None
+        return value if value > 0 else None
 
     def is_hdr(self) -> bool:
         if self.color_transfer and self.color_transfer.lower() in {
@@ -161,7 +185,7 @@ class TranscodeProfile:
             bufsize=str(raw.get("bufsize", "16M")),
             level=str(raw.get("level", "4.1")),
             h264_profile=str(raw.get("profile", "high")),
-            max_fps=max(1, _int(raw.get("max_fps", 30), 30)),
+            max_fps=min(CHROMECAST_MAX_FPS, max(1, _int(raw.get("max_fps", 30), 30))),
             preset=str(raw.get("preset", "p6")),
             rc_mode=str(raw.get("rc", "vbr") or "vbr").lower(),
             cq=str(raw.get("cq", 18)),
@@ -264,6 +288,13 @@ class FFmpegBuilder:
         for stream in streams:
             codec_type = stream.get("codec_type")
             if codec_type == "video":
+                disposition = stream.get("disposition") or {}
+                if disposition.get("attached_pic"):
+                    LOGGER.info(
+                        "Skipping attached picture stream (codec %s)",
+                        stream.get("codec_name"),
+                    )
+                    continue
                 videos.append(
                     VideoStreamInfo(
                         input_index=len(videos),
@@ -276,6 +307,10 @@ class FFmpegBuilder:
                         side_data_list=stream.get("side_data_list"),
                         avg_frame_rate=stream.get("avg_frame_rate"),
                         r_frame_rate=stream.get("r_frame_rate"),
+                        width=stream.get("width"),
+                        height=stream.get("height"),
+                        field_order=stream.get("field_order"),
+                        bit_rate=stream.get("bit_rate"),
                     )
                 )
             elif codec_type == "audio":
@@ -425,91 +460,102 @@ class FFmpegBuilder:
         video_stream: VideoStreamInfo | None,
         pipeline: dict,
     ) -> tuple[str, bool]:
+        """Build the -vf chain. Returns (filter_chain, tonemapped_to_bt709)."""
         decode_type = (pipeline.get("decode_type") or "gpu").lower()
         scale_type = (pipeline.get("scale_type") or "gpu").lower()
         encode_type = (pipeline.get("encode_type") or "gpu").lower()
 
         source_fps = video_stream.frame_rate() if video_stream else None
-        fps_value, needs_filter = self._fps_filter_config(source_fps, profile.max_fps)
-        fps_fragment = f"fps={self._format_fps_value(fps_value)}" if needs_filter else ""
+        fps_value, needs_fps_filter = self._fps_filter_config(source_fps, profile.max_fps)
+        fps_fragment = f"fps={self._format_fps_value(fps_value)}" if needs_fps_filter else ""
 
         bit_depth = video_stream.bit_depth() if video_stream else None
         is_high_bit_depth = bool(bit_depth and bit_depth > 8)
-        requires_tonemap = bool(
-            video_stream and (video_stream.is_hdr() or (bit_depth and bit_depth > 8))
-        )
+        requires_tonemap = bool(video_stream and (video_stream.is_hdr() or is_high_bit_depth))
+        is_interlaced = video_stream.is_interlaced() if video_stream else False
 
-        resolution_hint = profile.max_resolution or profile.resolution
-        target_height = resolution_hint.split("x")[1] if isinstance(resolution_hint, str) else "720"
+        target_width, target_height = self._target_dimensions(profile)
+        needs_scaling = self._needs_scaling(video_stream, target_width, target_height)
 
         capabilities = self.ffmpeg_capabilities
         supports_hwaccel = capabilities.supports_hwaccel("cuda")
         supports_hwupload = capabilities.supports_filter("hwupload_cuda")
-        gpu_scale_filter = self._gpu_scale_filter(target_height, video_stream)
-        scale_on_gpu = scale_type == "gpu" and bool(gpu_scale_filter)
-        gpu_pipeline_ready = (
-            decode_type == "gpu"
-            and scale_type == "gpu"
-            and encode_type == "gpu"
-            and supports_hwaccel
-            and scale_on_gpu
-        )
-        use_gpu_tonemap = (
-            requires_tonemap and capabilities.supports_filter("tonemap_cuda") and gpu_pipeline_ready
-        )
+        gpu_scale_filter = self._gpu_scale_filter(target_width, target_height, video_stream)
+        gpu_deinterlace_filter = self._gpu_deinterlace_filter()
+
+        # Tonemapping always runs on the CPU: upstream FFmpeg has no tonemap_cuda
+        # (that filter only exists in the jellyfin-ffmpeg fork), and HDR sources are
+        # 10-bit which our GPU scale path does not accept anyway.
         use_cpu_tonemap = (
             requires_tonemap
-            and not use_gpu_tonemap
             and capabilities.supports_filter("zscale")
             and capabilities.supports_filter("tonemap")
         )
-        if requires_tonemap and not (use_gpu_tonemap or use_cpu_tonemap):
-            LOGGER.warning("HDR content detected but tonemap filters are unavailable")
+        if requires_tonemap and not use_cpu_tonemap:
+            LOGGER.warning("HDR/10-bit content detected but tonemap filters are unavailable")
 
-        needs_cpu_processing = (
-            decode_type != encode_type
-            or scale_type != encode_type
-            or (scale_type == "gpu" and not scale_on_gpu)
-            or use_cpu_tonemap
+        gpu_filtering_possible = (
+            decode_type == "gpu"
+            and encode_type == "gpu"
+            and scale_type == "gpu"
+            and supports_hwaccel
+            and not is_high_bit_depth
+            and not requires_tonemap
+            and (not needs_scaling or gpu_scale_filter is not None)
+            and (not is_interlaced or gpu_deinterlace_filter is not None)
         )
 
         filters: list[str] = []
 
-        if needs_cpu_processing:
-            if decode_type == "gpu":
-                filters.append("hwdownload")
-                filters.append("format=p010le" if is_high_bit_depth else "format=yuv420p")
-            if use_cpu_tonemap:
-                filters.extend(self._cpu_tonemap_filters())
-            if scale_type == "cpu" or not scale_on_gpu:
-                filters.append(f"scale=-2:{target_height}:force_original_aspect_ratio=decrease")
-            if fps_fragment:
-                filters.append(fps_fragment)
-
-            # Hybrid pipeline fix: If we are going to GPU for scaling OR encoding,
-            # we need to upload. This covers:
-            # 1. CPU decode -> GPU scale -> GPU encode
-            # 2. CPU decode -> GPU scale -> CPU encode (unlikely but possible)
-            # 3. CPU decode -> CPU scale -> GPU encode
-            if encode_type == "gpu" or scale_on_gpu:
-                filters.append("format=nv12")
-                if supports_hwupload:
-                    filters.append("hwupload_cuda")
-                if scale_on_gpu and gpu_scale_filter:
-                    filters.append(gpu_scale_filter)
-
-                if encode_type == "cpu":
-                    filters.append("hwdownload")
-                    filters.append("format=yuv420p")
-            else:
-                filters.append("format=yuv420p")
-        else:
-            if use_gpu_tonemap:
-                filters.append("tonemap_cuda")
-            if scale_on_gpu and gpu_scale_filter:
+        if gpu_filtering_possible:
+            if is_interlaced and gpu_deinterlace_filter:
+                filters.append(gpu_deinterlace_filter)
+            if needs_scaling and gpu_scale_filter:
                 filters.append(gpu_scale_filter)
             if fps_fragment:
                 filters.append(fps_fragment)
+        elif (
+            decode_type == "gpu"
+            or encode_type == "gpu"
+            or needs_scaling
+            or is_interlaced
+            or use_cpu_tonemap
+            or bool(fps_fragment)
+        ):
+            if decode_type == "gpu":
+                filters.append("hwdownload")
+                filters.append("format=p010le" if is_high_bit_depth else "format=yuv420p")
+            if is_interlaced:
+                cpu_deinterlace_filter = self._cpu_deinterlace_filter()
+                if cpu_deinterlace_filter:
+                    filters.append(cpu_deinterlace_filter)
+                else:
+                    LOGGER.warning(
+                        "Interlaced content detected but no deinterlace filter is available"
+                    )
+            if use_cpu_tonemap:
+                filters.extend(self._cpu_tonemap_filters())
+            # Scale after hwupload only when the pipeline explicitly asks for GPU
+            # scaling and the encode also happens on the GPU.
+            scale_after_upload = (
+                needs_scaling
+                and scale_type == "gpu"
+                and encode_type == "gpu"
+                and gpu_scale_filter is not None
+            )
+            if needs_scaling and not scale_after_upload:
+                filters.append(f"scale={self._scale_dimension_args(target_width, target_height)}")
+            if fps_fragment:
+                filters.append(fps_fragment)
+
+            if encode_type == "gpu":
+                filters.append("format=nv12")
+                if supports_hwupload:
+                    filters.append("hwupload_cuda")
+                if scale_after_upload and gpu_scale_filter:
+                    filters.append(gpu_scale_filter)
+            else:
+                filters.append("format=yuv420p")
 
         filter_chain = ",".join(filters)
         LOGGER.debug(
@@ -517,7 +563,59 @@ class FFmpegBuilder:
             filter_chain,
             extra={"event": "filter_chain", "filters": filters},
         )
-        return filter_chain, bool(filters)
+        return filter_chain, use_cpu_tonemap
+
+    def _target_dimensions(self, profile: TranscodeProfile) -> tuple[int, int]:
+        hint = profile.max_resolution or profile.resolution
+        width, height = DEFAULT_TARGET_RESOLUTION
+        if isinstance(hint, str):
+            match = re.fullmatch(r"\s*(\d+)\s*[xX]\s*(\d+)\s*", hint)
+            if match:
+                width, height = int(match.group(1)), int(match.group(2))
+            else:
+                LOGGER.warning(
+                    "Profile %s has malformed resolution %r; using %sx%s",
+                    profile.name,
+                    hint,
+                    width,
+                    height,
+                )
+        if width > CHROMECAST_MAX_WIDTH or height > CHROMECAST_MAX_HEIGHT:
+            LOGGER.warning(
+                "Profile %s resolution %sx%s exceeds Chromecast limits; clamping to %sx%s",
+                profile.name,
+                width,
+                height,
+                CHROMECAST_MAX_WIDTH,
+                CHROMECAST_MAX_HEIGHT,
+            )
+            width = min(width, CHROMECAST_MAX_WIDTH)
+            height = min(height, CHROMECAST_MAX_HEIGHT)
+        return max(2, width - width % 2), max(2, height - height % 2)
+
+    def _needs_scaling(
+        self, video_stream: VideoStreamInfo | None, target_width: int, target_height: int
+    ) -> bool:
+        if video_stream is None:
+            return True
+        width, height = video_stream.width, video_stream.height
+        if not isinstance(width, int) or not isinstance(height, int) or width <= 0 or height <= 0:
+            # Unknown dimensions: keep the clamping scale filter in the chain.
+            # It never upscales (min() expressions), so it is safe as a no-op.
+            return True
+        if width % 2 or height % 2:
+            # Odd dimensions are not representable in yuv420p/nv12 output.
+            return True
+        return width > target_width or height > target_height
+
+    def _scale_dimension_args(self, target_width: int, target_height: int) -> str:
+        # Clamp both axes to the target box while preserving aspect ratio.
+        # min() keeps sources that already fit untouched (never upscale), and
+        # force_original_aspect_ratio=decrease shrinks whichever axis overflows.
+        return (
+            f"w=min(iw\\,{target_width}):h=min(ih\\,{target_height}):"
+            "force_original_aspect_ratio=decrease:force_divisible_by=2"
+        )
 
     def _cpu_tonemap_filters(self) -> list[str]:
         return [
@@ -526,21 +624,33 @@ class FFmpegBuilder:
             "zscale=p=bt709:t=bt709:m=bt709:r=tv",
         ]
 
+    def _cpu_deinterlace_filter(self) -> str | None:
+        # mode=send_frame keeps the source frame rate (one frame per frame);
+        # bwdif defaults to send_field which would double the fps.
+        for name in ("bwdif", "yadif"):
+            if self.ffmpeg_capabilities.supports_filter(name):
+                return f"{name}=mode=send_frame"
+        return None
+
+    def _gpu_deinterlace_filter(self) -> str | None:
+        for name in ("bwdif_cuda", "yadif_cuda"):
+            if self.ffmpeg_capabilities.supports_filter(name):
+                return f"{name}=mode=send_frame"
+        return None
+
     def _gpu_scale_filter(
-        self, target_height: str, video_stream: VideoStreamInfo | None
+        self, target_width: int, target_height: int, video_stream: VideoStreamInfo | None
     ) -> str | None:
         # 10-bit/HDR content is safer to process via CPU (download -> tonemap -> upload)
         # because scale_npp often lacks P010 support and scale_cuda can be flaky.
         if video_stream and (video_stream.bit_depth() or 8) > 8:
             return None
 
+        dimension_args = self._scale_dimension_args(target_width, target_height)
         if self.ffmpeg_capabilities.supports_filter("scale_npp"):
-            return (
-                f"scale_npp=w=-2:h={target_height}:format=nv12:"
-                "force_original_aspect_ratio=decrease"
-            )
+            return f"scale_npp={dimension_args}:format=nv12"
         if self.ffmpeg_capabilities.supports_filter("scale_cuda"):
-            return f"scale_cuda=-2:{target_height}:force_original_aspect_ratio=decrease"
+            return f"scale_cuda={dimension_args}"
         return None
 
     # --------------- Misc helpers --------------- #
@@ -569,11 +679,18 @@ class FFmpegBuilder:
         decode_type = (pipeline.get("decode_type") or "gpu").lower()
         encode_type = (pipeline.get("encode_type") or "gpu").lower()
 
-        # Smart Bitrate Clamping
-        try:
-            source_bitrate = int(self.analysis.get("format", {}).get("bit_rate", 0))
-        except (ValueError, TypeError):
-            source_bitrate = 0
+        streams = self.analysis.get("streams", []) or []
+        video_streams, audio_streams, subtitle_streams = self._parse_streams(streams)
+        video_stream = video_streams[0] if video_streams else None
+
+        # Smart Bitrate Clamping. Prefer the video stream's own bitrate; the
+        # container bitrate includes audio/subtitles and overshoots slightly.
+        source_bitrate = video_stream.video_bit_rate() if video_stream else None
+        if source_bitrate is None:
+            try:
+                source_bitrate = int(self.analysis.get("format", {}).get("bit_rate", 0))
+            except (ValueError, TypeError):
+                source_bitrate = 0
 
         if source_bitrate > 0:
 
@@ -614,10 +731,6 @@ class FFmpegBuilder:
                 if max_br > 0 and limit > max_br:
                     profile.bitrate = str(max_br)
 
-        streams = self.analysis.get("streams", []) or []
-        video_streams, audio_streams, subtitle_streams = self._parse_streams(streams)
-        video_stream = video_streams[0] if video_streams else None
-
         # Robust Subtitle Handling
         valid_subs = []
         for sub in subtitle_streams:
@@ -645,7 +758,9 @@ class FFmpegBuilder:
         # 2. Main Output Options
         main_options: list[str] = []
         if video_streams:
-            main_options.extend(["-map", "0:v"])
+            # 0:V excludes attached pictures (cover art); Chromecast expects a
+            # single video track, so map only the first real video stream.
+            main_options.extend(["-map", "0:V:0"])
         for audio_stream in selected_audio:
             main_options.extend(["-map", f"0:a:{audio_stream.input_index}"])
         for subtitle_stream in selected_subtitles:
@@ -656,9 +771,9 @@ class FFmpegBuilder:
             selected_subtitles, default_sub_idx, "s"
         )
 
-        video_filter, needs_filter = self._build_filter_chain(profile, video_stream, pipeline)
+        video_filter, tonemapped = self._build_filter_chain(profile, video_stream, pipeline)
 
-        if needs_filter:
+        if video_filter:
             main_options.extend(["-vf", video_filter])
 
         h264_profile_lower = profile.h264_profile.lower()
@@ -785,6 +900,20 @@ class FFmpegBuilder:
                     ]
                 )
             main_options.extend(["-bf", str(bframes)])
+
+        if tonemapped:
+            # The zscale/tonemap chain converts to BT.709; tag the output so
+            # players do not misinterpret the stream as BT.2020/PQ.
+            main_options.extend(
+                [
+                    "-colorspace:v",
+                    "bt709",
+                    "-color_primaries:v",
+                    "bt709",
+                    "-color_trc:v",
+                    "bt709",
+                ]
+            )
         main_options.extend(["-movflags", "+faststart"])
 
         if selected_audio:

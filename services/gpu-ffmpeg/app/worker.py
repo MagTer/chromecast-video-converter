@@ -145,6 +145,8 @@ OPERATIONAL_CONFIG: dict = {}
 REMOVE_ORIGINAL = False
 GPU_TELEMETRY_INTERVAL = int(os.environ.get("GPU_TELEMETRY_INTERVAL", "30"))
 LANGUAGE_PREFERENCES: tuple[str, ...] = DEFAULT_LANGUAGE_PREFERENCES
+# Keep in sync with the "chromecast" profile in the orchestrator's
+# DEFAULT_CONFIG (services/orchestrator/app/config.py).
 BUILTIN_PROFILE = {
     "name": "chromecast",
     "gpu": {
@@ -152,16 +154,16 @@ BUILTIN_PROFILE = {
         "codec": "h264",
         "profile": "high",
         "level": "4.1",
-        "resolution": "1920x1080",
+        "resolution": "1280x720",
         "max_fps": 30,
-        "bitrate": "5M",
-        "max_bitrate": "10M",
-        "bufsize": "16M",
+        "bitrate": "3M",
+        "max_bitrate": "8M",
+        "bufsize": "20M",
         "preset": "p7",
-        "rc": "vbr",
+        "rc": "vbr_hq",
         "cq": 18,
-        "bframes": 2,
-        "lookahead": 24,
+        "bframes": 3,
+        "lookahead": 32,
         "adaptive_b_frames": True,
         "aq": True,
         "spatial_aq": True,
@@ -174,20 +176,20 @@ BUILTIN_PROFILE = {
         "codec": "h264",
         "profile": "high",
         "level": "4.1",
-        "resolution": "1920x1080",
+        "resolution": "1280x720",
         "max_fps": 30,
-        "bitrate": "5M",
+        "bitrate": "3M",
         "max_bitrate": "8M",
-        "bufsize": "16M",
-        "preset": "slow",
-        "rc": "crf",
-        "cq": 20,
-        "bframes": 2,
-        "lookahead": 0,
+        "bufsize": "20M",
+        "preset": "veryslow",
+        "rc": "vbr",
+        "cq": 18,
+        "bframes": 3,
+        "lookahead": 32,
         "adaptive_b_frames": True,
-        "aq": False,
-        "spatial_aq": False,
-        "temporal_aq": False,
+        "aq": True,
+        "spatial_aq": True,
+        "temporal_aq": True,
         "aq_strength": 7,
         "audio": {"codec": "aac", "bitrate": "192k", "channels": 2},
     },
@@ -313,7 +315,8 @@ def _probe_ffmpeg_support() -> tuple[dict[str, Any], list[str]]:
         filters: set[str] = set()
         for line in result.stdout.splitlines():
             parts = line.split()
-            if len(parts) >= 2 and parts[0].startswith(" "):
+            # Format: " T.C scale ..." -> the filter name is the second column.
+            if len(parts) >= 2:
                 filters.add(parts[1])
         support["tonemap_cuda"] = "tonemap_cuda" in filters
         support["scale_cuda"] = "scale_cuda" in filters
@@ -456,7 +459,7 @@ def _loggable_command(command: list[str]) -> str:
 
 def _media_summary(analysis: dict) -> dict:
     streams = analysis.get("streams") or []
-    video = next((s for s in streams if s.get("codec_type") == "video"), {}) or {}
+    video: dict = next((s for s in streams if s.get("codec_type") == "video"), {}) or {}
     audio_streams = [s for s in streams if s.get("codec_type") == "audio"]
     subtitle_streams = [s for s in streams if s.get("codec_type") == "subtitle"]
     return {

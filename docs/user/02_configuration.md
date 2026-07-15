@@ -21,6 +21,8 @@ The config database (`config.db`) stores all runtime settings:
 
 Profiles are edited via `/api/config/encoding` (or `/api/profiles` CRUD endpoints). FastAPI re-validates every field through `HardwareProfile` so only Chromecast-safe resolutions, FPS, bitrates, and AAC stereo settings can be saved. Each profile stores both GPU (NVENC) and CPU (fallback) blocks. CPU settings are currently only used when the retry pipeline falls through to CPU stages after an NVENC failure.
 
+The profile `resolution` is a bounding box, not a fixed output size: the GPU worker clamps both axes (never just one), preserves the aspect ratio, and never upscales a source that already fits. Sources are additionally hard-capped at 1920x1080 and 60 fps regardless of profile contents, since that is the Chromecast Gen 2/3 decoder limit. HDR/10-bit sources are tonemapped to 8-bit BT.709 (and tagged as such), and interlaced sources are deinterlaced (`bwdif`/`yadif`, GPU variants when available) before encoding.
+
 ## Queue controls
 
 - `POST /api/queue/pause` and `/api/queue/resume` toggle the Redis flag the worker checks before dequeuing.

@@ -60,7 +60,7 @@ services:
       - GPU_STREAM_READER_LIMIT=${GPU_STREAM_READER_LIMIT:-1000000}
 
   redis:
-    image: redis:7
+    image: redis:8
     volumes:
       - redis_data:/data
 

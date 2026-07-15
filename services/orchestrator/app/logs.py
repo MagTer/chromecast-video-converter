@@ -89,8 +89,7 @@ class LogStore:
 
     def _initialize(self) -> None:
         with self._lock:
-            self._conn.execute(
-                """
+            self._conn.execute("""
                 CREATE TABLE IF NOT EXISTS logs (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     timestamp REAL NOT NULL,
@@ -103,8 +102,7 @@ class LogStore:
                     message TEXT NOT NULL,
                     request_id TEXT
                 )
-                """
-            )
+                """)
             self._ensure_columns()
             self._conn.execute("CREATE INDEX IF NOT EXISTS idx_logs_level ON logs(severity_value)")
             self._conn.execute("CREATE INDEX IF NOT EXISTS idx_logs_logger ON logs(category)")
