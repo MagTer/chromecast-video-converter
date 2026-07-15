@@ -171,6 +171,10 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # Docker references must be lowercase; github.repository is not.
+      - name: Compute lowercase repository name
+        run: echo "REPO_LC=${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
+
       - name: Extract image metadata
         id: meta
         uses: docker/metadata-action@v5
@@ -192,6 +196,6 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
-            FFMPEG_IMAGE=${{ env.REGISTRY }}/${{ github.repository }}/ffmpeg-cuda:latest
+            FFMPEG_IMAGE=${{ env.REGISTRY }}/${{ env.REPO_LC }}/ffmpeg-cuda:latest
           cache-from: type=gha,scope=${{ matrix.service }}
           cache-to: type=gha,scope=${{ matrix.service }},mode=max
