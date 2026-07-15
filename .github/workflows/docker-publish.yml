@@ -2,6 +2,11 @@ name: Build and publish Docker images
 
 on:
   workflow_dispatch:
+    inputs:
+      rebuild_ffmpeg:
+        description: "Force rebuild of the ffmpeg-cuda base image"
+        type: boolean
+        default: false
   push:
     branches:
       - main
@@ -14,27 +19,147 @@ on:
 env:
   REGISTRY: ghcr.io
 
+concurrency:
+  group: docker-publish-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
-  build-and-push:
+  # Decide what actually needs rebuilding. Tag pushes and manual dispatch
+  # rebuild all service images; the ffmpeg-cuda base only rebuilds when its
+  # inputs change (or when forced via dispatch input).
+  changes:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      ffmpeg: ${{ steps.decide.outputs.ffmpeg }}
+      services: ${{ steps.decide.outputs.services }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Detect changed paths
+        id: filter
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            ffmpeg:
+              - 'services/gpu-ffmpeg/Dockerfile.ffmpeg'
+              - 'services/gpu-ffmpeg/patches/**'
+            gpu-ffmpeg:
+              - 'services/gpu-ffmpeg/**'
+            orchestrator:
+              - 'services/orchestrator/**'
+            folder-watcher:
+              - 'services/folder-watcher/**'
+
+      - name: Compose build matrix
+        id: decide
+        env:
+          EVENT: ${{ github.event_name }}
+          REF_TYPE: ${{ github.ref_type }}
+          FORCE_FFMPEG: ${{ inputs.rebuild_ffmpeg }}
+          CH_FFMPEG: ${{ steps.filter.outputs.ffmpeg }}
+          CH_GPU: ${{ steps.filter.outputs.gpu-ffmpeg }}
+          CH_ORCH: ${{ steps.filter.outputs.orchestrator }}
+          CH_WATCH: ${{ steps.filter.outputs.folder-watcher }}
+        run: |
+          build_all=false
+          if [[ "$EVENT" == "workflow_dispatch" || "$REF_TYPE" == "tag" ]]; then
+            build_all=true
+          fi
+
+          ffmpeg=false
+          if [[ "$CH_FFMPEG" == "true" || "$FORCE_FFMPEG" == "true" ]]; then
+            ffmpeg=true
+          fi
+
+          services=()
+          [[ "$build_all" == "true" || "$CH_ORCH" == "true" ]] && services+=("orchestrator")
+          [[ "$build_all" == "true" || "$CH_WATCH" == "true" ]] && services+=("folder-watcher")
+          [[ "$build_all" == "true" || "$CH_GPU" == "true" ]] && services+=("gpu-ffmpeg")
+
+          if [[ ${#services[@]} -eq 0 ]]; then
+            services_json="[]"
+          else
+            services_json=$(printf '%s\n' "${services[@]}" | jq -R . | jq -sc .)
+          fi
+
+          echo "ffmpeg=$ffmpeg" >> "$GITHUB_OUTPUT"
+          echo "services=$services_json" >> "$GITHUB_OUTPUT"
+          echo "ffmpeg=$ffmpeg services=$services_json"
+
+  # Heavy FFmpeg/CUDA compile — only when Dockerfile.ffmpeg or patches change.
+  ffmpeg-base:
+    needs: changes
+    if: needs.changes.outputs.ffmpeg == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 150
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Free disk space (CUDA images are large)
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          sudo docker image prune -af
+          df -h /
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ github.repository }}/ffmpeg-cuda
+          tags: |
+            type=sha
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: ./services/gpu-ffmpeg
+          file: ./services/gpu-ffmpeg/Dockerfile.ffmpeg
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=ffmpeg-cuda
+          cache-to: type=gha,scope=ffmpeg-cuda,mode=max
+
+  # Cheap application images. gpu-ffmpeg layers the app on the ffmpeg-cuda
+  # base, so this waits for ffmpeg-base when that also rebuilt.
+  services:
+    needs: [changes, ffmpeg-base]
+    if: >-
+      always() &&
+      needs.changes.outputs.services != '[]' &&
+      needs.ffmpeg-base.result != 'failure' &&
+      needs.ffmpeg-base.result != 'cancelled'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       contents: read
       packages: write
     strategy:
       fail-fast: false
       matrix:
-        service: [orchestrator, folder-watcher, gpu-ffmpeg]
+        service: ${{ fromJSON(needs.changes.outputs.services) }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
-      - name: Free disk space (CUDA images are large)
-        if: matrix.service == 'gpu-ffmpeg'
-        run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
-          sudo docker image prune -af
-          df -h /
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -66,5 +191,7 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            FFMPEG_IMAGE=${{ env.REGISTRY }}/${{ github.repository }}/ffmpeg-cuda:latest
           cache-from: type=gha,scope=${{ matrix.service }}
           cache-to: type=gha,scope=${{ matrix.service }},mode=max

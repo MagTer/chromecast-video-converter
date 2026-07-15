@@ -19,9 +19,17 @@ ghcr.io/magter/chromecast-video-converter/gpu-ffmpeg:latest
 ```
 
 Besides `latest`, each image is also tagged with the commit (`sha-<short>`)
-and, for releases, the version tag (`v*`). The `gpu-ffmpeg` image bundles a
-CUDA/NPP-enabled FFmpeg build (with libx264 and libzimg for HDR tonemapping),
-so pulling it saves the ~15 minute local compile.
+and, for releases, the version tag (`v*`).
+
+The CUDA/NPP-enabled FFmpeg build (with libx264 and libzimg for HDR
+tonemapping) lives in a separate base image,
+`ghcr.io/magter/chromecast-video-converter/ffmpeg-cuda`, which is only
+rebuilt when `services/gpu-ffmpeg/Dockerfile.ffmpeg` or the patches change.
+The `gpu-ffmpeg` worker image layers the Python app on top of it, so code
+changes rebuild in seconds instead of recompiling FFmpeg (~15 minutes).
+Local `docker compose build` pulls the prebuilt base too; to compile the
+base yourself run
+`docker build -f services/gpu-ffmpeg/Dockerfile.ffmpeg services/gpu-ffmpeg`.
 
 ### Running from GHCR instead of building locally
 
