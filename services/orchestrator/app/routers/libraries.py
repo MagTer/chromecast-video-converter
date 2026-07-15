@@ -244,6 +244,55 @@ async def reprocess_entry(
     return JSONResponse(jsonable_encoder(response_payload))
 
 
+@router.post("/api/library/entries/{entry_id}/verify")
+async def verify_entry(entry_id: int) -> JSONResponse:
+    entry = get_app_dependencies().library_entry_store.get(entry_id)
+    if entry is None:
+        raise HTTPException(status_code=404, detail="Library entry not found")
+    if entry.status not in {LibraryStatus.CONVERTED, LibraryStatus.REMOVED}:
+        raise HTTPException(status_code=409, detail="Entry has no converted output to verify")
+    job = await get_app_dependencies().job_manager.add_verify_job(
+        entry.path,
+        entry.library,
+        entry.profile,
+        profile_id=entry.profile_id,
+        force=True,
+    )
+    if job is None:  # pragma: no cover - force=True always queues
+        raise HTTPException(status_code=503, detail="Failed to queue verification")
+    job_payload = job_to_response(job)
+    await NOTIFIER.broadcast({"type": "job-update", "job": job_payload})
+    return JSONResponse(jsonable_encoder({"entry": entry_to_response(entry), "job": job_payload}))
+
+
+@router.post("/api/library/entries/verify-all")
+async def verify_all_entries(background_tasks: BackgroundTasks) -> JSONResponse:
+    entries = get_app_dependencies().library_entry_store.list_entries(limit=100000)
+    queued_count = 0
+
+    async def _verify_one(entry) -> None:
+        try:
+            job = await get_app_dependencies().job_manager.add_verify_job(
+                entry.path,
+                entry.library,
+                entry.profile,
+                profile_id=entry.profile_id,
+                force=True,
+            )
+            if job:
+                await NOTIFIER.broadcast({"type": "job-update", "job": job_to_response(job)})
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.error("Failed to queue verification for entry %s: %s", entry.id, exc)
+
+    for entry in entries:
+        if entry.status not in {LibraryStatus.CONVERTED, LibraryStatus.REMOVED}:
+            continue
+        background_tasks.add_task(_verify_one, entry)
+        queued_count += 1
+
+    return JSONResponse({"queued_count": queued_count})
+
+
 @router.post("/api/library/entries/reprocess-all")
 async def reprocess_all_entries(background_tasks: BackgroundTasks) -> JSONResponse:
     entries = get_app_dependencies().library_entry_store.list_entries(limit=100000)

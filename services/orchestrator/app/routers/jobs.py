@@ -1,3 +1,4 @@
+import json
 import logging
 import re
 from functools import wraps
@@ -114,12 +115,32 @@ async def next_job(
     if claimed is None:
         raise HTTPException(status_code=204, detail="No jobs available")
     delivery_id, job = claimed
-    entry = sync_entry_from_job(job, LibraryStatus.CONVERTING)
+    entry = None
+    if getattr(job, "job_type", "convert") == "convert":
+        # Verify/delete jobs must not flip the entry into "converting".
+        entry = sync_entry_from_job(job, LibraryStatus.CONVERTING)
     await _broadcast_entry_update(entry)
     record_job_history(job, JobHistoryStatus.RUNNING)
     payload = await _broadcast_job_update(job)
     payload["delivery_id"] = delivery_id
     return JSONResponse(jsonable_encoder(payload))
+
+
+async def _handle_verify_status(job: jobs.Job, payload: JobStatusPayload) -> JSONResponse:
+    """Verify jobs only carry a compliance verdict; they never alter entry
+    status and never enter the encode retry ladder."""
+    entry = None
+    if payload.status in {jobs.JobStatus.COMPLETED, jobs.JobStatus.FAILED}:
+        await get_app_dependencies().job_manager.release_verify_reservation(job.path)
+        compliance = getattr(job, "compliance", None)
+        if compliance is not None:
+            entry = get_app_dependencies().library_entry_store.update_compliance(
+                job.path,
+                compliant=bool(compliance.get("compliant")),
+                detail=json.dumps(compliance),
+            )
+        record_job_history(job, payload.status, payload.message, completed=True)
+    return await _respond_with_updates(job, entry)
 
 
 @router.post("/api/jobs/{job_id}/status")
@@ -131,6 +152,10 @@ async def update_job_status(job_id: str, payload: JobStatusPayload) -> JSONRespo
         )
     except KeyError:
         raise HTTPException(status_code=404, detail="Job not found")
+    job_type = getattr(job, "job_type", "convert")
+    if job_type == "verify":
+        return await _handle_verify_status(job, payload)
+
     if payload.status == jobs.JobStatus.FAILED:
         classification = classify_ffmpeg_error(payload.logs or [], payload.return_code or -1)
         retry_pipeline = None
@@ -164,7 +189,7 @@ async def update_job_status(job_id: str, payload: JobStatusPayload) -> JSONRespo
     if payload.status == jobs.JobStatus.RUNNING:
         entry = sync_entry_from_job(job, LibraryStatus.CONVERTING, payload.message)
     elif payload.status == jobs.JobStatus.COMPLETED:
-        if getattr(job, "job_type", "convert") == "delete":
+        if job_type == "delete":
             entry = sync_entry_from_job(job, LibraryStatus.REMOVED, payload.message)
         else:
             entry = sync_entry_from_job(job, LibraryStatus.CONVERTED, payload.message)
