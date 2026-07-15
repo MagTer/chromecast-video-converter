@@ -123,7 +123,7 @@ def _parse_resolution(resolution: str) -> tuple[int, int]:
 def _minimum_level_for_resolution(resolution: str, fps: int) -> float:
     """Return the lowest H.264 level that can carry the selected resolution/FPS.
 
-    The mapping follows common decoder limits (FFmpeg 7.7 + NVENC constraints):
+    The mapping follows the H.264 level table (Chromecast Gen 2/3 decoder limits):
     - 720p30 => 3.1
     - 720p60 => 4.0
     - 1080p30 => 4.1
@@ -467,23 +467,19 @@ class ConfigStore:
 
     def _initialize(self) -> None:
         with self._lock:
-            self._conn.execute(
-                """
+            self._conn.execute("""
                 CREATE TABLE IF NOT EXISTS config (
                     key TEXT PRIMARY KEY,
                     value TEXT NOT NULL,
                     updated_at REAL NOT NULL
                 )
-                """
-            )
-            self._conn.execute(
-                """
+                """)
+            self._conn.execute("""
                 CREATE TABLE IF NOT EXISTS metadata (
                     key TEXT PRIMARY KEY,
                     value TEXT NOT NULL
                 )
-                """
-            )
+                """)
             self._conn.commit()
 
     def _seed_if_empty(self) -> None:

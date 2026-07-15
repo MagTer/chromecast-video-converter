@@ -1,5 +1,6 @@
-# Stage 1: Build FFmpeg with CUDA/NPP support on CUDA 12.9.1
-FROM nvidia/cuda:12.9.1-devel-ubuntu24.04 AS ffmpeg-builder
+# Stage 1: Build FFmpeg with CUDA/NPP support on CUDA 12.9.
+# Deliberately staying on CUDA 12.x: CUDA 13 drops Maxwell/Pascal GPU support.
+FROM nvidia/cuda:12.9.2-devel-ubuntu24.04 AS ffmpeg-builder
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PATH=/usr/local/cuda/bin:${PATH}
@@ -26,6 +27,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     cuda-nvcc-12-9 \
     libnpp-dev-12-9 \
     libx264-dev \
+    libzimg-dev \
     && rm -rf /var/lib/apt/lists/*
 
 RUN git clone https://git.videolan.org/git/ffmpeg/nv-codec-headers.git && \
@@ -33,13 +35,15 @@ RUN git clone https://git.videolan.org/git/ffmpeg/nv-codec-headers.git && \
     make && \
     make install
 
+ARG FFMPEG_VERSION=8.1.2
+
 WORKDIR /tmp/ffmpeg_build
-RUN wget -O ffmpeg.tar.bz2 https://ffmpeg.org/releases/ffmpeg-7.1.3.tar.bz2 && \
+RUN wget -O ffmpeg.tar.bz2 https://ffmpeg.org/releases/ffmpeg-${FFMPEG_VERSION}.tar.bz2 && \
     tar xjvf ffmpeg.tar.bz2 && \
-    cd ffmpeg-7.1.3 && \
+    cd ffmpeg-${FFMPEG_VERSION} && \
     patch -p0 < /tmp/ffmpeg-disable-ptx.patch
 
-WORKDIR /tmp/ffmpeg_build/ffmpeg-7.1.3
+WORKDIR /tmp/ffmpeg_build/ffmpeg-${FFMPEG_VERSION}
 RUN set -eux; \
     NVCC_FLAGS="-gencode arch=compute_52,code=sm_52 -gencode arch=compute_60,code=sm_60 -gencode arch=compute_61,code=sm_61 -gencode arch=compute_70,code=sm_70 -gencode arch=compute_75,code=sm_75 -gencode arch=compute_80,code=sm_80 -gencode arch=compute_86,code=sm_86 -gencode arch=compute_89,code=sm_89 -gencode arch=compute_90,code=sm_90 -gencode arch=compute_90,code=compute_90 -O2 -allow-unsupported-compiler"; \
     ./configure \
@@ -47,6 +51,7 @@ RUN set -eux; \
         --enable-gpl \
         --enable-nonfree \
         --enable-libx264 \
+        --enable-libzimg \
         --enable-cuda-nvcc \
         --enable-libnpp \
         --enable-cuvid \
@@ -63,7 +68,7 @@ RUN set -eux; \
     && make install
 
 # Stage 2: Runtime image for the gpu-ffmpeg worker
-FROM nvidia/cuda:12.9.1-runtime-ubuntu24.04
+FROM nvidia/cuda:12.9.2-runtime-ubuntu24.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PATH=/usr/local/cuda/bin:${PATH}
@@ -76,6 +81,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3-pip \
     ca-certificates \
     libx264-dev \
+    libzimg2 \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=ffmpeg-builder /usr/local/bin/ffmpeg /usr/local/bin/ffmpeg

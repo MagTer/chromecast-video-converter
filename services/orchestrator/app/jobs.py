@@ -245,6 +245,7 @@ class JobManager:
     async def _acquire_stalled(self, consumer: str) -> tuple[Optional[str], Optional[Job]]:
         redis_client = self._redis
         assert redis_client is not None
+        messages: list = []
         try:
             response = await redis_client.xautoclaim(
                 self._stream,
