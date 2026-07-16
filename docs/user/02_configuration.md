@@ -92,3 +92,58 @@ The `WebsocketNotifier` broadcasts the following payloads to every `/ws` client:
 - `{"type": "library-update", "action": "created|deleted", "library": {...}}`
 
 Because the socket requires clients to send heartbeat frames, the dashboard keeps the connection alive by sending empty messages on an interval and will reconnect if the socket closes.
+
+## Security & network exposure
+
+The orchestrator has **no authentication or authorization layer**: every API
+endpoint and the dashboard are open to anyone who can reach the port. This is
+a deliberate scope decision for a single-operator home LAN, and it has
+consequences you should understand before deploying:
+
+- **Destructive actions are one unauthenticated POST away.**
+  `POST /api/library/entries/delete-all-originals` deletes source media files;
+  `POST /api/config/reset` wipes the configuration. Neither requires a body,
+  a token, or a confirmation.
+- **CSRF applies.** Because the endpoints accept requests without custom
+  headers, any web page open in a browser on your LAN could submit a form
+  against `http://<host>:9000/...`. Do not browse the dashboard host as if
+  the API were private.
+
+### Hardening checklist
+
+1. **Bind to a specific interface.** The default compose mapping
+   (`"9000:9000"`) listens on all interfaces. Restrict it:
+
+   ```yaml
+   services:
+     orchestrator:
+       ports:
+         - "127.0.0.1:9000:9000"   # localhost only
+         # or "192.168.1.10:9000:9000" for one LAN interface
+   ```
+
+2. **Never port-forward 9000** from your router or expose it via a public
+   reverse proxy without authentication.
+3. **For remote access**, front the stack with an authenticating layer:
+   Tailscale/WireGuard, or a reverse proxy with auth (Caddy `basic_auth`,
+   nginx + `auth_basic`, Authelia/Authentik).
+4. **Back up `./data` and the `redis_data` volume.** SQLite under `./data`
+   holds config, the library catalog, compliance verdicts, and job history;
+   library entries can be rebuilt by a rescan, but verdicts, history, and
+   profiles cannot.
+
+### Defense in depth for deletions
+
+Even on a trusted network, every path that deletes an original file goes
+through the same worker-side gate before `unlink`:
+
+1. The converted output must exist and be non-empty.
+2. Its duration must match the source within 1 second.
+3. An ffprobe compliance check must return a Chromecast-compliant verdict.
+
+A refused deletion fails the delete job with the reason (visible on the
+History page), leaves the entry as `converted`, and never enters the encode
+retry ladder. The orchestrator additionally rejects `remove-original`
+requests up front when the stored verdict is already non-compliant, and
+`delete-all-originals` skips such entries. The same compliance gate applies
+to the optional `remove_original_after_success` worker setting.

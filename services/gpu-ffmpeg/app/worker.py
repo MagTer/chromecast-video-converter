@@ -808,12 +808,21 @@ def _build_output_path(source: Path) -> Path:
     return resolved.parent / f"{resolved.stem}-chromecast.mp4"
 
 
-async def _maybe_remove_original(source: Path, output_path: Path, expected_duration: float) -> bool:
+async def _maybe_remove_original(
+    source: Path, output_path: Path, expected_duration: float, compliance: dict | None = None
+) -> bool:
     source = resolve_media_path(source)
     if not REMOVE_ORIGINAL:
         return False
     if not await _validate_output(output_path, expected_duration):
         LOGGER.warning("Keeping original %s because output did not validate", source)
+        return False
+    if compliance is not None and not compliance.get("compliant"):
+        LOGGER.warning(
+            "Keeping original %s because output is not Chromecast compliant: %s",
+            source,
+            "; ".join(compliance.get("issues") or []) or "no detail",
+        )
         return False
     try:
         source.unlink()
@@ -881,6 +890,24 @@ async def handle_delete_job(client: httpx.AsyncClient, job: dict) -> None:
         if path.is_dir():
             raise ValueError("Path is a directory")
 
+        # Deleting the original is irreversible; every path to unlink goes
+        # through the same gate: the converted output must exist, match the
+        # source duration, and verify as Chromecast compliant.
+        output_path = _build_output_path(path)
+        expected_duration = await _probe_duration(path)
+        if not await _validate_output(output_path, expected_duration):
+            raise ValueError(
+                f"Refusing to delete original: converted output at {output_path} "
+                "is missing or failed duration validation"
+            )
+        compliance = await _probe_output_compliance(output_path)
+        if not compliance.get("compliant"):
+            issues = "; ".join(compliance.get("issues") or []) or "no detail"
+            raise ValueError(
+                "Refusing to delete original: converted output is not "
+                f"Chromecast compliant ({issues}). Reprocess the entry first."
+            )
+
         path.unlink()
         await update_job_status(client, job_id, "completed", 100, "File deleted")
         LOGGER.info("Deleted file %s", path)
@@ -947,7 +974,7 @@ async def process_job(client: httpx.AsyncClient, job: dict) -> None:  # noqa: C9
                 client, job_id, "completed", 100, message, compliance=compliance
             )
             LOGGER.info("Job %s completed from existing output %s", job_id[:8], output_path)
-            if await _maybe_remove_original(playback_target, output_path, duration):
+            if await _maybe_remove_original(playback_target, output_path, duration, compliance):
                 await update_job_status(
                     client,
                     job_id,
@@ -1018,7 +1045,9 @@ async def process_job(client: httpx.AsyncClient, job: dict) -> None:  # noqa: C9
                     job_id[:8],
                     "; ".join(compliance.get("issues") or []),
                 )
-            removed = await _maybe_remove_original(playback_target, output_path, duration)
+            removed = await _maybe_remove_original(
+                playback_target, output_path, duration, compliance
+            )
             if removed:
                 message = f"{message} (original removed)"
             await update_job_status(

@@ -156,6 +156,15 @@ async def update_job_status(job_id: str, payload: JobStatusPayload) -> JSONRespo
     if job_type == "verify":
         return await _handle_verify_status(job, payload)
 
+    if payload.status == jobs.JobStatus.FAILED and job_type == "delete":
+        # A refused/failed delete means the original is still on disk and the
+        # entry is still converted; delete jobs never enter the encode retry
+        # ladder and must not flip the entry to "failed".
+        failure_message = payload.message or "Delete job failed"
+        entry = sync_entry_from_job(job, LibraryStatus.CONVERTED, failure_message)
+        record_job_history(job, payload.status, failure_message, completed=True)
+        return await _respond_with_updates(job, entry)
+
     if payload.status == jobs.JobStatus.FAILED:
         classification = classify_ffmpeg_error(payload.logs or [], payload.return_code or -1)
         retry_pipeline = None

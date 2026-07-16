@@ -91,6 +91,8 @@ You can simulate a worker over the API alone: claim with `GET /api/jobs/next?wor
 
 ## Boundaries & Safety
 
+- **The API is unauthenticated by design** (trusted home LAN; see "Security & network exposure" in `docs/user/02_configuration.md`). Never add endpoints that make destructive actions easier to trigger remotely without flagging the security impact in the PR.
+- **The delete gate is an invariant:** every code path that unlinks an original media file must go through the worker-side gate in `handle_delete_job`/`_maybe_remove_original` — output exists, duration matches the source within 1s, and an ffprobe compliance check passes. Failed/refused delete jobs must not enter the encode retry ladder and must leave the entry as `converted`. Do not add new unlink paths that bypass this.
 - **Always:** run `scripts/code_check.py` before sharing work, keep configuration/documentation synchronized with code, and document any manual steps taken during testing.
 - **Ask first:** when introducing new external services, changing the job queue/storage model, or altering ffmpeg/gpu runtime dependencies.
 - **Never:** commit secrets/credentials, edit production deployment settings outside `config/` unless requested, or re-enable CPU-only encoding paths as a silent fallback.

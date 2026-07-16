@@ -7,6 +7,22 @@ watchdog-powered file monitor.
 - For setup, configuration, and API walkthroughs see `docs/README.md`.
 - For the container model and data flow see `docs/architecture/README.md`.
 
+## ⚠️ Security model: trusted network only
+
+The dashboard and API have **no authentication**. Anyone who can reach port
+9000 can manage the queue, change configuration, and trigger deletion of
+original media files. The stack is designed for a trusted home LAN:
+
+- **Never expose port 9000 to the internet** (no port forwarding, no public
+  reverse proxy without auth).
+- Prefer binding to a specific interface in `docker-compose.yml`, e.g.
+  `127.0.0.1:9000:9000` (localhost only) or `192.168.1.10:9000:9000`.
+- If you need remote access, put an authenticating reverse proxy (Caddy,
+  nginx + basic auth, Authelia, Tailscale) in front.
+
+See "Security & network exposure" in `docs/user/02_configuration.md` for
+details, including why destructive endpoints are gated worker-side.
+
 ## Prebuilt images (GHCR)
 
 Every push to `main` builds and publishes public images to the GitHub

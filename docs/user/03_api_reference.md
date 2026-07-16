@@ -22,9 +22,9 @@ All endpoints live under the orchestrator base URL (default `http://localhost:90
 | Verify entry | `POST /api/library/entries/{id}/verify` | Queues a lightweight ffprobe verification of the converted output (no GPU). `409` if the entry has no converted output. |
 | Verify all | `POST /api/library/entries/verify-all` | Queues verification for every `converted`/`removed` entry. Returns `{ "queued_count": N }` — an upper bound, since already-queued duplicates are skipped in Redis. |
 | Reprocess all | `POST /api/library/entries/reprocess-all` | Queues a forced reconversion for every entry whose original still exists. |
-| Delete all originals | `POST /api/library/entries/delete-all-originals` | Queues delete jobs for originals whose converted output exists and is non-empty. |
+| Delete all originals | `POST /api/library/entries/delete-all-originals` | Queues delete jobs for originals whose converted output exists and is non-empty. Entries with a stored non-compliant verdict are skipped. |
 | Change entry profile | `PATCH /api/library/entries/{id}` | Body `{ "profile_id": <int> }` rewrites the stored profile without scheduling a job. |
-| Remove original | `POST /api/library/entries/{id}/remove-original` | Deletes the source file once the converted output is verified to exist. Returns `409` if the output is missing or empty. |
+| Remove original | `POST /api/library/entries/{id}/remove-original` | Queues a delete job for the source file. Returns `409` if the output is missing/empty or the stored verdict is non-compliant. The worker independently re-validates (output exists, duration matches source ±1s, ffprobe compliance passes) before the actual `unlink`; a refused delete fails the job with the reason and leaves the entry `converted`. |
 
 ## Watcher events
 
