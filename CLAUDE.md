@@ -75,7 +75,8 @@ You can simulate a worker over the API alone: claim with `GET /api/jobs/next?wor
 - `job_history` rows carry `job_type` (`convert`/`verify`/`delete`); `record_job_history` must keep passing it so the History page can distinguish job kinds.
 - WebSocket payloads (`job-update`, `entry-update`, `library-update`), watcher spool semantics, and the pagination contract above are contractually shared with the dashboard.
 - Watcher defaults (`WATCH_POLLING`, `EVENT_BUFFER_SECONDS`, `EVENT_SPOOL_FILE`, `EVENT_SPOOL_MAX_BYTES`) and spool replay-on-start behavior are canonical; keep code/docs in sync.
-- Log ingestion keeps `severity`, `source`, `category`, and `request_id` fields. Preserve these when touching logging or telemetry.
+- Log ingestion keeps `severity`, `source`, `category`, and `request_id` fields end-to-end (worker/watcher handler → `/api/logs/ingest` → `LogIngestEvent` schema → SQLite → `/api/logs` filters). Preserve these when touching logging or telemetry.
+- Logging conventions: worker/watcher handlers attach to the **service-root logger** (`gpu-ffmpeg`, `folder-watcher`) so new module loggers must live under that namespace or their logs never ship to the orchestrator; orchestrator loggers are named `orchestrator.<area>` (not module `__name__`, which would split the source into "app"); store-bound handlers use a plain `%(message)s` formatter — metadata travels as columns, not baked into the text; log messages reference jobs by the short 8-char id (`job_id[:8]`), which the GUI's "View logs" buttons rely on.
 - GPU worker telemetry (`/api/workers/telemetry`) feeds the queue header and the GPU pill tooltip; keep payload shape stable.
 - SQLite schema changes need lightweight ALTER TABLE migrations in the store's `_ensure_schema()` (see `LibraryEntryStore` and `JobHistoryStore`) — `create_all` only creates missing tables.
 

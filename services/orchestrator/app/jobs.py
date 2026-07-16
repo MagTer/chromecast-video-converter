@@ -82,7 +82,9 @@ class JobManager:
     _JOB_FETCH_DELAY = 0.05
 
     def __init__(self, redis_url: str, *, visibility_timeout: int = 300) -> None:
-        self._logger = logging.getLogger(__name__)
+        # Named explicitly so the log store's derived "source" groups these
+        # rows under "orchestrator" with the rest (module path would be "app").
+        self._logger = logging.getLogger("orchestrator.jobs")
         self._video_extensions = {".mp4", ".m4v", ".mov", ".mkv", ".ts", ".flv"}
         self._redis_url = redis_url
         self._redis: Optional[redis.Redis] = None

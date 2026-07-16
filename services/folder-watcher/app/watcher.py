@@ -1,7 +1,9 @@
 import asyncio
+import atexit
 import json
 import logging
 import os
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -42,33 +44,67 @@ def _derive_source_category(logger_name: str) -> tuple[str, str]:
 
 
 class OrchestratorLogHandler(logging.Handler):
-    def __init__(self, base_url: str) -> None:
+    """Ship log records to the orchestrator in background batches.
+
+    emit() only buffers; a daemon thread flushes batches on an interval and
+    puts a batch back into the (bounded) buffer on transport failure, so
+    watcher logs survive short orchestrator restarts.
+    """
+
+    def __init__(
+        self, base_url: str, *, flush_interval: float = 2.0, max_buffer: int = 2000
+    ) -> None:
         super().__init__()
         self._client = httpx.Client(base_url=base_url, timeout=5.0)
+        self._buffer: List[dict] = []
+        self._buffer_lock = threading.Lock()
+        self._max_buffer = max_buffer
+        self._stop = threading.Event()
+        self._thread = threading.Thread(
+            target=self._flush_loop,
+            args=(flush_interval,),
+            daemon=True,
+            name="log-shipper",
+        )
+        self._thread.start()
+        atexit.register(self.flush_pending)
 
     def emit(self, record: logging.LogRecord) -> None:
         message = self.format(record)
         severity = _normalize_level(record.levelname)
         source, category = _derive_source_category(record.name)
-        payload = {
-            "entries": [
-                {
-                    "timestamp": datetime.fromtimestamp(
-                        record.created, tz=timezone.utc
-                    ).isoformat(),
-                    "level": record.levelname,
-                    "severity": severity,
-                    "source": source,
-                    "category": category,
-                    "logger": record.name,
-                    "message": message,
-                }
-            ]
+        entry = {
+            "timestamp": datetime.fromtimestamp(record.created, tz=timezone.utc).isoformat(),
+            "level": record.levelname,
+            "severity": severity,
+            "source": source,
+            "category": category,
+            "logger": record.name,
+            "message": message,
         }
+        with self._buffer_lock:
+            self._buffer.append(entry)
+            if len(self._buffer) > self._max_buffer:
+                del self._buffer[0]
+
+    def _flush_loop(self, interval: float) -> None:
+        while not self._stop.wait(interval):
+            self.flush_pending()
+
+    def flush_pending(self) -> None:
+        with self._buffer_lock:
+            if not self._buffer:
+                return
+            batch = self._buffer
+            self._buffer = []
         try:
-            self._client.post("/api/logs/ingest", json=payload)
-        except Exception:
-            return
+            response = self._client.post("/api/logs/ingest", json={"entries": batch})
+            if response.status_code >= 500:
+                raise httpx.TransportError("orchestrator unavailable")
+            # 4xx means the payload was rejected; drop rather than wedge.
+        except httpx.HTTPError:
+            with self._buffer_lock:
+                self._buffer = (batch + self._buffer)[-self._max_buffer :]
 
 
 def configure_logging() -> logging.Logger:
@@ -79,7 +115,8 @@ def configure_logging() -> logging.Logger:
     logger = logging.getLogger("folder-watcher")
     handler = OrchestratorLogHandler(ORCHESTRATOR_URL)
     handler.setLevel(logging.getLevelName(LOG_LEVEL))
-    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s [%(name)s] %(message)s"))
+    # Store the raw message only; timestamp/level/logger travel as fields.
+    handler.setFormatter(logging.Formatter("%(message)s"))
     logger.addHandler(handler)
     return logger
 

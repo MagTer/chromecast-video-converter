@@ -695,3 +695,42 @@ def test_remove_original_preserves_verdict_and_failed_delete_restores_entry(test
     row = next(item for item in history if item["id"] == claimed["id"])
     assert row["job_type"] == "delete"
     assert "Refusing to delete" in row["message"]
+
+
+def test_log_ingest_preserves_request_id_and_filters(test_app):
+    client, _main = test_app
+
+    def ingest(message, request_id, ts):
+        payload = {
+            "entries": [
+                {
+                    "logger": "gpu-ffmpeg.builder",
+                    "level": "INFO",
+                    "severity": "INFO",
+                    "message": message,
+                    "request_id": request_id,
+                    "timestamp": ts,
+                }
+            ]
+        }
+        assert client.post("/api/logs/ingest", json=payload).status_code == 200
+
+    ingest("mapped 2 audio streams", "req-abc", "2026-07-16T10:00:00+00:00")
+    ingest("filter chain built", "req-abc", "2026-07-16T10:00:01+00:00")
+    ingest("unrelated line", "req-other", "2026-07-16T10:00:02+00:00")
+
+    # request_id filtering returns exactly the correlated lines.
+    rows = client.get("/api/logs", params={"request_id": "req-abc"}).json()
+    assert [r["message"] for r in rows] == ["filter chain built", "mapped 2 audio streams"]
+    assert all(r["request_id"] == "req-abc" for r in rows)
+
+    # before= pages further back in time (exclusive), newest first.
+    older = client.get(
+        "/api/logs",
+        params={"request_id": "req-abc", "before": "2026-07-16T10:00:01+00:00"},
+    ).json()
+    assert [r["message"] for r in older] == ["mapped 2 audio streams"]
+
+    # limit is honored and clamped.
+    limited = client.get("/api/logs", params={"limit": 1, "min_severity": "ALL"}).json()
+    assert len(limited) == 1

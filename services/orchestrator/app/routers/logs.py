@@ -19,6 +19,9 @@ async def list_logs(
     logger: Optional[str] = None,
     source: Optional[str] = None,
     category: Optional[str] = None,
+    request_id: Optional[str] = None,
+    before: Optional[datetime] = None,
+    limit: int = 200,
 ) -> JSONResponse:
     severity_filter = None if min_severity == "ALL" else (min_severity or "INFO")
     entries = get_app_dependencies().log_store.list_entries(
@@ -28,7 +31,9 @@ async def list_logs(
         logger_name=logger,
         category=category,
         source=source,
-        limit=200,
+        request_id=request_id,
+        before=before,
+        limit=max(1, min(limit, 1000)),
     )
     return JSONResponse(entries)
 
@@ -69,6 +74,7 @@ async def ingest_logs(batch: LogIngestBatch) -> JSONResponse:
                 source=source,
                 category=category,
                 message=entry.message,
+                request_id=entry.request_id,
             )
         )
         stored += 1

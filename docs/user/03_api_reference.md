@@ -66,10 +66,10 @@ Events are processed in order. Non-media files are ignored; delete events immedi
 
 ## Logs
 
-- `GET /api/logs?min_severity=INFO&source=&category=&query=` returns up to 200 structured entries.
+- `GET /api/logs?min_severity=INFO&source=&category=&query=&request_id=&before=&limit=200` returns structured entries newest-first. `limit` is clamped to 1–1000; `before` (ISO timestamp, exclusive) pages further back in time; `request_id` returns every line correlated with one job/request; `query` is a substring match on the message text.
 - `GET /api/logs/categories` and `/api/logs/sources` provide dropdown data for the dashboard filters.
 - `GET /api/logs/stats` shows how many entries are stored and the retention window.
-- `POST /api/logs/ingest` accepts `{ "entries": [ { "timestamp": "...", "level": "INFO", "severity": "INFO", "logger": "...", "source": "...", "category": "...", "message": "..." } ] }`. Missing `source`/`category` are derived from the logger name.
+- `POST /api/logs/ingest` accepts `{ "entries": [ { "timestamp": "...", "level": "INFO", "severity": "INFO", "logger": "...", "source": "...", "category": "...", "message": "...", "request_id": "..." } ] }`. Missing `source`/`category` are derived from the logger name. The `message` should be the raw log text — timestamp/level/logger travel as separate fields.
 
 ## Configuration
 
