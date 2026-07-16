@@ -10,6 +10,7 @@
     <div>
       <h1>Chromecast Converter</h1>
       <p class="nav-hint">Queue management opens by default.</p>
+      <p id="ws-status" class="nav-hint" title="Live update connection"></p>
     </div>
     <ul>
       <li><a href="#queue" data-page="queue" class="active">Queue management</a></li>
@@ -95,9 +96,11 @@
             <tr>
               <th>ID</th>
               <th>Status</th>
+              <th>Type</th>
               <th>Finished</th>
+              <th>Duration</th>
+              <th>Library</th>
               <th>File</th>
-              <th>Pipeline</th>
               <th>Details / Logs</th>
             </tr>
           </thead>
@@ -184,6 +187,15 @@
             </select>
           </label>
           <label class="compact">
+            Chromecast
+            <select id="entry-compliance-filter">
+              <option value="">All</option>
+              <option value="compliant">OK</option>
+              <option value="noncompliant">Not compliant</option>
+              <option value="unverified">Not verified</option>
+            </select>
+          </label>
+          <label class="compact">
             Page size
             <select id="entry-page-size">
               <option value="10">10</option>
@@ -200,6 +212,7 @@
               <th>Status</th>
               <th>Library</th>
               <th>Path</th>
+              <th>Profile</th>
               <th>Encoding</th>
               <th>Chromecast</th>
               <th>Updated</th>
@@ -741,6 +754,6 @@
     </section>
   </main>
 
-    <script type="module" src="/static/js/app.js?v=8" defer></script>
+    <script type="module" src="/static/js/app.js?v=9" defer></script>
 </body>
 </html>

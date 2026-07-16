@@ -139,10 +139,15 @@ async def delete_library(library_name: str) -> JSONResponse:
     )
 
 
+COMPLIANCE_FILTERS = {"compliant", "noncompliant", "unverified"}
+
+
 @router.get("/api/library/entries")
 async def list_library_entries(
     status: Optional[str] = None,
     library: Optional[str] = None,
+    compliance: Optional[str] = None,
+    query: Optional[str] = None,
     limit: int = 100,
     offset: int = 0,
     include_total: bool = False,
@@ -151,16 +156,36 @@ async def list_library_entries(
         raise HTTPException(status_code=400, detail="Limit must be greater than zero")
     if offset < 0:
         raise HTTPException(status_code=400, detail="Offset cannot be negative")
+    if compliance and compliance not in COMPLIANCE_FILTERS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"compliance must be one of {sorted(COMPLIANCE_FILTERS)}",
+        )
 
     store = get_app_dependencies().library_entry_store
-    entries = store.list_entries(status=status, library=library, limit=limit, offset=offset)
+    entries = store.list_entries(
+        status=status,
+        library=library,
+        compliance=compliance,
+        query=query,
+        limit=limit,
+        offset=offset,
+    )
     items = [entry_to_response(entry) for entry in entries]
     if include_total:
-        total = store.count_entries(status=status, library=library)
+        total = store.count_entries(
+            status=status, library=library, compliance=compliance, query=query
+        )
         return JSONResponse(
             jsonable_encoder({"items": items, "total": total, "limit": limit, "offset": offset})
         )
     return JSONResponse(jsonable_encoder(items))
+
+
+@router.get("/api/library/entries/summary")
+async def library_entries_summary(library: Optional[str] = None) -> JSONResponse:
+    summary = get_app_dependencies().library_entry_store.summarize(library=library)
+    return JSONResponse(summary)
 
 
 @router.patch("/api/library/entries/{entry_id}")
