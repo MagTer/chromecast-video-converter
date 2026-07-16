@@ -36,7 +36,9 @@ def _build_test_app(tmp_path: Path, monkeypatch, fake_redis):
         "app.routers.jobs",
         "app.routers.libraries",
         "app.routers.config",
+        "app.routers.history",
         "app.routers.logs",
+        "app.schemas",
     ]:
         sys.modules.pop(module, None)
 
@@ -605,3 +607,91 @@ def test_upsert_requeue_clears_stale_verdict(test_app, tmp_path):
     )
     assert entry.output_compliant is None
     assert entry.compliance_detail is None
+
+
+def _seed_converted_entry_with_output(client, tmp_path, name: str):
+    from app.dependencies import get_app_dependencies
+
+    profile_id = _first_profile_id(client)
+    profile_name = client.get(f"/api/profiles/{profile_id}").json()["name"]
+    media_root = tmp_path / "deletegate"
+    media_root.mkdir(exist_ok=True)
+    if not get_app_dependencies().library_config_store.get("deletegate"):
+        payload = {
+            "name": "deletegate",
+            "root": str(media_root),
+            "depth": "max",
+            "profile_id": profile_id,
+        }
+        assert client.post("/api/libraries", json=payload).status_code == 201
+
+    source = media_root / name
+    source.write_bytes(b"original")
+    output = get_app_dependencies().job_manager.output_path(source)
+    output.write_bytes(b"converted")
+    entry = get_app_dependencies().library_entry_store.update_status(
+        str(source),
+        LibraryStatus.CONVERTED,
+        library="deletegate",
+        profile=profile_name,
+        profile_id=profile_id,
+        output_path=str(output),
+    )
+    return entry, source, output
+
+
+def test_remove_original_blocked_for_noncompliant_output(test_app, tmp_path):
+    client, _main = test_app
+    from app.dependencies import get_app_dependencies
+
+    entry, source, _output = _seed_converted_entry_with_output(client, tmp_path, "bad.mkv")
+    get_app_dependencies().library_entry_store.update_compliance(
+        str(source), compliant=False, detail='{"compliant": false}'
+    )
+
+    response = client.post(f"/api/library/entries/{entry.id}/remove-original")
+    assert response.status_code == 409
+    assert "not Chromecast compliant" in response.json()["detail"]
+    assert source.exists()
+
+
+def test_remove_original_preserves_verdict_and_failed_delete_restores_entry(test_app, tmp_path):
+    client, _main = test_app
+    from app.dependencies import get_app_dependencies
+
+    entry, source, _output = _seed_converted_entry_with_output(client, tmp_path, "good.mkv")
+    get_app_dependencies().library_entry_store.update_compliance(
+        str(source), compliant=True, detail='{"compliant": true}'
+    )
+
+    response = client.post(f"/api/library/entries/{entry.id}/remove-original")
+    assert response.status_code == 200
+    queued = response.json()["entry"]
+    assert queued["status"] == LibraryStatus.PENDING
+    # Queueing a delete must not wipe the stored verdict.
+    assert queued["output_compliant"] is True
+
+    # Claim the delete job as a worker and report the gate refusing it.
+    claimed = client.get("/api/jobs/next", params={"worker_id": "gate-test"}).json()
+    assert claimed["job_type"] == "delete"
+    failed = client.post(
+        f"/api/jobs/{claimed['id']}/status",
+        json={
+            "status": "failed",
+            "message": "Refusing to delete original: output failed validation",
+        },
+    )
+    assert failed.status_code == 200
+    job_payload = failed.json()
+    # Delete jobs never enter the encode retry ladder.
+    assert job_payload["status"] == "failed"
+    assert job_payload["attempt"] == claimed["attempt"]
+
+    stored = get_app_dependencies().library_entry_store.get(entry.id)
+    assert stored.status == LibraryStatus.CONVERTED
+    assert source.exists()
+
+    history = client.get("/api/history").json()
+    row = next(item for item in history if item["id"] == claimed["id"])
+    assert row["job_type"] == "delete"
+    assert "Refusing to delete" in row["message"]

@@ -384,6 +384,11 @@ async def delete_all_originals(background_tasks: BackgroundTasks) -> JSONRespons
         if not source.exists():
             return
 
+        # Known-bad outputs never qualify; the worker re-verifies compliance
+        # and duration before every unlink as the authoritative gate.
+        if entry.output_compliant is False:
+            return
+
         # Check for successful conversion
         # We rely on output_path existing or entry having a completed status with output.
         # But safest is to check if output exists.
@@ -404,6 +409,8 @@ async def delete_all_originals(background_tasks: BackgroundTasks) -> JSONRespons
                 original_missing=False,  # Will be true after job runs
                 profile=entry.profile,
                 profile_id=entry.profile_id,
+                output_compliant=entry.output_compliant,
+                compliance_detail=entry.compliance_detail,
             )
             await NOTIFIER.broadcast({"type": "entry-update", "entry": entry_to_response(updated)})
         except Exception as e:
@@ -423,6 +430,14 @@ async def remove_original(entry_id: int) -> JSONResponse:
     entry = get_app_dependencies().library_entry_store.get(entry_id)
     if entry is None:
         raise HTTPException(status_code=404, detail="Library entry not found")
+    if entry.output_compliant is False:
+        # Fast feedback for a known-bad output; the worker re-verifies before
+        # every unlink regardless, so this is UX rather than the safety gate.
+        raise HTTPException(
+            status_code=409,
+            detail="Converted output is not Chromecast compliant; reprocess before "
+            "deleting the original",
+        )
     source = resolve_media_path(entry.path)
     output_path = Path(entry.output_path or get_app_dependencies().job_manager.output_path(source))
     if not output_path.exists() or output_path.stat().st_size == 0:
@@ -452,6 +467,10 @@ async def remove_original(entry_id: int) -> JSONResponse:
         original_missing=False,
         profile=entry.profile,
         profile_id=entry.profile_id,
+        # Queueing a delete does not invalidate the output; keep the verdict
+        # (update_status clears it on PENDING otherwise).
+        output_compliant=entry.output_compliant,
+        compliance_detail=entry.compliance_detail,
     )
     entry_payload = entry_to_response(updated)
     await NOTIFIER.broadcast({"type": "entry-update", "entry": entry_payload})
