@@ -1,4 +1,5 @@
 import asyncio
+import atexit
 import json
 import logging
 import os
@@ -6,6 +7,7 @@ import re
 import shlex
 import subprocess
 import sys
+import threading
 import time
 from asyncio.subprocess import PIPE, STDOUT, Process
 from collections import deque
@@ -59,35 +61,71 @@ def _derive_source_category(logger_name: str) -> tuple[str, str]:
 
 
 class OrchestratorLogHandler(logging.Handler):
-    def __init__(self, base_url: str) -> None:
+    """Ship log records to the orchestrator in background batches.
+
+    emit() only buffers, so logging never blocks the worker's event loop.
+    A daemon thread flushes batches on an interval; transport failures put
+    the batch back into the (bounded) buffer, so worker logs survive short
+    orchestrator restarts instead of being dropped line by line.
+    """
+
+    def __init__(
+        self, base_url: str, *, flush_interval: float = 2.0, max_buffer: int = 2000
+    ) -> None:
         super().__init__()
         self._client = httpx.Client(base_url=base_url, timeout=5.0)
+        self._buffer: list[dict] = []
+        self._buffer_lock = threading.Lock()
+        self._max_buffer = max_buffer
+        self._stop = threading.Event()
+        self._thread = threading.Thread(
+            target=self._flush_loop,
+            args=(flush_interval,),
+            daemon=True,
+            name="log-shipper",
+        )
+        self._thread.start()
+        atexit.register(self.flush_pending)
 
     def emit(self, record: logging.LogRecord) -> None:
         message = self.format(record)
         severity = _normalize_level(record.levelname)
         source, category = _derive_source_category(record.name)
-        payload = {
-            "entries": [
-                {
-                    "timestamp": datetime.fromtimestamp(
-                        record.created, tz=timezone.utc
-                    ).isoformat(),
-                    "level": record.levelname,
-                    "severity": severity,
-                    "source": source,
-                    "category": category,
-                    "logger": record.name,
-                    "message": message,
-                    "request_id": _current_request_id.get(),
-                }
-            ]
+        entry = {
+            "timestamp": datetime.fromtimestamp(record.created, tz=timezone.utc).isoformat(),
+            "level": record.levelname,
+            "severity": severity,
+            "source": source,
+            "category": category,
+            "logger": record.name,
+            "message": message,
+            "request_id": _current_request_id.get(),
         }
+        with self._buffer_lock:
+            self._buffer.append(entry)
+            if len(self._buffer) > self._max_buffer:
+                del self._buffer[0]
+
+    def _flush_loop(self, interval: float) -> None:
+        while not self._stop.wait(interval):
+            self.flush_pending()
+
+    def flush_pending(self) -> None:
+        with self._buffer_lock:
+            if not self._buffer:
+                return
+            batch = self._buffer
+            self._buffer = []
         try:
-            self._client.post("/api/logs/ingest", json=payload)
-        except Exception:  # noqa: BLE001
-            # Remote logging failures should not block worker progress.
-            return
+            response = self._client.post("/api/logs/ingest", json={"entries": batch})
+            if response.status_code >= 500:
+                raise httpx.TransportError("orchestrator unavailable")
+            # 4xx means the payload itself was rejected; requeueing a poison
+            # batch would wedge the shipper, so drop it.
+        except httpx.HTTPError:
+            with self._buffer_lock:
+                # Keep the newest max_buffer entries; recent lines matter most.
+                self._buffer = (batch + self._buffer)[-self._max_buffer :]
 
 
 def configure_logging() -> logging.Logger:
@@ -95,12 +133,16 @@ def configure_logging() -> logging.Logger:
         level=logging.getLevelName(LOG_LEVEL),
         format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
     )
-    logger = logging.getLogger("gpu-ffmpeg.worker")
+    # Attach to the service-root logger so every module under the
+    # "gpu-ffmpeg." namespace (worker, builder, capabilities, ...) ships to
+    # the orchestrator — not just the worker's own logger.
+    service_logger = logging.getLogger("gpu-ffmpeg")
     handler = OrchestratorLogHandler(ORCHESTRATOR_URL)
     handler.setLevel(logging.getLevelName(LOG_LEVEL))
-    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s [%(name)s] %(message)s"))
-    logger.addHandler(handler)
-    return logger
+    # Store the raw message only; timestamp/level/logger travel as fields.
+    handler.setFormatter(logging.Formatter("%(message)s"))
+    service_logger.addHandler(handler)
+    return logging.getLogger("gpu-ffmpeg.worker")
 
 
 LOGGER = configure_logging()

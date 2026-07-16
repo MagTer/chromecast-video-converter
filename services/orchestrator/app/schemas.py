@@ -142,6 +142,7 @@ class LogIngestEvent(BaseModel):
     source: Optional[str] = None
     category: Optional[str] = None
     timestamp: Optional[datetime] = None
+    request_id: Optional[str] = None
 
 
 class LogIngestBatch(BaseModel):

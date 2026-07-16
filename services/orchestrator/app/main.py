@@ -54,7 +54,9 @@ def configure_logging() -> None:
     stream_handler.setFormatter(formatter)
     sqlite_handler = SQLiteLogHandler(get_app_dependencies().log_store)
     sqlite_handler.setLevel(logging.DEBUG)
-    sqlite_handler.setFormatter(formatter)
+    # Store the raw message only — timestamp/level/logger already travel as
+    # structured columns; a full formatter would duplicate them in the text.
+    sqlite_handler.setFormatter(logging.Formatter("%(message)s"))
     context_filter = StructuredLogFilter()
     stream_handler.addFilter(context_filter)
     sqlite_handler.addFilter(context_filter)

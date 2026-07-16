@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import sqlite3
+import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -77,12 +78,16 @@ class LogEntry:
         }
 
 
+PRUNE_INTERVAL_SECONDS = 300
+
+
 class LogStore:
     def __init__(self, path: Path, retention_days: int = 7) -> None:
         self.path = path
         self.retention_days = retention_days
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = RLock()
+        self._last_prune = 0.0
         self._conn = sqlite3.connect(self.path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._initialize()
@@ -176,6 +181,13 @@ class LogStore:
         with self._lock:
             self._conn.execute("DELETE FROM logs WHERE timestamp < ?", (cutoff.timestamp(),))
             self._conn.commit()
+        self._last_prune = time.monotonic()
+
+    def _prune_if_due(self) -> None:
+        # A full DELETE scan per inserted log line is wasteful; retention has
+        # day granularity, so pruning every few minutes is more than enough.
+        if time.monotonic() - self._last_prune >= PRUNE_INTERVAL_SECONDS:
+            self._prune_expired()
 
     def update_retention(self, retention_days: int) -> None:
         self.retention_days = retention_days
@@ -218,7 +230,7 @@ class LogStore:
                 ),
             )
             self._conn.commit()
-        self._prune_expired()
+        self._prune_if_due()
 
     def _filter_query(
         self,
@@ -231,6 +243,7 @@ class LogStore:
         category: Optional[str] = None,
         source: Optional[str] = None,
         request_id: Optional[str] = None,
+        before: Optional[datetime] = None,
     ) -> tuple[str, list]:
         sql = (
             "SELECT timestamp, level, severity, severity_value, logger, source, "
@@ -242,6 +255,9 @@ class LogStore:
         if minimum:
             params.append(_severity_value(minimum))
             clauses.append("severity_value >= ?")
+        if before:
+            clauses.append("timestamp < ?")
+            params.append(_ensure_utc(before).timestamp())
         if category:
             clauses.append("LOWER(category) = ?")
             params.append(category.lower())
@@ -274,6 +290,7 @@ class LogStore:
         category: Optional[str] = None,
         source: Optional[str] = None,
         request_id: Optional[str] = None,
+        before: Optional[datetime] = None,
         limit: int = 100,
     ) -> List[dict]:
         sql, params = self._filter_query(
@@ -285,6 +302,7 @@ class LogStore:
             category=category,
             source=source,
             request_id=request_id,
+            before=before,
         )
         params[-1] = limit
         with self._lock:

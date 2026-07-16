@@ -13,6 +13,7 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
     const logLevel = document.querySelector("#log-level");
     const logQuery = document.querySelector("#log-query");
     const copyLogsButton = document.querySelector("#copy-logs");
+    const loadOlderLogsBtn = document.querySelector("#load-older-logs");
     const configResult = document.querySelector("#config-result");
     const logRetention = document.querySelector("#log-retention"); // Moved
     const logConfigResult = document.querySelector("#log-config-result"); // Moved
@@ -1145,43 +1146,105 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
     }
 
     let logRenderSignature = "";
+    let olderLogEntries = [];
+    let lastLogFilterSignature = "";
 
-    async function fetchLogs() {
+    function buildLogParams() {
       const params = new URLSearchParams();
       if (logSource.value) params.set("source", logSource.value);
       if (logCategory.value) params.set("category", logCategory.value);
       if (logLevel.value) params.set("min_severity", logLevel.value);
       if (logQuery.value) params.set("query", logQuery.value);
+      return params;
+    }
+
+    function allLogEntries() {
+      // Latest window (kept fresh by polling) followed by manually loaded
+      // older pages; both are newest-first so concatenation stays ordered.
+      return logCacheEntries.concat(olderLogEntries);
+    }
+
+    function renderLogList() {
+      const entries = allLogEntries();
+      const signature = JSON.stringify(entries);
+      // Skip re-render (and the scroll reset it causes) when nothing changed.
+      if (signature === logRenderSignature) return;
+      logRenderSignature = signature;
+      const previousScrollTop = logList.scrollTop;
+      logList.innerHTML = "";
+      entries.forEach((entry) => {
+        const container = document.createElement("div");
+        container.className = "log-entry";
+        const severity = entry.severity || entry.level;
+        container.innerHTML = `
+          <div class="log-meta">
+            <span class="log-pill ${severityClass(severity)}">${escapeHtml(severity)}</span>
+            <span class="log-pill pill-muted">${escapeHtml(entry.source || entry.logger)}</span>
+            <span class="log-pill pill-outline">${escapeHtml(entry.category || entry.logger)}</span>
+            <span class="log-timestamp log-pill pill-outline">${escapeHtml(formatLogTimestamp(entry.timestamp))}</span>
+          </div>
+          <div class="log-message">${escapeHtml(entry.message)}</div>
+        `;
+        logList.appendChild(container);
+      });
+      logList.scrollTop = previousScrollTop;
+    }
+
+    async function fetchLogs() {
+      const params = buildLogParams();
+      const filterSignature = params.toString();
+      if (filterSignature !== lastLogFilterSignature) {
+        // Filters changed; older pages belong to the previous filter set.
+        lastLogFilterSignature = filterSignature;
+        olderLogEntries = [];
+        if (loadOlderLogsBtn) {
+          loadOlderLogsBtn.disabled = false;
+          loadOlderLogsBtn.textContent = "Load older";
+        }
+      }
       try {
         const response = await fetch(`/api/logs?${params.toString()}`);
         if (response.ok) {
           const entries = await response.json();
           logCacheEntries = Array.isArray(entries) ? entries : [];
-          // Skip re-render (and the scroll reset it causes) when nothing changed.
-          const signature = JSON.stringify(logCacheEntries);
-          if (signature === logRenderSignature) return;
-          logRenderSignature = signature;
-          const previousScrollTop = logList.scrollTop;
-          logList.innerHTML = "";
-          logCacheEntries.forEach((entry) => {
-            const container = document.createElement("div");
-            container.className = "log-entry";
-            const severity = entry.severity || entry.level;
-            container.innerHTML = `
-              <div class="log-meta">
-                <span class="log-pill ${severityClass(severity)}">${escapeHtml(severity)}</span>
-                <span class="log-pill pill-muted">${escapeHtml(entry.source || entry.logger)}</span>
-                <span class="log-pill pill-outline">${escapeHtml(entry.category || entry.logger)}</span>
-                <span class="log-timestamp log-pill pill-outline">${escapeHtml(formatLogTimestamp(entry.timestamp))}</span>
-              </div>
-              <div class="log-message">${escapeHtml(entry.message)}</div>
-            `;
-            logList.appendChild(container);
-          });
-          logList.scrollTop = previousScrollTop;
+          // Drop older-page duplicates in case the latest window grew into them.
+          const latestKeys = new Set(logCacheEntries.map((e) => `${e.timestamp}|${e.message}`));
+          olderLogEntries = olderLogEntries.filter(
+            (e) => !latestKeys.has(`${e.timestamp}|${e.message}`),
+          );
+          renderLogList();
         }
       } catch (e) {
         console.error("fetchLogs failed", e);
+      }
+    }
+
+    async function loadOlderLogs() {
+      const entries = allLogEntries();
+      const oldest = entries[entries.length - 1];
+      if (!oldest || !loadOlderLogsBtn) return;
+      loadOlderLogsBtn.disabled = true;
+      loadOlderLogsBtn.textContent = "Loading…";
+      try {
+        const params = buildLogParams();
+        params.set("before", oldest.timestamp);
+        params.set("limit", "200");
+        const response = await fetch(`/api/logs?${params.toString()}`);
+        if (!response.ok) return;
+        const older = await response.json();
+        olderLogEntries = olderLogEntries.concat(Array.isArray(older) ? older : []);
+        renderLogList();
+        if (!older.length) {
+          loadOlderLogsBtn.textContent = "No older entries";
+          return;
+        }
+      } catch (e) {
+        console.error("loadOlderLogs failed", e);
+      } finally {
+        if (loadOlderLogsBtn.textContent === "Loading…") {
+          loadOlderLogsBtn.textContent = "Load older";
+          loadOlderLogsBtn.disabled = false;
+        }
       }
     }
 
@@ -1557,7 +1620,9 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
         const row = button.closest("tr");
         const jobId = row?.dataset.jobId;
         const path = row?.dataset.path;
-        logQuery.value = jobId || path || "";
+        // Log messages reference jobs by the short 8-char id (job_id[:8]);
+        // searching the full UUID would match nothing.
+        logQuery.value = (jobId || "").slice(0, 8) || path || "";
         switchPage("logs");
         fetchLogs();
         return;
@@ -1773,6 +1838,9 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
     }
 
     document.querySelector("#refresh-logs").addEventListener("click", fetchLogs);
+    if (loadOlderLogsBtn) {
+      loadOlderLogsBtn.addEventListener("click", loadOlderLogs);
+    }
     logCategory.addEventListener("change", fetchLogs);
     logSource.addEventListener("change", fetchLogs);
     logLevel.addEventListener("change", fetchLogs);
@@ -2426,7 +2494,8 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
       historyRows.addEventListener("click", (event) => {
         const link = event.target.closest(".history-log-link");
         if (!link) return;
-        logQuery.value = link.dataset.jobId || "";
+        // Short id: log messages never contain the full job UUID.
+        logQuery.value = (link.dataset.jobId || "").slice(0, 8);
         switchPage("logs");
         fetchLogs();
       });
@@ -2434,7 +2503,7 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
 
     async function copyLogsToClipboard() {
       if (!copyLogsButton) return;
-      const entries = logCacheEntries || [];
+      const entries = allLogEntries();
       if (!entries.length) {
         copyLogsButton.textContent = "No logs";
         setTimeout(() => {
