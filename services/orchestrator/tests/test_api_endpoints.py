@@ -470,3 +470,138 @@ def test_next_job_reports_queue_outage(test_app, monkeypatch):
     response = client.get("/api/jobs/next")
     assert response.status_code == 503
     assert response.json()["detail"] == "Job queue unavailable"
+
+
+def test_entries_summary_and_compliance_filters(test_app, tmp_path):
+    client, _main = test_app
+    from app.dependencies import get_app_dependencies
+
+    client.delete("/api/libraries/runtime")
+    profile_id = _first_profile_id(client)
+    profile_name = client.get(f"/api/profiles/{profile_id}").json()["name"]
+
+    media_root = tmp_path / "summary"
+    media_root.mkdir()
+    library_payload = {
+        "name": "runtime",
+        "root": str(media_root),
+        "depth": "max",
+        "profile_id": profile_id,
+    }
+    assert client.post("/api/libraries", json=library_payload).status_code == 201
+
+    store = get_app_dependencies().library_entry_store
+
+    def seed(name: str, status: str, compliant=None):
+        source = media_root / name
+        source.write_bytes(b"content")
+        store.update_status(
+            str(source),
+            status,
+            library="runtime",
+            profile=profile_name,
+            profile_id=profile_id,
+        )
+        if compliant is not None:
+            store.update_compliance(str(source), compliant=compliant, detail="{}")
+
+    seed("ok.mkv", LibraryStatus.CONVERTED, compliant=True)
+    seed("bad.mkv", LibraryStatus.CONVERTED, compliant=False)
+    seed("fresh.mkv", LibraryStatus.PENDING)
+    seed("broken.mkv", LibraryStatus.FAILED)
+
+    # Whole-table totals, independent of any pagination window.
+    summary = client.get("/api/library/entries/summary", params={"library": "runtime"}).json()
+    assert summary["converted"] == 2
+    assert summary["pending"] == 1
+    assert summary["failed"] == 1
+    assert summary["noncompliant"] == 1
+    assert summary["total"] == 4
+
+    def entry_names(params):
+        entries = client.get("/api/library/entries", params=params).json()
+        return sorted(item["path"].rsplit("/", 1)[-1] for item in entries)
+
+    assert entry_names({"library": "runtime", "compliance": "noncompliant"}) == ["bad.mkv"]
+    assert entry_names({"library": "runtime", "compliance": "compliant"}) == ["ok.mkv"]
+    assert entry_names({"library": "runtime", "compliance": "unverified"}) == [
+        "broken.mkv",
+        "fresh.mkv",
+    ]
+    assert entry_names({"library": "runtime", "query": "bad"}) == ["bad.mkv"]
+
+    # The total in the envelope respects the same filters.
+    envelope = client.get(
+        "/api/library/entries",
+        params={
+            "library": "runtime",
+            "compliance": "unverified",
+            "include_total": "true",
+            "limit": 1,
+        },
+    ).json()
+    assert envelope["total"] == 2
+    assert len(envelope["items"]) == 1
+
+    assert client.get("/api/library/entries", params={"compliance": "bogus"}).status_code == 400
+
+
+def test_history_reports_job_type_and_duration(test_app):
+    client, _main = test_app
+    from datetime import datetime, timedelta, timezone
+
+    from app.dependencies import get_app_dependencies
+    from app.job_history import JobHistoryEntry, JobHistoryStatus
+
+    started = datetime.now(timezone.utc) - timedelta(seconds=90)
+    completed = started + timedelta(seconds=75)
+    get_app_dependencies().job_history_store.record(
+        JobHistoryEntry(
+            job_id="hist-verify-1",
+            path="/watch/movies/demo.mkv",
+            library="runtime",
+            profile="default",
+            status=JobHistoryStatus.COMPLETED,
+            job_type="verify",
+            started_at=started,
+            completed_at=completed,
+        )
+    )
+
+    history = client.get("/api/history").json()
+    row = next(item for item in history if item["id"] == "hist-verify-1")
+    assert row["job_type"] == "verify"
+    assert row["library"] == "runtime"
+    assert abs(row["elapsed_seconds"] - 75) <= 1
+
+
+def test_upsert_requeue_clears_stale_verdict(test_app, tmp_path):
+    _client, _main = test_app
+    from app.dependencies import get_app_dependencies
+    from app.library_entries import EntryUpdate
+
+    store = get_app_dependencies().library_entry_store
+    source = tmp_path / "stale.mkv"
+    source.write_bytes(b"content")
+
+    store.update_status(
+        str(source),
+        LibraryStatus.CONVERTED,
+        library="runtime",
+        profile="default",
+        output_compliant=False,
+        compliance_detail='{"compliant": false}',
+    )
+
+    # A scan that finds the output missing re-queues the entry via upsert;
+    # the old output's verdict must not survive as a stale badge.
+    entry = store.upsert(
+        EntryUpdate(
+            path=str(source),
+            library="runtime",
+            profile="default",
+            status=LibraryStatus.PENDING,
+        )
+    )
+    assert entry.output_compliant is None
+    assert entry.compliance_detail is None

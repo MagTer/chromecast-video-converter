@@ -24,6 +24,7 @@ async def list_job_history(limit: int = 100) -> JSONResponse:
                     "library": entry.library,
                     "profile": entry.profile,
                     "status": entry.status,
+                    "job_type": entry.job_type,
                     "message": entry.message,
                     # map started_at to created_at for frontend sort
                     "created_at": entry.started_at,

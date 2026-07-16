@@ -141,19 +141,49 @@ class LibraryEntryStore:
     def _session(self) -> Session:
         return self._Session()
 
+    @staticmethod
+    def _apply_filters(
+        stmt,
+        *,
+        status: Optional[str] = None,
+        library: Optional[str] = None,
+        compliance: Optional[str] = None,
+        query: Optional[str] = None,
+    ):
+        if status:
+            stmt = stmt.where(LibraryEntry.status == status)
+        if library:
+            stmt = stmt.where(LibraryEntry.library == library)
+        if compliance == "compliant":
+            stmt = stmt.where(LibraryEntry.output_compliant.is_(True))
+        elif compliance == "noncompliant":
+            stmt = stmt.where(LibraryEntry.output_compliant.is_(False))
+        elif compliance == "unverified":
+            stmt = stmt.where(LibraryEntry.output_compliant.is_(None))
+        if query:
+            pattern = f"%{query}%"
+            stmt = stmt.where(
+                LibraryEntry.path.ilike(pattern) | LibraryEntry.library.ilike(pattern)
+            )
+        return stmt
+
     def list_entries(
         self,
         *,
         status: Optional[str] = None,
         library: Optional[str] = None,
+        compliance: Optional[str] = None,
+        query: Optional[str] = None,
         limit: Optional[int] = None,
         offset: Optional[int] = None,
     ) -> List[LibraryEntry]:
-        stmt = select(LibraryEntry)
-        if status:
-            stmt = stmt.where(LibraryEntry.status == status)
-        if library:
-            stmt = stmt.where(LibraryEntry.library == library)
+        stmt = self._apply_filters(
+            select(LibraryEntry),
+            status=status,
+            library=library,
+            compliance=compliance,
+            query=query,
+        )
         stmt = stmt.order_by(LibraryEntry.updated_at.desc())
         if limit is not None:
             stmt = stmt.limit(limit)
@@ -162,14 +192,52 @@ class LibraryEntryStore:
         with self._lock, self._session() as session:
             return list(session.scalars(stmt).all())
 
-    def count_entries(self, *, status: Optional[str] = None, library: Optional[str] = None) -> int:
-        stmt = select(func.count()).select_from(LibraryEntry)
-        if status:
-            stmt = stmt.where(LibraryEntry.status == status)
-        if library:
-            stmt = stmt.where(LibraryEntry.library == library)
+    def count_entries(
+        self,
+        *,
+        status: Optional[str] = None,
+        library: Optional[str] = None,
+        compliance: Optional[str] = None,
+        query: Optional[str] = None,
+    ) -> int:
+        stmt = self._apply_filters(
+            select(func.count()).select_from(LibraryEntry),
+            status=status,
+            library=library,
+            compliance=compliance,
+            query=query,
+        )
         with self._lock, self._session() as session:
             return int(session.scalar(stmt) or 0)
+
+    def summarize(self, *, library: Optional[str] = None) -> dict:
+        """Whole-table counts per status plus the non-compliant total.
+
+        The GUI summary cards need real totals, not counts over whatever
+        window pagination happens to have loaded client-side.
+        """
+        status_stmt = select(LibraryEntry.status, func.count()).group_by(LibraryEntry.status)
+        noncompliant_stmt = (
+            select(func.count())
+            .select_from(LibraryEntry)
+            .where(LibraryEntry.output_compliant.is_(False))
+        )
+        if library:
+            status_stmt = status_stmt.where(LibraryEntry.library == library)
+            noncompliant_stmt = noncompliant_stmt.where(LibraryEntry.library == library)
+        summary = {
+            LibraryStatus.PENDING: 0,
+            LibraryStatus.CONVERTING: 0,
+            LibraryStatus.CONVERTED: 0,
+            LibraryStatus.FAILED: 0,
+            LibraryStatus.REMOVED: 0,
+        }
+        with self._lock, self._session() as session:
+            for status_value, count in session.execute(status_stmt).all():
+                summary[status_value] = int(count)
+            summary["noncompliant"] = int(session.scalar(noncompliant_stmt) or 0)
+        summary["total"] = sum(count for key, count in summary.items() if key != "noncompliant")
+        return summary
 
     def get(self, entry_id: int) -> Optional[LibraryEntry]:
         with self._lock, self._session() as session:
@@ -189,6 +257,11 @@ class LibraryEntryStore:
                     if key == "profile_id" and value is None:
                         continue
                     setattr(existing, key, value)
+                if payload.status == LibraryStatus.PENDING:
+                    # Requeued for conversion (e.g. output missing on scan);
+                    # the old output's compliance verdict no longer applies.
+                    existing.output_compliant = None
+                    existing.compliance_detail = None
                 existing.updated_at = timestamp
                 session.add(existing)
                 session.commit()

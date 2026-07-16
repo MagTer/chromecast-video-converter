@@ -81,6 +81,7 @@ def record_job_history(
                 library=job.library,
                 profile=job.profile,
                 status=status,
+                job_type=getattr(job, "job_type", "convert") or "convert",
                 message=message,
                 started_at=job.created_at,
                 completed_at=completed_at,

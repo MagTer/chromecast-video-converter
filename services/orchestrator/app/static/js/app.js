@@ -26,6 +26,8 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
     const entrySearch = document.querySelector("#entry-search");
     const entryLibraryFilter = document.querySelector("#entry-library-filter");
     const entryStatusFilter = document.querySelector("#entry-status-filter");
+    const entryComplianceFilter = document.querySelector("#entry-compliance-filter");
+    const wsStatus = document.querySelector("#ws-status");
     const entryPageSize = document.querySelector("#entry-page-size");
     const entryPageIndicator = document.querySelector("#entry-page-indicator");
     const refreshEntriesBtn = document.querySelector("#refresh-entries");
@@ -107,6 +109,8 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
     let liveSocket = null;
     let isWsl2 = false;
     let logCacheEntries = [];
+    let entrySummaryCache = null;
+    let entrySummaryTimer = null;
 
     if (!logLevel.value) {
       logLevel.value = "INFO";
@@ -175,7 +179,11 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
     }
 
     function formatPipeline(pipeline) {
-      if (!pipeline) return "GPU/GPU/GPU";
+      // Never guess: a missing pipeline means the file has not been through
+      // an encode, so showing a default "GPU/GPU/GPU" would be misinformation.
+      if (!pipeline || (!pipeline.decode_type && !pipeline.scale_type && !pipeline.encode_type)) {
+        return "—";
+      }
       const decode = String(pipeline.decode_type || "gpu").toUpperCase();
       const scale = String(pipeline.scale_type || "gpu").toUpperCase();
       const encode = String(pipeline.encode_type || "gpu").toUpperCase();
@@ -773,8 +781,15 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
     });
 
     async function fetchConfig() {
-      const response = await fetch(`/api/config?ts=${Date.now()}`, { cache: "no-store" });
-      const config = await response.json();
+      let config;
+      try {
+        const response = await fetch(`/api/config?ts=${Date.now()}`, { cache: "no-store" });
+        if (!response.ok) return;
+        config = await response.json();
+      } catch (e) {
+        console.error("fetchConfig failed", e);
+        return;
+      }
       configCache = config;
       isWsl2 = Boolean(config.environment?.is_wsl2);
       // Initialize moved elements
@@ -1009,20 +1024,28 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
         const normalizedPath = normalizeDisplayPath(job.path);
         const fileName = fileNameFromPath(normalizedPath);
         const finished = job.updated_at ? new Date(job.updated_at).toLocaleString() : "-";
-        const pipelineText = formatPipeline(job.pipeline || (job.encoding ? job.encoding.pipeline : null));
+        const jobType = String(job.job_type || "convert").toLowerCase();
+        const elapsed = Number(job.elapsed_seconds || 0);
+        const duration = elapsed > 0 ? formatElapsed(elapsed) : "-";
+        const message = job.message || "";
         // Inline onclick handlers cannot reach module-scoped functions; use a
         // data attribute and the delegated listener on the table body instead.
-        const detailsLink = job.id
+        const logsLink = job.id
             ? `<button type="button" class="link-button history-log-link" data-job-id="${escapeHtml(job.id)}">View Logs</button>`
-            : escapeHtml(job.message || "-");
+            : "";
+        const messageHtml = message
+            ? `<div class="hint" title="${escapeHtml(message)}" style="max-width:28rem; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${escapeHtml(message)}</div>`
+            : "";
 
         tr.innerHTML = `
           <td>${escapeHtml(job.id ? job.id.slice(0, 8) : "")}</td>
           <td class="status-${escapeHtml(status)}">${escapeHtml(statusLabel)}</td>
+          <td>${escapeHtml(jobType)}</td>
           <td>${escapeHtml(finished)}</td>
+          <td>${escapeHtml(duration)}</td>
+          <td>${escapeHtml(job.library || "-")}</td>
           <td class="path-cell" title="${escapeHtml(normalizedPath)}">${escapeHtml(fileName)}</td>
-          <td>${escapeHtml(pipelineText)}</td>
-          <td>${detailsLink}</td>
+          <td>${messageHtml}${logsLink}</td>
         `;
         historyRows.appendChild(tr);
       });
@@ -1050,8 +1073,15 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
     }
 
     async function refreshQueueState() {
-      const response = await fetch("/api/queue/state");
-      const state = await response.json();
+      let state;
+      try {
+        const response = await fetch("/api/queue/state");
+        if (!response.ok) return;
+        state = await response.json();
+      } catch (e) {
+        console.error("refreshQueueState failed", e);
+        return;
+      }
       const depth = Number(state.depth ?? 0);
       const inFlight = Number(state.pending ?? 0);
       const pending = Math.max(0, depth - inFlight);
@@ -1068,13 +1098,28 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
         if (!online) {
           gpuMetrics.className = "status-pill status-paused";
         }
+        const telemetry = Array.isArray(workerMetrics.telemetry) ? workerMetrics.telemetry : [];
+        gpuMetrics.title = telemetry.length
+          ? telemetry
+              .map((worker) => {
+                const devices = (worker.devices || []).join(", ") || "no devices";
+                const caps = `cuda:${worker.cuda_available ? "yes" : "no"} nvenc:${worker.nvenc_available ? "yes" : "no"}`;
+                const note = worker.message ? ` — ${worker.message}` : "";
+                return `${worker.worker_id}: ${devices} (${caps})${note}`;
+              })
+              .join("\n")
+          : "No worker telemetry received yet";
       }
       if (state.paused) {
-        queueStatus.textContent = "Paused";
+        const reason = String(state.reason || "").trim();
+        const shortReason = reason.length > 40 ? `${reason.slice(0, 37)}…` : reason;
+        queueStatus.textContent = shortReason ? `Paused — ${shortReason}` : "Paused";
+        queueStatus.title = reason || "Queue is paused";
         queueStatus.className = "status-pill status-paused";
         pauseToggle.textContent = "Resume";
       } else {
         queueStatus.textContent = "Running";
+        queueStatus.title = "";
         queueStatus.className = "status-pill status-running";
         pauseToggle.textContent = "Pause";
       }
@@ -1140,37 +1185,41 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
       }
     }
 
-    function summarizeEntries(entries) {
-      const summary = {
-        pending: 0,
-        converting: 0,
-        converted: 0,
-        failed: 0,
-        noncompliant: 0,
-      };
-      entries.forEach((entry) => {
-        if (summary[entry.status] !== undefined) {
-          summary[entry.status] += 1;
-        }
-        if (entry.output_compliant === false) {
-          summary.noncompliant += 1;
-        }
-      });
-      return summary;
+    // Server-side totals for the summary cards. Counting the client-side
+    // window would misreport as soon as more entries exist than are loaded.
+    async function fetchEntrySummary() {
+      try {
+        const params = new URLSearchParams();
+        if (entryLibraryFilter.value) params.set("library", entryLibraryFilter.value);
+        const suffix = params.toString() ? `?${params.toString()}` : "";
+        const response = await fetch(`/api/library/entries/summary${suffix}`);
+        if (!response.ok) return;
+        entrySummaryCache = await response.json();
+        renderEntrySummary();
+      } catch (e) {
+        console.error("fetchEntrySummary failed", e);
+      }
+    }
+
+    // Batch bursts of websocket entry-updates into one summary request.
+    function scheduleEntrySummaryRefresh() {
+      if (entrySummaryTimer) return;
+      entrySummaryTimer = setTimeout(() => {
+        entrySummaryTimer = null;
+        fetchEntrySummary();
+      }, 2000);
     }
 
     function upsertLibraryEntry(update) {
       if (!update) return;
-      const existing = libraryEntries.find((item) => item.id === update.id);
       const map = new Map(libraryEntries.map((entry) => [entry.id, entry]));
       map.set(update.id, update);
       libraryEntries = Array.from(map.values()).sort((a, b) =>
         new Date(b.updated_at || 0) - new Date(a.updated_at || 0),
       );
-      if (!existing && entryTotal !== null) {
-        entryTotal += 1;
-      }
-      renderEntrySummary();
+      // entryTotal is a server-side count of the filtered set; guessing at it
+      // here drifts as soon as an update does not match the active filters.
+      scheduleEntrySummaryRefresh();
       renderEntryTable();
     }
 
@@ -1179,19 +1228,56 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
       return `<span class="status-chip status-${normalized}">${normalized}</span>`;
     }
 
+    function complianceSummaryText(entry) {
+      const video = entry.compliance?.video;
+      if (!video) return "Verified Chromecast compliant";
+      const level = video.level ? ` L${video.level / 10}` : "";
+      return `${video.width}x${video.height} ${video.codec || ""}${level}`.trim();
+    }
+
+    // Tooltips are invisible on touch devices; the chip is a button that
+    // expands the verdict details inline in the cell.
     function complianceChip(entry) {
       if (entry.output_compliant === true) {
-        const video = entry.compliance?.video;
-        const summary = video
-          ? `${video.width}x${video.height} ${video.codec || ""} L${(video.level ?? 0) / 10}`
-          : "Verified Chromecast compliant";
-        return `<span class="status-chip status-converted" title="${escapeHtml(summary)}">OK</span>`;
+        const summary = complianceSummaryText(entry);
+        return `<button type="button" class="status-chip status-converted chip-button" data-action="compliance" data-entry-id="${Number(entry.id)}" title="${escapeHtml(summary)}">OK</button>`;
       }
       if (entry.output_compliant === false) {
         const issues = (entry.compliance?.issues || []).join("; ") || "Not compliant";
-        return `<span class="status-chip status-failed" title="${escapeHtml(issues)}">Not compliant</span>`;
+        return `<button type="button" class="status-chip status-failed chip-button" data-action="compliance" data-entry-id="${Number(entry.id)}" title="${escapeHtml(issues)}">Not compliant</button>`;
       }
       return '<span class="hint" title="Not verified yet">—</span>';
+    }
+
+    function toggleComplianceDetail(entryId, cell) {
+      const existing = cell.querySelector(".compliance-detail");
+      if (existing) {
+        existing.remove();
+        return;
+      }
+      const entry = libraryEntries.find((item) => Number(item.id) === Number(entryId));
+      if (!entry) return;
+      const detail = document.createElement("div");
+      detail.className = "compliance-detail hint";
+      detail.style.cssText = "margin-top:0.25rem; font-size:0.8rem; white-space:normal;";
+      if (entry.output_compliant === true) {
+        detail.textContent = complianceSummaryText(entry);
+      } else {
+        const issues = entry.compliance?.issues || [];
+        if (issues.length) {
+          const list = document.createElement("ul");
+          list.style.cssText = "margin:0.25rem 0 0; padding-left:1.1rem;";
+          issues.forEach((issue) => {
+            const li = document.createElement("li");
+            li.textContent = issue;
+            list.appendChild(li);
+          });
+          detail.appendChild(list);
+        } else {
+          detail.textContent = "Not compliant (no detail recorded)";
+        }
+      }
+      cell.appendChild(detail);
     }
 
     function formatUpdated(value) {
@@ -1201,13 +1287,22 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
       return date.toLocaleString();
     }
 
+    function matchesComplianceFilter(entry, filterValue) {
+      if (!filterValue) return true;
+      if (filterValue === "compliant") return entry.output_compliant === true;
+      if (filterValue === "noncompliant") return entry.output_compliant === false;
+      return entry.output_compliant === null || entry.output_compliant === undefined;
+    }
+
     function filteredEntries() {
       const term = (entrySearch.value || "").toLowerCase();
       const library = entryLibraryFilter.value;
       const status = entryStatusFilter.value;
+      const compliance = entryComplianceFilter?.value || "";
       return libraryEntries.filter((entry) => {
         if (library && entry.library !== library) return false;
         if (status && entry.status !== status) return false;
+        if (!matchesComplianceFilter(entry, compliance)) return false;
         if (!term) return true;
         const normalizedPath = normalizeDisplayPath(entry.path).toLowerCase();
         return (
@@ -1218,24 +1313,60 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
     }
 
     function renderEntrySummary() {
-      const summary = summarizeEntries(libraryEntries);
-      const entries = [
-        { label: "Pending", key: "pending" },
-        { label: "Converting", key: "converting" },
-        { label: "Converted", key: "converted" },
-        { label: "Failed", key: "failed" },
-        { label: "Non-compliant", key: "noncompliant" },
+      const summary = entrySummaryCache || {};
+      const cards = [
+        { label: "Pending", key: "pending", filter: { status: "pending" } },
+        { label: "Converting", key: "converting", filter: { status: "converting" } },
+        { label: "Converted", key: "converted", filter: { status: "converted" } },
+        { label: "Failed", key: "failed", filter: { status: "failed" } },
+        { label: "Removed", key: "removed", filter: { status: "removed" } },
+        { label: "Non-compliant", key: "noncompliant", filter: { compliance: "noncompliant" } },
       ];
       entrySummary.innerHTML = "";
-      entries.forEach((item) => {
-        const card = document.createElement("div");
-        card.className = "stat-card";
+      cards.forEach((item) => {
+        const card = document.createElement("button");
+        card.type = "button";
+        card.className = "stat-card stat-card-button";
+        const active =
+          (item.filter.status && entryStatusFilter.value === item.filter.status) ||
+          (item.filter.compliance && entryComplianceFilter?.value === item.filter.compliance);
+        if (active) card.classList.add("active");
+        card.title = `Filter the table on ${item.label.toLowerCase()}`;
         card.innerHTML = `
           <h4>${item.label}</h4>
-          <div class="stat-value">${summary[item.key] ?? 0}</div>
+          <div class="stat-value">${summary[item.key] ?? "…"}</div>
         `;
+        card.addEventListener("click", () => {
+          if (item.filter.status) {
+            entryStatusFilter.value = entryStatusFilter.value === item.filter.status ? "" : item.filter.status;
+          } else if (item.filter.compliance && entryComplianceFilter) {
+            entryComplianceFilter.value =
+              entryComplianceFilter.value === item.filter.compliance ? "" : item.filter.compliance;
+          }
+          refreshLibraryEntries();
+        });
         entrySummary.appendChild(card);
       });
+    }
+
+    function profileSelectHtml(entry) {
+      const profiles = profileList();
+      if (!profiles.length) {
+        return escapeHtml(entry.profile || "—");
+      }
+      const options = profiles
+        .map((profile) => {
+          const selected = Number(profile.id) === Number(entry.profile_id) ? " selected" : "";
+          return `<option value="${Number(profile.id)}"${selected}>${escapeHtml(profile.name)}</option>`;
+        })
+        .join("");
+      const unknown =
+        entry.profile_id !== null &&
+        entry.profile_id !== undefined &&
+        !profiles.some((profile) => Number(profile.id) === Number(entry.profile_id))
+          ? `<option value="${Number(entry.profile_id)}" selected>${escapeHtml(entry.profile || "unknown")}</option>`
+          : "";
+      return `<select class="entry-profile-select" data-entry-id="${Number(entry.id)}" title="Profile used for the next (re)conversion of this entry">${unknown}${options}</select>`;
     }
 
     function renderEntryTable() {
@@ -1245,24 +1376,33 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
         const tr = document.createElement("tr");
         const normalizedPath = normalizeDisplayPath(entry.path);
         const fileName = fileNameFromPath(normalizedPath);
-        const encodingLabel = formatPipeline({
-          decode_type: entry.decode_type,
-          scale_type: entry.scale_type,
-          encode_type: entry.encode_type,
-          attempt: entry.attempt,
-          max_attempts: entry.max_attempts,
-        });
+        const hasPipeline = entry.decode_type || entry.scale_type || entry.encode_type;
+        const encodingLabel = hasPipeline
+          ? formatPipeline({
+              decode_type: entry.decode_type,
+              scale_type: entry.scale_type,
+              encode_type: entry.encode_type,
+              attempt: entry.attempt,
+              max_attempts: entry.max_attempts,
+            })
+          : "—";
 
-        let statusHtml = formatStatusChip(entry.status);
-        if (entry.status === "converting" && entry.last_job_id) {
-            // Keep status as "Converting" without percentage
-            // The percentage info is redundant here as per user request.
-        }
+        const statusHtml = formatStatusChip(entry.status);
 
         let errorHtml = "";
         if (entry.status === "failed" && entry.last_error) {
             errorHtml = `<div class="warn" style="margin-top:0.25rem; font-size:0.85rem;">${escapeHtml(entry.last_error)}</div>`;
         }
+        let originalMissingHtml = "";
+        if (entry.original_missing && entry.status !== "removed") {
+            originalMissingHtml = '<div class="hint" style="margin-top:0.25rem; font-size:0.8rem;">Original file missing</div>';
+        }
+
+        const outputPath = entry.output_path ? normalizeDisplayPath(entry.output_path) : "";
+        const pathTitleParts = [`Source: ${normalizedPath}`];
+        if (outputPath) pathTitleParts.push(`Output: ${outputPath}`);
+        if (entry.original_missing) pathTitleParts.push("Original file is missing");
+        const pathTitle = pathTitleParts.join("\n");
 
         const verifiable = entry.status === "converted" || entry.status === "removed";
         const verifyButton = verifiable
@@ -1273,10 +1413,12 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
           <td>${Number(entry.id)}</td>
           <td>${statusHtml}</td>
           <td>${escapeHtml(entry.library)}</td>
-          <td class="path-cell" title="${escapeHtml(normalizedPath)}">
+          <td class="path-cell" title="${escapeHtml(pathTitle)}">
             ${escapeHtml(fileName)}
             ${errorHtml}
+            ${originalMissingHtml}
           </td>
+          <td>${profileSelectHtml(entry)}</td>
           <td>${escapeHtml(encodingLabel)}</td>
           <td>${complianceChip(entry)}</td>
           <td>${escapeHtml(formatUpdated(entry.updated_at))}</td>
@@ -1325,6 +1467,8 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
       });
       if (entryStatusFilter.value) params.set("status", entryStatusFilter.value);
       if (entryLibraryFilter.value) params.set("library", entryLibraryFilter.value);
+      if (entryComplianceFilter?.value) params.set("compliance", entryComplianceFilter.value);
+      if (entrySearch.value.trim()) params.set("query", entrySearch.value.trim());
 
       try {
         const response = await fetch(`/api/library/entries?${params.toString()}`);
@@ -1339,7 +1483,7 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
         libraryEntries = Array.from(map.values()).sort((a, b) =>
           new Date(b.updated_at || 0) - new Date(a.updated_at || 0),
         );
-        entryOffset += result.limit ?? limit;
+        entryOffset += received;
         if (entryTotal !== null) {
           entryHasMore = entryOffset < entryTotal;
         } else {
@@ -1359,6 +1503,7 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
     }
 
     async function refreshLibraryEntries() {
+      fetchEntrySummary();
       await loadLibraryEntries({ reset: true });
     }
 
@@ -1377,6 +1522,9 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
         });
         if (entryStatusFilter.value) params.set("status", entryStatusFilter.value);
         if (entryLibraryFilter.value) params.set("library", entryLibraryFilter.value);
+        if (entryComplianceFilter?.value) params.set("compliance", entryComplianceFilter.value);
+        if (entrySearch.value.trim()) params.set("query", entrySearch.value.trim());
+        fetchEntrySummary();
         const response = await fetch(`/api/library/entries?${params.toString()}`);
         const result = await response.json();
         const items = Array.isArray(result) ? result : result.items || [];
@@ -1395,11 +1543,16 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
         console.error("softRefreshLibraryEntries failed", error);
       } finally {
         entryLoadingState = false;
+        if (entryLoading) entryLoading.textContent = "";
       }
     }
 
     async function handleEntryAction(action, entryId, button) {
       if (!entryId) return;
+      if (action === "compliance") {
+        toggleComplianceDetail(entryId, button.closest("td"));
+        return;
+      }
       if (action === "logs") {
         const row = button.closest("tr");
         const jobId = row?.dataset.jobId;
@@ -1422,8 +1575,13 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
       try {
         const response = await fetch(endpoint, { method: "POST" });
         if (!response.ok) {
-          const detail = await response.json();
-          alert(detail.detail || "Request failed");
+          const detail = await response.json().catch(() => ({}));
+          alert(
+            typeof detail.detail === "string" && detail.detail
+              ? detail.detail
+              : "Request failed",
+          );
+          return;
         }
         if (action === "verify") {
           // The verdict arrives via the entry-update websocket message once
@@ -1439,12 +1597,20 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
     }
 
     async function fetchLogFilters() {
-      const [categoriesResponse, sourcesResponse] = await Promise.all([
-        fetch("/api/logs/categories"),
-        fetch("/api/logs/sources"),
-      ]);
-      const categories = await categoriesResponse.json();
-      const sources = await sourcesResponse.json();
+      let categories;
+      let sources;
+      try {
+        const [categoriesResponse, sourcesResponse] = await Promise.all([
+          fetch("/api/logs/categories"),
+          fetch("/api/logs/sources"),
+        ]);
+        if (!categoriesResponse.ok || !sourcesResponse.ok) return;
+        categories = await categoriesResponse.json();
+        sources = await sourcesResponse.json();
+      } catch (e) {
+        console.error("fetchLogFilters failed", e);
+        return;
+      }
       const existingCategory = logCategory.value;
       const existingSource = logSource.value;
 
@@ -1488,8 +1654,15 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
     }
 
     async function fetchLogStats() {
-      const response = await fetch("/api/logs/stats");
-      const stats = await response.json();
+      let stats;
+      try {
+        const response = await fetch("/api/logs/stats");
+        if (!response.ok) return;
+        stats = await response.json();
+      } catch (e) {
+        console.error("fetchLogStats failed", e);
+        return;
+      }
       logStats.textContent = `Stored ${stats.total_entries} entr${
         stats.total_entries === 1 ? "y" : "ies"
       } (${formatBytes(stats.file_size_bytes)}) with a ${stats.retention_days}-day retention window.`;
@@ -1504,7 +1677,9 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
       liveSocket = socket;
 
       socket.onopen = () => {
-        libraryStatus.textContent = "Live updates connected";
+        // Connection state gets its own element; libraryStatus carries action
+        // feedback ("Verification queued", ...) and must not be clobbered.
+        if (wsStatus) wsStatus.textContent = "Live updates: connected";
       };
 
       socket.onmessage = (event) => {
@@ -1524,7 +1699,7 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
       };
 
       socket.onclose = () => {
-        libraryStatus.textContent = "Live updates disconnected; retrying...";
+        if (wsStatus) wsStatus.textContent = "Live updates: reconnecting…";
         setTimeout(() => {
           connectLiveUpdates();
         }, 2000);
@@ -1923,6 +2098,7 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
 
     if (verifyAllBtn) {
         verifyAllBtn.addEventListener("click", async () => {
+            if (!confirm("Queue a verification job for every converted entry? Existing verdicts are refreshed; already-queued duplicates are skipped.")) return;
             verifyAllBtn.disabled = true;
             verifyAllBtn.textContent = "Queueing...";
             try {
@@ -1930,8 +2106,8 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
                 const result = await response.json();
                 if (response.ok) {
                     libraryStatus.textContent =
-                        `Queued verification for ${result.queued_count} entries; ` +
-                        "results appear as workers finish.";
+                        `Queued verification for up to ${result.queued_count} entries ` +
+                        "(duplicates are skipped); results appear as workers finish.";
                 } else {
                     alert("Failed to queue verification: " + (result.detail || "Unknown error"));
                 }
@@ -2185,11 +2361,14 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
 
     refreshEntriesBtn.addEventListener("click", refreshLibraryEntries);
 
-    [entryLibraryFilter, entryStatusFilter, entryPageSize].forEach((control) => {
-      control.addEventListener("change", () => {
-        refreshLibraryEntries();
-      });
-    });
+    [entryLibraryFilter, entryStatusFilter, entryComplianceFilter, entryPageSize].forEach(
+      (control) => {
+        if (!control) return;
+        control.addEventListener("change", () => {
+          refreshLibraryEntries();
+        });
+      },
+    );
 
     entryLoadMore.addEventListener("click", () => {
       loadLibraryEntries();
@@ -2200,6 +2379,37 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
       if (!button) return;
       const { action, entryId } = button.dataset;
       handleEntryAction(action, entryId, button);
+    });
+
+    // Per-entry profile override; the profile takes effect on the next
+    // (re)conversion of that entry.
+    entryRows.addEventListener("change", async (event) => {
+      const select = event.target.closest("select.entry-profile-select");
+      if (!select) return;
+      const entryId = Number(select.dataset.entryId);
+      const previous = libraryEntries.find((item) => Number(item.id) === entryId)?.profile_id;
+      select.disabled = true;
+      try {
+        const response = await fetch(`/api/library/entries/${entryId}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ profile_id: Number(select.value) }),
+        });
+        if (!response.ok) {
+          const detail = await response.json().catch(() => ({}));
+          alert(detail.detail || "Failed to update entry profile");
+          if (previous !== null && previous !== undefined) select.value = String(previous);
+          return;
+        }
+        const updated = await response.json();
+        upsertLibraryEntry(updated);
+        libraryStatus.textContent = `Profile updated for entry ${entryId}; applies on next conversion.`;
+      } catch (error) {
+        alert("Failed to update entry profile.");
+        if (previous !== null && previous !== undefined) select.value = String(previous);
+      } finally {
+        select.disabled = false;
+      }
     });
 
     jobRows.addEventListener("click", (event) => {
@@ -2294,9 +2504,16 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
     logQuery.addEventListener("input", () => {
         sessionStorage.setItem("logQuery", logQuery.value);
     });
+    // Search server-side (debounced) so matches beyond the loaded window are
+    // found too; the immediate client-side re-render keeps typing responsive.
+    let entrySearchTimer = null;
     entrySearch.addEventListener("input", () => {
         sessionStorage.setItem("entrySearch", entrySearch.value);
         renderEntryTable();
+        clearTimeout(entrySearchTimer);
+        entrySearchTimer = setTimeout(() => {
+          refreshLibraryEntries();
+        }, 350);
     });
 
     switchPage(initialPage);
