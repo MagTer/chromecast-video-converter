@@ -426,8 +426,9 @@ def _detect_hdr(stream: dict) -> bool:
             "hdr_dynamic_metadata",
         }:
             return True
-    bit_depth = _derive_bit_depth(stream) or 8
-    return bit_depth > 8
+    # Bit depth alone does not imply HDR: 10-bit SDR (common for x265 rips)
+    # is tracked separately via stream["bit_depth"].
+    return False
 
 
 def _augment_analysis_with_video_metadata(analysis: dict) -> dict:

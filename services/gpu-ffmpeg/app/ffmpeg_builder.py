@@ -471,7 +471,11 @@ class FFmpegBuilder:
 
         bit_depth = video_stream.bit_depth() if video_stream else None
         is_high_bit_depth = bool(bit_depth and bit_depth > 8)
-        requires_tonemap = bool(video_stream and (video_stream.is_hdr() or is_high_bit_depth))
+        # Only genuine HDR (PQ/HLG transfer or HDR side data) needs tonemapping.
+        # 10-bit SDR sources are handled by the plain format conversion below;
+        # running them through zscale/tonemap distorts colours and fails outright
+        # when the source lacks colour tags ("no path between colorspaces").
+        requires_tonemap = bool(video_stream and video_stream.is_hdr())
         is_interlaced = video_stream.is_interlaced() if video_stream else False
 
         target_width, target_height = self._target_dimensions(profile)
@@ -492,7 +496,7 @@ class FFmpegBuilder:
             and capabilities.supports_filter("tonemap")
         )
         if requires_tonemap and not use_cpu_tonemap:
-            LOGGER.warning("HDR/10-bit content detected but tonemap filters are unavailable")
+            LOGGER.warning("HDR content detected but tonemap filters are unavailable")
 
         gpu_filtering_possible = (
             decode_type == "gpu"
@@ -534,7 +538,7 @@ class FFmpegBuilder:
                         "Interlaced content detected but no deinterlace filter is available"
                     )
             if use_cpu_tonemap:
-                filters.extend(self._cpu_tonemap_filters())
+                filters.extend(self._cpu_tonemap_filters(video_stream))
             # Scale after hwupload only when the pipeline explicitly asks for GPU
             # scaling and the encode also happens on the GPU.
             scale_after_upload = (
@@ -617,8 +621,20 @@ class FFmpegBuilder:
             "force_original_aspect_ratio=decrease:force_divisible_by=2"
         )
 
-    def _cpu_tonemap_filters(self) -> list[str]:
+    def _cpu_tonemap_filters(self, video_stream: VideoStreamInfo | None) -> list[str]:
+        # zscale aborts with "code 3074: no path between colorspaces" when the
+        # decoded frames carry unknown colour tags, so stamp explicit values on
+        # the frames first. Missing fields default to HDR10 (BT.2020 / PQ).
+        def _tag(value: str | None, default: str) -> str:
+            if value and value.lower() not in {"unknown", "unspecified", "reserved"}:
+                return value
+            return default
+
+        space = _tag(video_stream.color_space if video_stream else None, "bt2020nc")
+        primaries = _tag(video_stream.color_primaries if video_stream else None, "bt2020")
+        transfer = _tag(video_stream.color_transfer if video_stream else None, "smpte2084")
         return [
+            f"setparams=colorspace={space}:color_primaries={primaries}:color_trc={transfer}",
             "zscale=t=linear:npl=100",
             "tonemap=hable:desat=0",
             "zscale=p=bt709:t=bt709:m=bt709:r=tv",

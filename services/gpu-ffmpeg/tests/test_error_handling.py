@@ -44,6 +44,21 @@ def test_augment_analysis_adds_hdr_metadata():
     assert enriched["streams"][0]["bit_depth"] == 10
 
 
+def test_augment_analysis_10bit_sdr_is_not_hdr():
+    analysis = {
+        "streams": [
+            {
+                "codec_type": "video",
+                "pix_fmt": "yuv420p10le",
+                # No colour transfer or HDR side data: 10-bit SDR rip
+            }
+        ]
+    }
+    enriched = _augment_analysis_with_video_metadata(analysis)
+    assert enriched["streams"][0]["is_hdr"] is False
+    assert enriched["streams"][0]["bit_depth"] == 10
+
+
 def test_probe_file_handles_timeout(monkeypatch, tmp_path):
     target = tmp_path / "movie.mkv"
     target.write_bytes(b"fake")

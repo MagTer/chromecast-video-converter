@@ -172,6 +172,8 @@ def test_hdr_10bit_gpu_pipeline(tmp_path):
 
     assert "hwdownload" in vf
     assert "format=p010le" in vf
+    # Colour tags are stamped before zscale so it never sees unknown colorspaces
+    assert "setparams=colorspace=bt2020nc:color_primaries=bt2020:color_trc=smpte2084" in vf
     assert "zscale=t=linear" in vf  # CPU Tonemapping
     assert "hwupload_cuda" in vf
 
@@ -192,6 +194,91 @@ def test_hdr_10bit_gpu_pipeline(tmp_path):
     assert command[command.index("-colorspace:v") + 1] == "bt709"
     assert command[command.index("-color_primaries:v") + 1] == "bt709"
     assert command[command.index("-color_trc:v") + 1] == "bt709"
+
+
+def test_sdr_10bit_skips_tonemap(tmp_path):
+    """
+    Scenario: 10-bit SDR HEVC input without colour tags (typical x265 BluRay rip,
+    e.g. yuv420p10le with only the range flagged).
+    Expected: no zscale/tonemap chain (it fails with "no path between colorspaces"
+    on untagged sources); plain hwdownload -> format conversion -> hwupload.
+    """
+    analysis = {
+        "profile": "chromecast",
+        "streams": [
+            {
+                "codec_type": "video",
+                "codec_name": "hevc",
+                "pix_fmt": "yuv420p10le",  # 10-bit, but SDR: no transfer/side data
+                "bits_per_raw_sample": "10",
+                "avg_frame_rate": "24000/1001",
+                "width": 1920,
+                "height": 804,
+            },
+            {"codec_type": "audio", "codec_name": "eac3", "tags": {"language": "eng"}},
+        ],
+    }
+
+    builder = FFmpegBuilder(
+        analysis,
+        tmp_path / "in.mkv",
+        tmp_path / "out.mp4",
+        PROFILES,
+        make_capabilities(),
+        {"is_wsl2": False},
+    )
+    command = builder.build()
+
+    vf = command[command.index("-vf") + 1]
+    assert "hwdownload" in vf
+    assert "format=p010le" in vf
+    assert "zscale" not in vf
+    assert "tonemap" not in vf
+    assert "setparams" not in vf
+    assert "format=nv12" in vf
+    assert "hwupload_cuda" in vf
+
+    # No BT.709 output tagging: nothing was tonemapped
+    assert "-colorspace:v" not in command
+
+
+def test_hdr_side_data_without_colour_tags_gets_hdr10_defaults(tmp_path):
+    """
+    Scenario: HDR flagged via mastering-display side data but the stream carries
+    no colorspace/primaries/transfer tags.
+    Expected: setparams stamps HDR10 defaults so zscale has a known input.
+    """
+    analysis = {
+        "profile": "chromecast",
+        "streams": [
+            {
+                "codec_type": "video",
+                "codec_name": "hevc",
+                "pix_fmt": "yuv420p10le",
+                "bits_per_raw_sample": "10",
+                "side_data_list": [{"side_data_type": "Mastering display metadata"}],
+                "avg_frame_rate": "24000/1001",
+                "width": 3840,
+                "height": 2160,
+            },
+            {"codec_type": "audio", "codec_name": "aac", "tags": {"language": "eng"}},
+        ],
+    }
+
+    builder = FFmpegBuilder(
+        analysis,
+        tmp_path / "in.mkv",
+        tmp_path / "out.mp4",
+        PROFILES,
+        make_capabilities(),
+        {"is_wsl2": False},
+    )
+    command = builder.build()
+
+    vf = command[command.index("-vf") + 1]
+    assert "setparams=colorspace=bt2020nc:color_primaries=bt2020:color_trc=smpte2084" in vf
+    assert "zscale=t=linear" in vf
+    assert command[command.index("-colorspace:v") + 1] == "bt709"
 
 
 def test_cpu_fallback_retry(tmp_path):
