@@ -2,6 +2,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from fastapi import APIRouter
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse
 
 from ..dependencies import get_app_dependencies
@@ -55,7 +56,7 @@ async def log_stats() -> JSONResponse:
 
 @router.post("/api/logs/ingest")
 async def ingest_logs(batch: LogIngestBatch) -> JSONResponse:
-    stored = 0
+    entries = []
     for entry in batch.entries:
         severity = entry.severity or entry.level
         source = entry.source
@@ -64,7 +65,7 @@ async def ingest_logs(batch: LogIngestBatch) -> JSONResponse:
             derived_source, derived_category = derive_source_category(entry.logger)
             source = source or derived_source
             category = category or derived_category
-        get_app_dependencies().log_store.add_entry(
+        entries.append(
             LogEntry(
                 timestamp=entry.timestamp or datetime.now(timezone.utc),
                 level=entry.level,
@@ -77,5 +78,6 @@ async def ingest_logs(batch: LogIngestBatch) -> JSONResponse:
                 request_id=entry.request_id,
             )
         )
-        stored += 1
+    # SQLite writes block; keep them off the event loop and in one transaction.
+    stored = await run_in_threadpool(get_app_dependencies().log_store.add_entries, entries)
     return JSONResponse({"stored": stored})

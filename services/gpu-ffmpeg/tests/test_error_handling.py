@@ -72,6 +72,53 @@ def test_probe_file_handles_timeout(monkeypatch, tmp_path):
     assert result == {}
 
 
+def test_run_conversion_filters_progress_noise(monkeypatch):
+    lines = [
+        b"[hevc @ 0x1] decoder warning\n",
+        b"frame=  100 fps= 25 q=18.0 size=1024KiB\n",
+        b"fps=25.00\n",
+        b"stream_0_0_q=18.0\n",
+        b"bitrate=5000kbits/s\n",
+        b"total_size=1048576\n",
+        b"out_time_us=1000000\n",
+        b"out_time_ms=1000000\n",
+        b"out_time=00:00:01.000000\n",
+        b"dup_frames=0\n",
+        b"drop_frames=0\n",
+        b"speed=1.5x\n",
+        b"progress=continue\n",
+        b"Conversion failed!\n",
+        b"",  # EOF
+    ]
+
+    class FakeStdout:
+        def __init__(self, items):
+            self._items = list(items)
+
+        async def readline(self):
+            return self._items.pop(0)
+
+    class FakeProcess:
+        def __init__(self):
+            self.stdout = FakeStdout(lines)
+
+        async def wait(self):
+            return 0
+
+    async def fake_create(*args, **kwargs):  # noqa: ARG001
+        return FakeProcess()
+
+    monkeypatch.setattr(worker.asyncio, "create_subprocess_exec", fake_create)
+
+    progress_ticks: list[int] = []
+    code, logs = asyncio.run(worker.run_conversion(["ffmpeg"], progress_ticks.append))
+
+    assert code == 0
+    # Progress telemetry must reach the callback but stay out of the log buffer
+    assert progress_ticks == [1000000]
+    assert logs == ["[hevc @ 0x1] decoder warning", "Conversion failed!"]
+
+
 def test_run_conversion_handles_missing_binary(monkeypatch):
     async def fake_create(*args, **kwargs):  # noqa: ARG001
         raise FileNotFoundError("ffmpeg not found")

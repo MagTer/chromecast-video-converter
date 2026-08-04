@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from threading import RLock
-from typing import List, Optional
+from typing import List, Optional, Sequence
 
 from .context import get_request_id
 
@@ -90,6 +90,10 @@ class LogStore:
         self._last_prune = 0.0
         self._conn = sqlite3.connect(self.path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
+        # WAL avoids one fsync per commit; NORMAL is durable enough for logs
+        # and makes commits dramatically cheaper on bind-mounted volumes.
+        self._conn.execute("PRAGMA journal_mode=WAL")
+        self._conn.execute("PRAGMA synchronous=NORMAL")
         self._initialize()
 
     def _initialize(self) -> None:
@@ -193,7 +197,7 @@ class LogStore:
         self.retention_days = retention_days
         self._prune_expired()
 
-    def add_entry(self, entry: LogEntry) -> None:
+    def _entry_row(self, entry: LogEntry) -> tuple:
         utc_timestamp = _ensure_utc(entry.timestamp)
         normalized_severity = _normalize_level(entry.severity or entry.level)
         severity_value = _severity_value(normalized_severity)
@@ -201,36 +205,47 @@ class LogStore:
         category = entry.category
         if not source or not category:
             source, category = derive_source_category(entry.logger)
+        return (
+            utc_timestamp.timestamp(),
+            entry.level,
+            normalized_severity,
+            severity_value,
+            entry.logger,
+            source,
+            category,
+            entry.message,
+            entry.request_id,
+        )
+
+    _INSERT_SQL = """
+        INSERT INTO logs(
+            timestamp,
+            level,
+            severity,
+            severity_value,
+            logger,
+            source,
+            category,
+            message,
+            request_id
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """
+
+    def add_entry(self, entry: LogEntry) -> None:
+        self.add_entries([entry])
+
+    def add_entries(self, entries: Sequence[LogEntry]) -> int:
+        # One transaction for the whole batch: a commit per row turns every
+        # ingest batch into a series of fsyncs that can stall the event loop.
+        rows = [self._entry_row(entry) for entry in entries]
+        if not rows:
+            return 0
         with self._lock:
-            self._conn.execute(
-                """
-                INSERT INTO logs(
-                    timestamp,
-                    level,
-                    severity,
-                    severity_value,
-                    logger,
-                    source,
-                    category,
-                    message,
-                    request_id
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    utc_timestamp.timestamp(),
-                    entry.level,
-                    normalized_severity,
-                    severity_value,
-                    entry.logger,
-                    source,
-                    category,
-                    entry.message,
-                    entry.request_id,
-                ),
-            )
+            self._conn.executemany(self._INSERT_SQL, rows)
             self._conn.commit()
         self._prune_if_due()
+        return len(rows)
 
     def _filter_query(
         self,

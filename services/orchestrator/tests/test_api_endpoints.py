@@ -697,6 +697,34 @@ def test_remove_original_preserves_verdict_and_failed_delete_restores_entry(test
     assert "Refusing to delete" in row["message"]
 
 
+def test_log_ingest_stores_batch_in_bulk(test_app):
+    client, _main = test_app
+
+    payload = {
+        "entries": [
+            {
+                "logger": "gpu-ffmpeg.worker",
+                "level": "INFO",
+                "severity": "INFO",
+                "message": f"bulk line {i}",
+                "timestamp": f"2026-07-16T11:00:{i:02d}+00:00",
+            }
+            for i in range(5)
+        ]
+    }
+    response = client.post("/api/logs/ingest", json=payload)
+    assert response.status_code == 200
+    assert response.json() == {"stored": 5}
+
+    rows = client.get("/api/logs", params={"query": "bulk line"}).json()
+    assert len(rows) == 5
+
+    # An empty batch is a no-op, not an error.
+    empty = client.post("/api/logs/ingest", json={"entries": []})
+    assert empty.status_code == 200
+    assert empty.json() == {"stored": 0}
+
+
 def test_log_ingest_preserves_request_id_and_filters(test_app):
     client, _main = test_app
 

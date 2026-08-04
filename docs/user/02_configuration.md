@@ -66,7 +66,7 @@ Each queued event includes the library, absolute path, event type (`created`, `m
 
 Refer to `services/gpu-ffmpeg/app/worker.py` for authoritative behavior:
 
-- `LOG_LEVEL` / `FFMPEG_LOG_LEVEL` adjust orchestrator-ingested logs and ffmpeg verbosity.
+- `LOG_LEVEL` / `FFMPEG_LOG_LEVEL` adjust orchestrator-ingested logs and ffmpeg verbosity. The compose default is `INFO`; `DEBUG` is very chatty during encodes and should only be enabled temporarily. ffmpeg's per-tick progress lines (`frame=`, `fps=`, `speed=`, ...) are never shipped to the orchestrator regardless of level.
 - `GPU_POLL_INTERVAL` (default `5s`) controls how often the worker polls for new jobs.
 - `GPU_FFPROBE_TIMEOUT`, `GPU_FFMPEG_TIMEOUT`, `GPU_FFMPEG_IDLE_TIMEOUT`, and `GPU_SUBTITLE_TIMEOUT` cap ffprobe, full encoding, no-progress windows, and per-subtitle extraction respectively (`0` disables a limit).
 - `JOB_VISIBILITY_TIMEOUT` must be at least as long as the longest expected encode so Redis does not redeliver an active job.

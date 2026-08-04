@@ -577,6 +577,24 @@ async def _terminate_process(process: Process, reason: str, ffmpeg_logs: deque[s
         await process.wait()
 
 
+# Per-tick key=value lines emitted by `-progress pipe:1` plus ffmpeg's own
+# stderr status line ("frame=  100 fps= 25 ..."). out_time_ms= is consumed
+# separately for progress reporting.
+_PROGRESS_STAT_PREFIXES = (
+    "frame=",
+    "fps=",
+    "stream_",
+    "bitrate=",
+    "total_size=",
+    "out_time_us=",
+    "out_time=",
+    "dup_frames=",
+    "drop_frames=",
+    "speed=",
+    "progress=",
+)
+
+
 async def run_conversion(
     command: list[str],
     progress_callback,
@@ -631,6 +649,11 @@ async def run_conversion(
             except ValueError:
                 continue
             progress_callback(out_time_ms)
+        elif text_line.startswith(_PROGRESS_STAT_PREFIXES):
+            # -progress pipe:1 telemetry ticks (frame=, fps=, speed=, ...):
+            # already surfaced via the progress API, and at DEBUG level they
+            # flood the orchestrator's log ingest (~20 rows/s per encode).
+            continue
         else:
             LOGGER.debug("ffmpeg: %s", text_line)
             ffmpeg_logs.append(text_line)
