@@ -874,8 +874,123 @@ def _build_output_path(source: Path) -> Path:
     return resolved.parent / f"{resolved.stem}-chromecast.mp4"
 
 
+def _subtitle_streams(analysis: dict | None) -> list[dict]:
+    return [
+        stream
+        for stream in ((analysis or {}).get("streams") or [])
+        if stream.get("codec_type") == "subtitle"
+    ]
+
+
+def _existing_sidecars(output_path: Path) -> list[Path]:
+    prefix = output_path.stem + "."
+    parent = output_path.parent
+    if not parent.exists():
+        return []
+    return sorted(
+        entry
+        for entry in parent.iterdir()
+        if entry.name.startswith(prefix) and entry.suffix.lower() == ".srt"
+    )
+
+
+async def _extract_text_subtitles(source: Path, output_path: Path, analysis: dict) -> list[Path]:
+    """Export text subtitles in preferred languages as .srt sidecars.
+
+    Bitmap subtitles (PGS/VobSub) cannot become text without OCR; they are
+    covered by the delete gate instead. Extraction failures never fail the
+    conversion job.
+    """
+    extracted: list[Path] = []
+    for position, stream in enumerate(_subtitle_streams(analysis)):
+        if not _is_text_subtitle(stream):
+            continue
+        language = (stream.get("tags") or {}).get("language")
+        if language and language.lower() not in EXPORT_SUBTITLE_LANGUAGES:
+            continue
+        sidecar = _subtitle_sidecar_path(output_path, position, language)
+        if sidecar.exists():
+            extracted.append(sidecar)
+            continue
+        command = [
+            "ffmpeg",
+            "-y",
+            "-i",
+            str(source),
+            "-map",
+            f"0:s:{position}",
+            "-c:s",
+            "srt",
+            str(sidecar),
+        ]
+        try:
+            process = await asyncio.create_subprocess_exec(*command, stdout=PIPE, stderr=STDOUT)
+        except (OSError, FileNotFoundError) as exc:
+            LOGGER.warning("Subtitle extraction unavailable (%s); skipping sidecars", exc)
+            break
+        try:
+            stdout, _ = await asyncio.wait_for(
+                process.communicate(), timeout=SUBTITLE_EXTRACTION_TIMEOUT
+            )
+        except asyncio.TimeoutError:
+            LOGGER.warning(
+                "Subtitle extraction timed out for stream 0:s:%s of %s", position, source
+            )
+            with suppress(ProcessLookupError):
+                process.kill()
+            await process.wait()
+            sidecar.unlink(missing_ok=True)
+            continue
+        if process.returncode != 0 or not sidecar.exists():
+            tail = (stdout or b"").decode("utf-8", errors="replace").strip().splitlines()[-3:]
+            LOGGER.warning(
+                "Subtitle extraction failed for stream 0:s:%s of %s: %s",
+                position,
+                source,
+                " | ".join(tail) or f"exit {process.returncode}",
+            )
+            sidecar.unlink(missing_ok=True)
+            continue
+        LOGGER.info("Extracted subtitle sidecar %s", sidecar)
+        extracted.append(sidecar)
+    return extracted
+
+
+async def _subtitle_report(
+    source: Path,
+    output_path: Path,
+    source_analysis: dict | None = None,
+    sidecars: list[Path] | None = None,
+) -> dict:
+    """Summarize whether the source's subtitles survived the conversion.
+
+    Preserved means: the source has no subtitles, or the output embeds at
+    least one subtitle stream, or .srt sidecar files exist next to it.
+    """
+    if source_analysis is None:
+        source_analysis = await asyncio.to_thread(probe_file, source)
+    source_subs = _subtitle_streams(source_analysis)
+    if sidecars is None:
+        sidecars = _existing_sidecars(output_path)
+    embedded = 0
+    if source_subs and output_path.exists():
+        output_analysis = await asyncio.to_thread(probe_file, output_path)
+        embedded = len(_subtitle_streams(output_analysis))
+    preserved = not source_subs or embedded > 0 or bool(sidecars)
+    return {
+        "source_streams": len(source_subs),
+        "embedded": embedded,
+        "sidecars": len(sidecars),
+        "preserved": preserved,
+    }
+
+
 async def _maybe_remove_original(
-    source: Path, output_path: Path, expected_duration: float, compliance: dict | None = None
+    source: Path,
+    output_path: Path,
+    expected_duration: float,
+    compliance: dict | None = None,
+    subtitle_report: dict | None = None,
 ) -> bool:
     source = resolve_media_path(source)
     if not REMOVE_ORIGINAL:
@@ -888,6 +1003,16 @@ async def _maybe_remove_original(
             "Keeping original %s because output is not Chromecast compliant: %s",
             source,
             "; ".join(compliance.get("issues") or []) or "no detail",
+        )
+        return False
+    if subtitle_report is None:
+        subtitle_report = await _subtitle_report(source, output_path)
+    if not subtitle_report.get("preserved", True):
+        LOGGER.warning(
+            "Keeping original %s because its %s subtitle stream(s) were not preserved "
+            "(none embedded in output, no .srt sidecars)",
+            source,
+            subtitle_report.get("source_streams"),
         )
         return False
     try:
@@ -973,6 +1098,13 @@ async def handle_delete_job(client: httpx.AsyncClient, job: dict) -> None:
                 "Refusing to delete original: converted output is not "
                 f"Chromecast compliant ({issues}). Reprocess the entry first."
             )
+        subtitle_report = await _subtitle_report(path, output_path)
+        if not subtitle_report.get("preserved", True):
+            raise ValueError(
+                "Refusing to delete original: source has "
+                f"{subtitle_report['source_streams']} subtitle stream(s) but the "
+                "converted output embeds none and no .srt sidecars exist"
+            )
 
         path.unlink()
         await update_job_status(client, job_id, "completed", 100, "File deleted")
@@ -1035,12 +1167,23 @@ async def process_job(client: httpx.AsyncClient, job: dict) -> None:  # noqa: C9
 
         if not job.get("force", False) and await _validate_output(output_path, duration):
             message = f"Output already present at {output_path}; skipping encode"
+            sidecars = await _extract_text_subtitles(playback_target, output_path, analysis)
             compliance = await _probe_output_compliance(output_path)
+            subtitle_report = await _subtitle_report(
+                playback_target, output_path, source_analysis=analysis, sidecars=sidecars
+            )
+            compliance["subtitles"] = subtitle_report
             await update_job_status(
                 client, job_id, "completed", 100, message, compliance=compliance
             )
             LOGGER.info("Job %s completed from existing output %s", job_id[:8], output_path)
-            if await _maybe_remove_original(playback_target, output_path, duration, compliance):
+            if await _maybe_remove_original(
+                playback_target,
+                output_path,
+                duration,
+                compliance,
+                subtitle_report=subtitle_report,
+            ):
                 await update_job_status(
                     client,
                     job_id,
@@ -1104,15 +1247,31 @@ async def process_job(client: httpx.AsyncClient, job: dict) -> None:  # noqa: C9
                     f"Encoding finished but output missing or invalid at {output_path}",
                 )
                 return
+            sidecars = await _extract_text_subtitles(playback_target, output_path, analysis)
             compliance = await _probe_output_compliance(output_path)
+            subtitle_report = await _subtitle_report(
+                playback_target, output_path, source_analysis=analysis, sidecars=sidecars
+            )
+            compliance["subtitles"] = subtitle_report
             if not compliance.get("compliant"):
                 LOGGER.warning(
                     "Job %s output is not Chromecast compliant: %s",
                     job_id[:8],
                     "; ".join(compliance.get("issues") or []),
                 )
+            if not subtitle_report["preserved"]:
+                message = (
+                    f"{message}; WARNING: {subtitle_report['source_streams']} subtitle "
+                    "stream(s) not preserved (bitmap subtitles require burn-in)"
+                )
+                LOGGER.warning(
+                    "Job %s: %s subtitle stream(s) from %s were not preserved",
+                    job_id[:8],
+                    subtitle_report["source_streams"],
+                    playback_target,
+                )
             removed = await _maybe_remove_original(
-                playback_target, output_path, duration, compliance
+                playback_target, output_path, duration, compliance, subtitle_report=subtitle_report
             )
             if removed:
                 message = f"{message} (original removed)"

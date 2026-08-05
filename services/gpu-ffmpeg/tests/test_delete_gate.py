@@ -30,7 +30,25 @@ def _setup_media(tmp_path: Path) -> tuple[Path, Path]:
     return source, output
 
 
-def _run_delete_job(monkeypatch, source: Path, *, valid_output: bool, compliance: dict):
+PRESERVED_REPORT = {"source_streams": 0, "embedded": 0, "sidecars": 0, "preserved": True}
+LOST_SUBS_REPORT = {"source_streams": 2, "embedded": 0, "sidecars": 0, "preserved": False}
+
+
+def _patch_subtitle_report(monkeypatch, report: dict):
+    async def fake_report(*args, **kwargs):
+        return report
+
+    monkeypatch.setattr(worker, "_subtitle_report", fake_report)
+
+
+def _run_delete_job(
+    monkeypatch,
+    source: Path,
+    *,
+    valid_output: bool,
+    compliance: dict,
+    subtitle_report: dict = PRESERVED_REPORT,
+):
     recorder = StatusRecorder()
     monkeypatch.setattr(worker, "update_job_status", recorder)
 
@@ -46,6 +64,7 @@ def _run_delete_job(monkeypatch, source: Path, *, valid_output: bool, compliance
     monkeypatch.setattr(worker, "_validate_output", fake_validate)
     monkeypatch.setattr(worker, "_probe_output_compliance", fake_compliance)
     monkeypatch.setattr(worker, "_probe_duration", fake_duration)
+    _patch_subtitle_report(monkeypatch, subtitle_report)
 
     job = {"id": "job-delete-1", "path": str(source), "request_id": None}
     asyncio.run(worker.handle_delete_job(client=NO_CLIENT, job=job))
@@ -85,6 +104,21 @@ def test_delete_job_deletes_after_gate_passes(monkeypatch, tmp_path):
     assert recorder.calls[-1]["status"] == "completed"
 
 
+def test_delete_job_refuses_when_subtitles_lost(monkeypatch, tmp_path):
+    source, _output = _setup_media(tmp_path)
+    recorder = _run_delete_job(
+        monkeypatch,
+        source,
+        valid_output=True,
+        compliance={"compliant": True},
+        subtitle_report=LOST_SUBS_REPORT,
+    )
+    assert source.exists(), "Original must survive when subtitles were not preserved"
+    assert recorder.calls[-1]["status"] == "failed"
+    assert "Refusing to delete" in recorder.calls[-1]["message"]
+    assert "subtitle" in recorder.calls[-1]["message"]
+
+
 def test_maybe_remove_original_respects_compliance(monkeypatch, tmp_path):
     source, output = _setup_media(tmp_path)
     monkeypatch.setattr(worker, "REMOVE_ORIGINAL", True)
@@ -93,6 +127,7 @@ def test_maybe_remove_original_respects_compliance(monkeypatch, tmp_path):
         return True
 
     monkeypatch.setattr(worker, "_validate_output", fake_validate)
+    _patch_subtitle_report(monkeypatch, PRESERVED_REPORT)
 
     removed = asyncio.run(
         worker._maybe_remove_original(
@@ -105,3 +140,28 @@ def test_maybe_remove_original_respects_compliance(monkeypatch, tmp_path):
     removed = asyncio.run(worker._maybe_remove_original(source, output, 120.0, {"compliant": True}))
     assert removed is True
     assert not source.exists()
+
+
+def test_maybe_remove_original_keeps_original_when_subtitles_lost(monkeypatch, tmp_path):
+    source, output = _setup_media(tmp_path)
+    monkeypatch.setattr(worker, "REMOVE_ORIGINAL", True)
+
+    async def fake_validate(out, expected_duration):
+        return True
+
+    monkeypatch.setattr(worker, "_validate_output", fake_validate)
+
+    # Explicit report from the convert flow
+    removed = asyncio.run(
+        worker._maybe_remove_original(
+            source, output, 120.0, {"compliant": True}, subtitle_report=LOST_SUBS_REPORT
+        )
+    )
+    assert removed is False
+    assert source.exists()
+
+    # Gate computes the report itself when none is supplied (delete-job path)
+    _patch_subtitle_report(monkeypatch, LOST_SUBS_REPORT)
+    removed = asyncio.run(worker._maybe_remove_original(source, output, 120.0, {"compliant": True}))
+    assert removed is False
+    assert source.exists()

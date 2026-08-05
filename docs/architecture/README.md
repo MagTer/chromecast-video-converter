@@ -39,7 +39,7 @@ All containers share the `PATH_MOVIES`/`PATH_SERIES` mounts twice (`/watch/...` 
 
 - ffprobe runs with a 120 s timeout (`GPU_FFPROBE_TIMEOUT` override) and annotates streams with derived bit depth + HDR hints. The worker calculates duration to validate outputs or decide whether a file is still being written.
 - `FFmpegBuilder` selects decode/scale/encode stages (NVDEC/NPP/NVENC first) and toggles HDR tonemapping (`tonemap_cuda` when supported, CPU filters otherwise). Bitrate/level/profile constraints are validated in orchestrator config before workers ever see them.
-- Subtitle streams are extracted to `.srt` sidecars per language/index when ffmpeg can convert the codec; they are excluded from the MP4 mux so the GPU filter graph can stay on-device.
+- Text subtitle streams (subrip/ass/webvtt/...) in preferred languages (sv/eng, plus untagged) are embedded as `mov_text` in the MP4 **and** exported as `.srt` sidecars next to the output (`{stem}.{lang}.sub{index}.srt`). Bitmap subtitles (PGS/VobSub) cannot be converted without OCR and are dropped from the mux; the job message and the `subtitles` block in the compliance detail flag this, and the delete gate refuses to remove originals whose subtitles were not preserved.
 - Operational settings include `remove_original_after_success` (worker removes the source after validating duration/size). Audio/subtitle selection currently prefers Swedish first, then English, matching the hard-coded defaults in `FFmpegBuilder`.
 - Retries follow `jobs.PIPELINE_SEQUENCE`, gradually dropping decode/scale/encode stages to CPU if NVENC keeps failing. Once the max attempts is exhausted the job status is marked `failed` with the classification result stored in `entry.last_error`.
 
