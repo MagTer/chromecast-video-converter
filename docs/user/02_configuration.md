@@ -21,6 +21,8 @@ The config database (`config.db`) stores all runtime settings:
 
 Profiles are edited via `/api/config/encoding` (or `/api/profiles` CRUD endpoints). FastAPI re-validates every field through `HardwareProfile` so only Chromecast-safe resolutions, FPS, bitrates, and AAC stereo settings can be saved. Each profile stores both GPU (NVENC) and CPU (fallback) blocks. CPU settings are currently only used when the retry pipeline falls through to CPU stages after an NVENC failure.
 
+The built-in `chromecast` profile defaults to H.264 **Constrained Baseline @ L3.1** (`bframes 0`, `bufsize 10M`, max 1280x720@30). Baseline is the lowest common denominator across Chromecast generations: older receivers reject High-profile streams and force real transcoding on the media server, while baseline outputs are accepted as-is. Validation enforces the profile/level pairing (`baseline` forbids B-frames and adaptive B-frames) and the H.264 per-level decoder buffer (CPB) limits — e.g. bufsize above 10 Mbit at level 3.1 is rejected because NVENC refuses such encodes outright (3.1: 10 Mbit, 4.0: 14 Mbit, 4.1: 24 Mbit, 4.2: 34 Mbit).
+
 The profile `resolution` is a bounding box, not a fixed output size: the GPU worker clamps both axes (never just one), preserves the aspect ratio, and never upscales a source that already fits. Sources are additionally hard-capped at 1920x1080 and 60 fps regardless of profile contents, since that is the Chromecast Gen 2/3 decoder limit. HDR/10-bit sources are tonemapped to 8-bit BT.709 (and tagged as such), and interlaced sources are deinterlaced (`bwdif`/`yadif`, GPU variants when available) before encoding.
 
 ## Queue controls
