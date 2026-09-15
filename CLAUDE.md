@@ -114,15 +114,18 @@ Refer to `docs/02_ai_agent_process.md` for the broader collaboration workflow.
   files). Windows lesson: paths >260 chars fail in PowerShell 5.1
   `Rename-Item`/`Test-Path` even though the file exists — use the `\\?\`
   prefix with `[System.IO.File]::Move`.
-- **One verify job per conversion is expected today**: the periodic scan
-  queues a verify for a freshly converted entry (`CONVERTED` +
-  `output_compliant is None`), self-limiting once the verify verdict lands.
-  Conversion completion is supposed to persist the verdict
-  (`sync_entry_from_job`); whether a race or a persist bug causes the scan to
-  still see `None` is **not fully root-caused** — verify jobs cost minutes
-  each over the drvfs mount, so this deserves a fix (write verdict on
-  COMPLETED) after an in-flight batch finishes. Do NOT bulk-XDEL verify jobs:
-  with no verdict they re-queue every ~10 min (Redis dedupe TTL).
+- **Spurious verify jobs (root-caused & fixed 2026-09-15)**: `is_converted`
+  treats the output as finished as soon as `X-chromecast.mp4` exists with a
+  newer mtime, but ffmpeg creates that file while encoding. The 5-minute scan
+  therefore saw each in-flight encode as `CONVERTED` with `output_compliant is
+  None` and queued a verify (roughly one per conversion). The verdict itself
+  *is* persisted on completion (`sync_entry_from_job`) — the verify was
+  redundant and accumulated because the single worker only served converts.
+  Fixes: (1) the worker encodes to `X-chromecast.part.mp4` and atomically
+  `os.replace`s it after `_validate_output` (the scanner ignores the `.part`
+  name), and (2) `record_library_entry` keeps `converting` and skips the verify
+  while `JobManager.active_job_for_path` reports an in-flight convert job.
+  Legacy queued verify jobs are harmless — do not bulk-XDEL in-flight work.
 - **ffprobe over the Docker Desktop 9p/drvfs mount is slow** (minutes for
   multi-GB files under load). `GPU_FFPROBE_TIMEOUT` defaults to 120 s and a
   timeout yields a one-shot error verdict (never retried, since

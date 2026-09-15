@@ -874,6 +874,22 @@ def _build_output_path(source: Path) -> Path:
     return resolved.parent / f"{resolved.stem}-chromecast.mp4"
 
 
+def _temporary_output_path(output_path: Path) -> Path:
+    """Path ffmpeg writes to before the validated output is atomically renamed.
+
+    The ``.mp4`` suffix lets ffmpeg infer the muxer, and the inherited
+    ``-chromecast`` prefix keeps the orchestrator's scanner from treating an
+    in-progress file as a finished output (see ``should_track_file`` and
+    ``is_converted``).
+    """
+    return output_path.with_name(f"{output_path.stem}.part{output_path.suffix}")
+
+
+def _finalize_output(writing_path: Path, output_path: Path) -> None:
+    """Atomically publish a validated encode as the final output."""
+    os.replace(writing_path, output_path)
+
+
 def _subtitle_streams(analysis: dict | None) -> list[dict]:
     return [
         stream
@@ -1194,10 +1210,14 @@ async def process_job(client: httpx.AsyncClient, job: dict) -> None:  # noqa: C9
                 )
             return
 
+        writing_path = _temporary_output_path(output_path)
+        # Clean up any partial file left behind by a crashed/aborted attempt so
+        # ffmpeg never appends to stale data.
+        writing_path.unlink(missing_ok=True)
         builder = FFmpegBuilder(
             analysis,
             playback_target,
-            output_path,
+            writing_path,
             PROFILES,
             FFMPEG_CAPABILITIES,
             HOST_ENVIRONMENT,
@@ -1238,7 +1258,8 @@ async def process_job(client: httpx.AsyncClient, job: dict) -> None:  # noqa: C9
 
         if return_code == 0:
             message = f"Encoding finished to {output_path}"
-            if not await _validate_output(output_path, duration):
+            if not await _validate_output(writing_path, duration):
+                writing_path.unlink(missing_ok=True)
                 await update_job_status(
                     client,
                     job_id,
@@ -1247,6 +1268,9 @@ async def process_job(client: httpx.AsyncClient, job: dict) -> None:  # noqa: C9
                     f"Encoding finished but output missing or invalid at {output_path}",
                 )
                 return
+            # Publish only fully-validated output so a scan can never mistake a
+            # partial encode for a finished one (which queued spurious verifies).
+            _finalize_output(writing_path, output_path)
             sidecars = await _extract_text_subtitles(playback_target, output_path, analysis)
             compliance = await _probe_output_compliance(output_path)
             subtitle_report = await _subtitle_report(
@@ -1280,6 +1304,7 @@ async def process_job(client: httpx.AsyncClient, job: dict) -> None:  # noqa: C9
             )
             LOGGER.info("Job %s completed, output: %s", job_id[:8], output_path)
         else:
+            writing_path.unlink(missing_ok=True)
             classification = classify_ffmpeg_error(ffmpeg_logs, return_code)
             message = f"FFmpeg exited with code {return_code}"
             if ffmpeg_logs:
