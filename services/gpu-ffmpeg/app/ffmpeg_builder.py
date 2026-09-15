@@ -19,6 +19,22 @@ CHROMECAST_MAX_HEIGHT = 1080
 CHROMECAST_MAX_FPS = 60
 DEFAULT_TARGET_RESOLUTION = (1280, 720)
 
+# Explicit NVDEC decoders. The generic ``-hwaccel cuda`` path (native decoder +
+# CUDA hwaccel) rejects some streams with ``CUDA_ERROR_INVALID_VALUE`` where the
+# dedicated CUVID decoder succeeds (e.g. odd-width H.264).
+CUVID_DECODERS = {
+    "h264": "h264_cuvid",
+    "hevc": "hevc_cuvid",
+    "vp8": "vp8_cuvid",
+    "vp9": "vp9_cuvid",
+    "av1": "av1_cuvid",
+    "mpeg1video": "mpeg1_cuvid",
+    "mpeg2video": "mpeg2_cuvid",
+    "mpeg4": "mpeg4_cuvid",
+    "vc1": "vc1_cuvid",
+    "mjpeg": "mjpeg_cuvid",
+}
+
 INTERLACED_FIELD_ORDERS = {"tt", "bb", "tb", "bt"}
 
 SUPPORTED_SUBTITLE_CODECS = {
@@ -548,7 +564,11 @@ class FFmpegBuilder:
         ):
             if decode_type == "gpu":
                 filters.append("hwdownload")
-                filters.append("format=p010le" if is_high_bit_depth else "format=yuv420p")
+                # hwdownload can only map a frame to its native software format
+                # (nv12 for 8-bit CUDA surfaces, p010le for 10-bit); requesting
+                # yuv420p here fails with "Invalid output format ... for hwframe
+                # download". A later format=yuv420p handles the conversion.
+                filters.append("format=p010le" if is_high_bit_depth else "format=nv12")
             if is_interlaced:
                 cpu_deinterlace_filter = self._cpu_deinterlace_filter()
                 if cpu_deinterlace_filter:
@@ -710,6 +730,24 @@ class FFmpegBuilder:
             return str(int(fps))
         return f"{fps:.3f}".rstrip("0").rstrip(".")
 
+    def _cuvid_decoder(self) -> str | None:
+        """Return the explicit CUVID decoder for the primary video stream, if any.
+
+        The generic ``-hwaccel cuda`` path lets the native decoder negotiate the
+        CUDA hwaccel and fails on some streams; an explicit ``{codec}_cuvid``
+        decoder is more robust and still produces CUDA frames.
+        """
+        for stream in self.analysis.get("streams", []) or []:
+            if stream.get("codec_type") != "video":
+                continue
+            if (stream.get("disposition") or {}).get("attached_pic"):
+                continue
+            candidate = CUVID_DECODERS.get((stream.get("codec_name") or "").lower())
+            if candidate and candidate in self.ffmpeg_capabilities.decoders:
+                return candidate
+            return None
+        return None
+
     def _ffmpeg_base_command(self, decode_type: str) -> list[str]:
         command = ["ffmpeg", "-y"]
         if decode_type == "gpu":
@@ -721,6 +759,9 @@ class FFmpegBuilder:
                     "cuda",
                 ]
             )
+            cuvid = self._cuvid_decoder()
+            if cuvid:
+                command.extend(["-c:v", cuvid])
         command.extend(["-i", str(self.input_path)])
         return command
 

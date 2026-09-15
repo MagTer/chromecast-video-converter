@@ -11,6 +11,7 @@ from app.ffmpeg_builder import FFmpegBuilder, VideoStreamInfo
 def make_capabilities(
     filters: Iterable[str] | None = None,
     hwaccels: Iterable[str] | None = None,
+    decoders: Iterable[str] | None = None,
 ) -> FfmpegCapabilities:
     default_filters = {
         "scale_npp",
@@ -33,7 +34,7 @@ def make_capabilities(
         skip_detection=True,
         filters=set(filters or default_filters),
         encoders={"h264_nvenc", "libx264", "aac"},
-        decoders={"h264", "hevc", "aac"},
+        decoders=set(decoders or {"h264", "hevc", "aac"}),
         hwaccels=set(hwaccels or ["cuda"]),
         encoder_capabilities={"h264_nvenc": encoder_info},
     )
@@ -623,3 +624,44 @@ def test_is_hdr_detects_untagged_hdr_via_side_data():
 def test_is_hdr_detects_pq_transfer():
     assert VideoStreamInfo(input_index=0, color_transfer="smpte2084").is_hdr() is True
     assert VideoStreamInfo(input_index=0, color_transfer="arib-std-b67").is_hdr() is True
+
+
+def test_gpu_decode_prefers_explicit_cuvid_decoder(tmp_path):
+    capabilities = make_capabilities(decoders={"h264", "hevc", "aac", "h264_cuvid"})
+    command = _build_command(
+        _video_analysis(width=1329, height=720),
+        tmp_path,
+        capabilities=capabilities,
+    )
+
+    assert "-hwaccel" in command
+    assert command[command.index("-hwaccel") + 1] == "cuda"
+    assert "-c:v" in command
+    assert command[command.index("-c:v") + 1] == "h264_cuvid"
+
+
+def test_gpu_decode_falls_back_to_hwaccel_without_cuvid(tmp_path):
+    command = _build_command(_video_analysis(width=1280, height=720), tmp_path)
+
+    assert command[command.index("-hwaccel") + 1] == "cuda"
+    assert "h264_cuvid" not in command
+
+
+def test_hwdownload_uses_nv12_for_8bit_frames(tmp_path):
+    # 8-bit video that still needs tonemapping (HDR flagged via transfer/side
+    # data) takes the hwdownload path; hwdownload cannot output yuv420p.
+    analysis = _video_analysis(
+        pix_fmt="yuv420p",
+        bits_per_raw_sample="8",
+        color_space="bt2020nc",
+        color_primaries="bt2020",
+        color_transfer="smpte2084",
+        width=1280,
+        height=720,
+    )
+    command = _build_command(analysis, tmp_path)
+    vf = _vf(command)
+
+    assert vf is not None
+    assert "hwdownload,format=nv12" in vf
+    assert "hwdownload,format=yuv420p" not in vf
