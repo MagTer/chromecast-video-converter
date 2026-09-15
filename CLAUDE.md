@@ -126,6 +126,17 @@ Refer to `docs/02_ai_agent_process.md` for the broader collaboration workflow.
   name), and (2) `record_library_entry` keeps `converting` and skips the verify
   while `JobManager.active_job_for_path` reports an in-flight convert job.
   Legacy queued verify jobs are harmless — do not bulk-XDEL in-flight work.
+- **HDR tonemap fixes (2026-09-15)**: (1) `_build_filter_chain` now scales to
+  the target size *before* the `zscale`/`tonemap` chain, so odd source
+  dimensions (e.g. a 1329×720 HDR file) no longer abort zscale with "image
+  dimensions must be divisible by subsampling factor" — and tonemapping runs at
+  720p instead of 4K. (2) Tonemapped outputs get
+  `-bsf:v filter_units=remove_types=6` to strip the source's mastering-display /
+  content-light SEI, which libx264/NVENC would otherwise re-emit and which made
+  `is_hdr()` flag a correctly BT.709 output as noncompliant. (3) `is_hdr()`
+  now trusts an explicit SDR transfer (bt709 etc.) over residual side data;
+  untagged transfers still fall back to side data. Existing affected outputs
+  (HDR/DV movies) must be reprocessed (force) to gain the clean SDR metadata.
 - **ffprobe over the Docker Desktop 9p/drvfs mount is slow** (minutes for
   multi-GB files under load). `GPU_FFPROBE_TIMEOUT` defaults to 120 s and a
   timeout yields a one-shot error verdict (never retried, since

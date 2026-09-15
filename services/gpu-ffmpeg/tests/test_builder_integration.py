@@ -5,7 +5,7 @@ from typing import Iterable
 sys.path.append(str(Path(__file__).parents[1]))
 
 from app.capabilities import EncoderCapabilities, FfmpegCapabilities
-from app.ffmpeg_builder import FFmpegBuilder
+from app.ffmpeg_builder import FFmpegBuilder, VideoStreamInfo
 
 
 def make_capabilities(
@@ -550,3 +550,73 @@ def test_max_fps_is_clamped_to_chromecast_limit(tmp_path):
     vf = _vf(command)
     assert vf is not None
     assert "fps=60" in vf
+
+
+def _hdr_analysis(**overrides):
+    return _video_analysis(
+        codec_name="hevc",
+        pix_fmt="yuv420p10le",
+        bits_per_raw_sample="10",
+        color_space="bt2020nc",
+        color_primaries="bt2020",
+        color_transfer="smpte2084",
+        **overrides,
+    )
+
+
+def test_hdr_tonemap_scales_before_zscale(tmp_path):
+    """Odd source dimensions must be made even before zscale runs.
+
+    1329x720 is exactly the kind of odd-width HDR file zscale aborts on
+    ("image dimensions must be divisible by subsampling factor"); the scale
+    filter has force_divisible_by=2 and must come first.
+    """
+    command = _build_command(_hdr_analysis(width=1329, height=720), tmp_path)
+    vf = _vf(command)
+    assert vf is not None
+
+    scale_idx = vf.find("scale=")
+    zscale_idx = vf.find("zscale=")
+    assert scale_idx != -1, vf
+    assert zscale_idx != -1, vf
+    assert scale_idx < zscale_idx, vf
+    assert "force_divisible_by=2" in vf
+
+
+def test_tonemapped_output_strips_hdr_sei(tmp_path):
+    command = _build_command(_hdr_analysis(width=3840, height=2160), tmp_path)
+
+    assert command[command.index("-colorspace:v") + 1] == "bt709"
+    assert "-bsf:v" in command
+    assert command[command.index("-bsf:v") + 1] == "filter_units=remove_types=6"
+
+
+def test_sdr_output_does_not_strip_sei(tmp_path):
+    command = _build_command(_video_analysis(width=1280, height=720), tmp_path)
+    assert "-bsf:v" not in command
+
+
+def test_is_hdr_ignores_residual_metadata_when_transfer_is_sdr():
+    info = VideoStreamInfo(
+        input_index=0,
+        color_transfer="bt709",
+        side_data_list=[
+            {"side_data_type": "Mastering display metadata"},
+            {"side_data_type": "Content light level metadata"},
+        ],
+    )
+    assert info.is_hdr() is False
+
+
+def test_is_hdr_detects_untagged_hdr_via_side_data():
+    info = VideoStreamInfo(
+        input_index=0,
+        color_transfer=None,
+        side_data_list=[{"side_data_type": "Mastering display metadata"}],
+    )
+    assert info.is_hdr() is True
+
+
+def test_is_hdr_detects_pq_transfer():
+    assert VideoStreamInfo(input_index=0, color_transfer="smpte2084").is_hdr() is True
+    assert VideoStreamInfo(input_index=0, color_transfer="arib-std-b67").is_hdr() is True
