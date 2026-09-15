@@ -666,6 +666,13 @@ class FFmpegBuilder:
             "zscale=t=linear:npl=100",
             "tonemap=hable:desat=0",
             "zscale=p=bt709:t=bt709:m=bt709:r=tv",
+            # Drop the HDR static metadata the decoder exposed as frame side
+            # data. The encoder would otherwise re-emit it (as SEI) and the MP4
+            # muxer would write mdcv/clli boxes, making an SDR output still
+            # carry HDR metadata.
+            "sidedata=delete:type=MASTERING_DISPLAY_METADATA",
+            "sidedata=delete:type=CONTENT_LIGHT_LEVEL",
+            "sidedata=delete:type=DYNAMIC_HDR_PLUS",
         ]
 
     def _cpu_deinterlace_filter(self) -> str | None:
@@ -947,7 +954,9 @@ class FFmpegBuilder:
 
         if tonemapped:
             # The zscale/tonemap chain converts to BT.709; tag the output so
-            # players do not misinterpret the stream as BT.2020/PQ.
+            # players do not misinterpret the stream as BT.2020/PQ. HDR static
+            # metadata is stripped inside the filter chain (sidedata=delete) so
+            # the encoder/muxer cannot re-emit it.
             main_options.extend(
                 [
                     "-colorspace:v",
@@ -958,12 +967,6 @@ class FFmpegBuilder:
                     "bt709",
                 ]
             )
-            # The decoder exposes the source's HDR static metadata (mastering
-            # display + content light level) as frame side data, and libx264 /
-            # h264_nvenc write it back as SEI even though the pixels are now
-            # BT.709. Strip SEI (H.264 NAL unit type 6) so the output is
-            # genuinely SDR and passes Chromecast compliance.
-            main_options.extend(["-bsf:v", "filter_units=remove_types=6"])
         main_options.extend(["-movflags", "+faststart"])
 
         if selected_audio:

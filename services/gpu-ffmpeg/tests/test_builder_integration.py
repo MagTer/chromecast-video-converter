@@ -583,17 +583,20 @@ def test_hdr_tonemap_scales_before_zscale(tmp_path):
     assert "force_divisible_by=2" in vf
 
 
-def test_tonemapped_output_strips_hdr_sei(tmp_path):
+def test_tonemapped_output_strips_hdr_side_data(tmp_path):
     command = _build_command(_hdr_analysis(width=3840, height=2160), tmp_path)
+    vf = _vf(command)
 
     assert command[command.index("-colorspace:v") + 1] == "bt709"
-    assert "-bsf:v" in command
-    assert command[command.index("-bsf:v") + 1] == "filter_units=remove_types=6"
+    assert vf is not None
+    assert "sidedata=delete:type=MASTERING_DISPLAY_METADATA" in vf
+    assert "sidedata=delete:type=CONTENT_LIGHT_LEVEL" in vf
 
 
-def test_sdr_output_does_not_strip_sei(tmp_path):
+def test_sdr_output_does_not_strip_side_data(tmp_path):
     command = _build_command(_video_analysis(width=1280, height=720), tmp_path)
-    assert "-bsf:v" not in command
+    vf = _vf(command)
+    assert vf is None or "sidedata=delete" not in vf
 
 
 def test_is_hdr_ignores_residual_metadata_when_transfer_is_sdr():

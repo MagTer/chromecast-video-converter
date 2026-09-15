@@ -130,10 +130,13 @@ Refer to `docs/02_ai_agent_process.md` for the broader collaboration workflow.
   the target size *before* the `zscale`/`tonemap` chain, so odd source
   dimensions (e.g. a 1329×720 HDR file) no longer abort zscale with "image
   dimensions must be divisible by subsampling factor" — and tonemapping runs at
-  720p instead of 4K. (2) Tonemapped outputs get
-  `-bsf:v filter_units=remove_types=6` to strip the source's mastering-display /
-  content-light SEI, which libx264/NVENC would otherwise re-emit and which made
-  `is_hdr()` flag a correctly BT.709 output as noncompliant. (3) `is_hdr()`
+  720p instead of 4K. (2) Tonemapped outputs drop the source's
+  mastering-display / content-light / HDR10+ frame side data with
+  `sidedata=delete:type=...` in the filter chain, so libx264/NVENC cannot
+  re-emit it and the MP4 muxer writes no `mdcv`/`clli` boxes — otherwise
+  `is_hdr()` flagged a correctly BT.709 output as noncompliant (a plain
+  `-bsf:v filter_units=remove_types=6` is NOT enough: it strips bitstream SEI
+  but the muxer still writes the boxes from frame side data). (3) `is_hdr()`
   now trusts an explicit SDR transfer (bt709 etc.) over residual side data;
   untagged transfers still fall back to side data. Existing affected outputs
   (HDR/DV movies) must be reprocessed (force) to gain the clean SDR metadata.
