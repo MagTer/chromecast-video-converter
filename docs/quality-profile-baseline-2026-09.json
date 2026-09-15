@@ -1,0 +1,94 @@
+{
+  "exported_at": "2026-09-14",
+  "source": "data/config.db key 'quality' (runtime, gitignored)",
+  "updated_at": "2026-09-13T17:12:30.969695+00:00",
+  "note": "Working production profile for the chromecast library. Changed 2026-09-13 from High@4.1 to Constrained Baseline@3.1 because legacy Chromecast receivers reject High profile (forces real transcoding on every playback). Baseline outputs are accepted -> Jellyfin only remuxes (stream copy). See CLAUDE.md 'Operational Notes (September 2026)'.",
+  "value": {
+    "libraries": {
+      "movies": {
+        "root": "/watch/movies",
+        "depth": "max",
+        "profile": "chromecast",
+        "profile_id": 1
+      },
+      "series": {
+        "root": "/watch/series",
+        "depth": "max",
+        "profile": "chromecast",
+        "profile_id": 1
+      }
+    },
+    "profiles": {
+      "chromecast": {
+        "gpu": {
+          "mode": "gpu",
+          "codec": "h264",
+          "profile": "baseline",
+          "level": "3.1",
+          "resolution": "1280x720",
+          "max_fps": 30,
+          "bitrate": "3M",
+          "max_bitrate": "8M",
+          "bufsize": "10M",
+          "preset": "p7",
+          "cq": 18,
+          "rc": "vbr_hq",
+          "bframes": 0,
+          "lookahead": 32,
+          "adaptive_b_frames": false,
+          "aq": true,
+          "spatial_aq": true,
+          "temporal_aq": true,
+          "aq_strength": 7,
+          "audio": {
+            "codec": "aac",
+            "bitrate": "192k",
+            "channels": 2
+          }
+        },
+        "cpu": {
+          "mode": "cpu",
+          "codec": "h264",
+          "profile": "baseline",
+          "level": "3.1",
+          "resolution": "1280x720",
+          "max_fps": 30,
+          "bitrate": "3M",
+          "max_bitrate": "8M",
+          "bufsize": "10M",
+          "preset": "veryslow",
+          "cq": 18,
+          "rc": "vbr",
+          "bframes": 0,
+          "lookahead": 32,
+          "adaptive_b_frames": false,
+          "aq": true,
+          "spatial_aq": true,
+          "temporal_aq": true,
+          "aq_strength": 7,
+          "audio": {
+            "codec": "aac",
+            "bitrate": "192k",
+            "channels": 2
+          }
+        }
+      }
+    },
+    "operational": {
+      "max_concurrent_jobs": 1,
+      "gpu_temperature_cutoff": 85,
+      "max_disk_usage_percent": 90,
+      "remove_original_after_success": false,
+      "scan_interval_min": 5
+    },
+    "logging": {
+      "retention_days": 7
+    },
+    "notifiers": {
+      "webhook": {
+        "url": "https://hooks.example.com/notify"
+      }
+    },
+    "jellyfin": null
+  }
+}

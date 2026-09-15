@@ -99,3 +99,39 @@ You can simulate a worker over the API alone: claim with `GET /api/jobs/next?wor
 - **Never:** commit secrets/credentials, edit production deployment settings outside `config/` unless requested, or re-enable CPU-only encoding paths as a silent fallback.
 
 Refer to `docs/02_ai_agent_process.md` for the broader collaboration workflow.
+
+## Operational Notes (September 2026)
+
+- **Chromecast profile is now Constrained Baseline @ L3.1** (changed 2026-09-13 in
+  runtime `data/config.db` → `quality.profiles.chromecast`): `bframes 0`,
+  `bufsize 10M`, `adaptive_b_frames false`, max 1280 px. Rationale: legacy
+  Chromecast receivers reject H264 High profile and force real per-playback
+  transcoding on Jellyfin; baseline outputs are accepted and only remuxed
+  (stream copy). Runtime DB is not in git — the decision lives here.
+- **Mass re-encode procedure (2026-09-13, 789 files)**: renamed every
+  `X-chromecast.mp4` → `X.mp4`; watcher/scan then re-queued conversions under
+  the new profile. No originals were left (gen-2 from already-compressed
+  files). Windows lesson: paths >260 chars fail in PowerShell 5.1
+  `Rename-Item`/`Test-Path` even though the file exists — use the `\\?\`
+  prefix with `[System.IO.File]::Move`.
+- **One verify job per conversion is expected today**: the periodic scan
+  queues a verify for a freshly converted entry (`CONVERTED` +
+  `output_compliant is None`), self-limiting once the verify verdict lands.
+  Conversion completion is supposed to persist the verdict
+  (`sync_entry_from_job`); whether a race or a persist bug causes the scan to
+  still see `None` is **not fully root-caused** — verify jobs cost minutes
+  each over the drvfs mount, so this deserves a fix (write verdict on
+  COMPLETED) after an in-flight batch finishes. Do NOT bulk-XDEL verify jobs:
+  with no verdict they re-queue every ~10 min (Redis dedupe TTL).
+- **ffprobe over the Docker Desktop 9p/drvfs mount is slow** (minutes for
+  multi-GB files under load). `GPU_FFPROBE_TIMEOUT` defaults to 120 s and a
+  timeout yields a one-shot error verdict (never retried, since
+  `output_compliant` is then non-NULL). Consider raising it; the delete gate
+  re-probes fresh at deletion time, so a wrong verify verdict is cosmetic.
+- **9p mount flakiness**: scans can transiently report "0 media files" and
+  mark entries `removed` while the host filesystem is fine; it self-heals and
+  the scheduled scan (backstop for lost file events) re-tracks everything.
+  Suspect the mount whenever the queue suddenly looks empty.
+- **Queue hygiene**: the Redis stream retains orphaned entries from earlier
+  eras (worker reads newest first, so they never run). Harmless but visible
+  in the dashboard job list; can be trimmed with a one-off XDEL/XTRIM pass.
