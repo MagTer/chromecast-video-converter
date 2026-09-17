@@ -140,6 +140,26 @@ class JobManager:
         canonical_source = Path(self._canonical_path(source))
         return self._already_converted(canonical_source, log=log)
 
+    async def active_job_for_path(self, path: str) -> Optional[Job]:
+        """Return the non-terminal convert job tracked for a path, if any.
+
+        The worker writes the ``-chromecast`` output while it encodes, so
+        ``is_converted`` can report a partially-written file as converted. This
+        lets callers distinguish "still being converted" from "converted but
+        missing a compliance verdict" before queueing a verification.
+        """
+        await self.initialize()
+        redis_client = self._redis
+        assert redis_client is not None
+        canonical = self._canonical_path(path)
+        job_id = await redis_client.get(self._path_key(canonical))
+        if not job_id:
+            return None
+        job = await self._fetch_existing_job(job_id)
+        if job is not None and job.status not in {JobStatus.COMPLETED, JobStatus.FAILED}:
+            return job
+        return None
+
     async def initialize(self) -> None:
         async with self._ensure_group_lock:
             if self._redis is None:

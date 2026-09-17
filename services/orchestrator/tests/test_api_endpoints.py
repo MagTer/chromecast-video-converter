@@ -354,6 +354,77 @@ def test_verify_endpoint_persists_compliance_without_status_change(test_app, tmp
     assert denied.status_code == 409
 
 
+def _setup_runtime_library(client, tmp_path, name):
+    from app.dependencies import get_app_dependencies
+
+    client.delete("/api/libraries/runtime")
+    profile_id = _first_profile_id(client)
+    profile_name = client.get(f"/api/profiles/{profile_id}").json()["name"]
+
+    media_root = tmp_path / name
+    media_root.mkdir()
+    library_payload = {
+        "name": "runtime",
+        "root": str(media_root),
+        "depth": "max",
+        "profile_id": profile_id,
+    }
+    assert client.post("/api/libraries", json=library_payload).status_code == 201
+    return get_app_dependencies(), media_root, profile_id, profile_name
+
+
+def test_scan_keeps_inflight_conversion_as_converting(test_app, tmp_path):
+    client, _main = test_app
+    deps, media_root, _profile_id, _profile_name = _setup_runtime_library(
+        client, tmp_path, "inflight"
+    )
+
+    source = media_root / "movie.mkv"
+    source.write_bytes(b"content")
+
+    # First event queues a conversion because no output exists yet.
+    created = client.post(
+        "/api/events", json={"event": "created", "path": str(source), "library": "runtime"}
+    )
+    assert created.status_code == 200
+    assert created.json()["processed"][0]["job"]["job_type"] == "convert"
+
+    # Simulate the worker writing its output while the convert job is still active.
+    output = deps.job_manager.output_path(source)
+    output.write_bytes(b"partial encode")
+
+    modified = client.post(
+        "/api/events", json={"event": "modified", "path": str(source), "library": "runtime"}
+    )
+    assert modified.status_code == 200
+    processed = modified.json()["processed"][0]
+    assert processed["entry"]["status"] == LibraryStatus.CONVERTING
+    assert "job" not in processed
+
+    verify_jobs = [job for job in client.get("/api/jobs").json() if job["job_type"] == "verify"]
+    assert verify_jobs == [], "an in-flight conversion must not queue a verification"
+
+
+def test_scan_queues_verify_for_converted_without_active_job(test_app, tmp_path):
+    client, _main = test_app
+    deps, media_root, _profile_id, _profile_name = _setup_runtime_library(
+        client, tmp_path, "settled"
+    )
+
+    source = media_root / "movie.mkv"
+    source.write_bytes(b"content")
+    output = deps.job_manager.output_path(source)
+    output.write_bytes(b"finished encode")
+
+    created = client.post(
+        "/api/events", json={"event": "created", "path": str(source), "library": "runtime"}
+    )
+    assert created.status_code == 200
+    processed = created.json()["processed"][0]
+    assert processed["entry"]["status"] == LibraryStatus.CONVERTED
+    assert processed["job"]["job_type"] == "verify"
+
+
 def test_library_add_and_delete_marks_entries(test_app, tmp_path):
     client, main = test_app
     profile_id = _first_profile_id(client)

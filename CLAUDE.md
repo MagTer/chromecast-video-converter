@@ -99,3 +99,42 @@ You can simulate a worker over the API alone: claim with `GET /api/jobs/next?wor
 - **Never:** commit secrets/credentials, edit production deployment settings outside `config/` unless requested, or re-enable CPU-only encoding paths as a silent fallback.
 
 Refer to `docs/02_ai_agent_process.md` for the broader collaboration workflow.
+
+## Operational Notes (September 2026)
+
+- **Chromecast profile is now Constrained Baseline @ L3.1** (changed 2026-09-13 in
+  runtime `data/config.db` → `quality.profiles.chromecast`): `bframes 0`,
+  `bufsize 10M`, `adaptive_b_frames false`, max 1280 px. Rationale: legacy
+  Chromecast receivers reject H264 High profile and force real per-playback
+  transcoding on Jellyfin; baseline outputs are accepted and only remuxed
+  (stream copy). Runtime DB is not in git — the decision lives here.
+- **Mass re-encode procedure (2026-09-13, 789 files)**: renamed every
+  `X-chromecast.mp4` → `X.mp4`; watcher/scan then re-queued conversions under
+  the new profile. No originals were left (gen-2 from already-compressed
+  files). Windows lesson: paths >260 chars fail in PowerShell 5.1
+  `Rename-Item`/`Test-Path` even though the file exists — use the `\\?\`
+  prefix with `[System.IO.File]::Move`.
+- **Spurious verify jobs (root-caused & fixed 2026-09-15)**: `is_converted`
+  treats the output as finished as soon as `X-chromecast.mp4` exists with a
+  newer mtime, but ffmpeg creates that file while encoding. The 5-minute scan
+  therefore saw each in-flight encode as `CONVERTED` with `output_compliant is
+  None` and queued a verify (roughly one per conversion). The verdict itself
+  *is* persisted on completion (`sync_entry_from_job`) — the verify was
+  redundant and accumulated because the single worker only served converts.
+  Fixes: (1) the worker encodes to `X-chromecast.part.mp4` and atomically
+  `os.replace`s it after `_validate_output` (the scanner ignores the `.part`
+  name), and (2) `record_library_entry` keeps `converting` and skips the verify
+  while `JobManager.active_job_for_path` reports an in-flight convert job.
+  Legacy queued verify jobs are harmless — do not bulk-XDEL in-flight work.
+- **ffprobe over the Docker Desktop 9p/drvfs mount is slow** (minutes for
+  multi-GB files under load). `GPU_FFPROBE_TIMEOUT` defaults to 120 s and a
+  timeout yields a one-shot error verdict (never retried, since
+  `output_compliant` is then non-NULL). Consider raising it; the delete gate
+  re-probes fresh at deletion time, so a wrong verify verdict is cosmetic.
+- **9p mount flakiness**: scans can transiently report "0 media files" and
+  mark entries `removed` while the host filesystem is fine; it self-heals and
+  the scheduled scan (backstop for lost file events) re-tracks everything.
+  Suspect the mount whenever the queue suddenly looks empty.
+- **Queue hygiene**: the Redis stream retains orphaned entries from earlier
+  eras (worker reads newest first, so they never run). Harmless but visible
+  in the dashboard job list; can be trimmed with a one-off XDEL/XTRIM pass.

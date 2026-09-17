@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 from app.config import ConfigService, JellyfinConfig, sanitize_config
+from pydantic import ValidationError
 
 
 @pytest.fixture()
@@ -43,3 +44,34 @@ def test_reload_refreshes_snapshot(config_db):
     second_revision = service.reload().revision
 
     assert second_revision >= first_revision
+
+
+def test_seed_defaults_to_baseline_profile(config_db):
+    service = ConfigService(config_db)
+
+    profile = service.snapshot.config.profile_named("chromecast")
+    for variant in (profile.gpu, profile.cpu):
+        assert variant.profile == "baseline"
+        assert variant.level == "3.1"
+        assert variant.bufsize == "10M"
+        assert variant.bframes == 0
+        assert variant.adaptive_b_frames is False
+
+
+def test_bufsize_above_level_limit_rejected(config_db):
+    service = ConfigService(config_db)
+
+    chromecast_profile = service.snapshot.config.profile_named("chromecast").model_dump()
+    chromecast_profile["gpu"]["bufsize"] = "20M"  # level 3.1 caps at 10 Mbit
+    with pytest.raises(ValidationError):
+        service.update_profile("chromecast", chromecast_profile)
+
+
+def test_bufsize_within_level_limit_accepted(config_db):
+    service = ConfigService(config_db)
+
+    chromecast_profile = service.snapshot.config.profile_named("chromecast").model_dump()
+    chromecast_profile["gpu"]["level"] = "4.1"
+    chromecast_profile["gpu"]["bufsize"] = "20M"  # within 4.1's 24 Mbit cap
+    refreshed = service.update_profile("chromecast", chromecast_profile)
+    assert refreshed.config.profile_named("chromecast").gpu.bufsize == "20M"

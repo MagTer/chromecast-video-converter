@@ -35,19 +35,19 @@ DEFAULT_CONFIG: Dict[str, Any] = {
             "gpu": {
                 "mode": "gpu",
                 "codec": "h264",
-                "profile": "high",
-                "level": "4.1",
+                "profile": "baseline",
+                "level": "3.1",
                 "resolution": "1280x720",
                 "max_fps": 30,
                 "bitrate": "3M",
                 "max_bitrate": "8M",
-                "bufsize": "20M",
+                "bufsize": "10M",
                 "preset": "p7",
                 "rc": "vbr_hq",
                 "cq": 18,
-                "bframes": 3,
+                "bframes": 0,
                 "lookahead": 32,
-                "adaptive_b_frames": True,
+                "adaptive_b_frames": False,
                 "aq": True,
                 "spatial_aq": True,
                 "temporal_aq": True,
@@ -61,19 +61,19 @@ DEFAULT_CONFIG: Dict[str, Any] = {
             "cpu": {
                 "mode": "cpu",
                 "codec": "h264",
-                "profile": "high",
-                "level": "4.1",
+                "profile": "baseline",
+                "level": "3.1",
                 "resolution": "1280x720",
                 "max_fps": 30,
                 "bitrate": "3M",
                 "max_bitrate": "8M",
-                "bufsize": "20M",
+                "bufsize": "10M",
                 "preset": "veryslow",
                 "rc": "vbr",
                 "cq": 18,
-                "bframes": 3,
+                "bframes": 0,
                 "lookahead": 32,
-                "adaptive_b_frames": True,
+                "adaptive_b_frames": False,
                 "aq": True,
                 "spatial_aq": True,
                 "temporal_aq": True,
@@ -148,6 +148,32 @@ def _minimum_level_for_resolution(resolution: str, fps: int) -> float:
     raise ValueError("Unsupported resolution/FPS combination.")
 
 
+# H.264 CPB (decoder buffer) limits in bits, per level. Exceeding these makes
+# NVENC refuse the encode outright, so they are enforced at validation time.
+_LEVEL_BUFFER_LIMITS: Dict[float, int] = {
+    3.0: 10_000_000,
+    3.1: 10_000_000,
+    4.0: 14_000_000,
+    4.1: 24_000_000,
+    4.2: 34_000_000,
+}
+
+
+def _level_buffer_limit(level: str) -> Optional[int]:
+    """Return the CPB limit for a level, clamping unknown levels to the table."""
+
+    try:
+        level_value = float(level)
+    except ValueError:
+        return None
+    if level_value in _LEVEL_BUFFER_LIMITS:
+        return _LEVEL_BUFFER_LIMITS[level_value]
+    known = sorted(_LEVEL_BUFFER_LIMITS)
+    if level_value < known[0]:
+        return _LEVEL_BUFFER_LIMITS[known[0]]
+    return _LEVEL_BUFFER_LIMITS[known[-1]]
+
+
 def _validate_profile(profile: str, level: str, resolution: str, fps: int) -> None:
     allowed_profiles = {"baseline", "main", "high"}
     if profile.lower() not in allowed_profiles:
@@ -181,7 +207,9 @@ def _bitrate_to_int(value: str) -> int:
     return int(float(normalized))
 
 
-def _validate_bitrates(bitrate: str, max_bitrate: str, bufsize: str, audio_bitrate: str) -> None:
+def _validate_bitrates(
+    bitrate: str, max_bitrate: str, bufsize: str, audio_bitrate: str, level: str
+) -> None:
     try:
         target_rate = _bitrate_to_int(bitrate)
         maxrate = _bitrate_to_int(max_bitrate)
@@ -197,6 +225,12 @@ def _validate_bitrates(bitrate: str, max_bitrate: str, bufsize: str, audio_bitra
         raise ValueError("Chromecast Gen 2 cannot exceed ~12 Mbps video bitrate.")
     if bufsize_value > 24_000_000:
         raise ValueError("Buffer size must remain within Chromecast Gen 2 decoder limits.")
+    level_limit = _level_buffer_limit(level)
+    if level_limit is not None and bufsize_value > level_limit:
+        raise ValueError(
+            f"Buffer size {bufsize} exceeds the H.264 level {level} decoder limit "
+            f"({level_limit // 1_000_000} Mbit); lower bufsize or raise the level."
+        )
     if audio_rate > 512_000:
         raise ValueError("Audio bitrate must remain below 512 kbps for Chromecast Gen 2.")
 
@@ -363,7 +397,9 @@ class HardwareProfile(BaseModel):
         _validate_codecs(values.codec, values.audio.codec)
         _validate_profile(values.profile, values.level, values.resolution, values.max_fps)
         _validate_resolution(values.resolution)
-        _validate_bitrates(values.bitrate, values.max_bitrate, values.bufsize, values.audio.bitrate)
+        _validate_bitrates(
+            values.bitrate, values.max_bitrate, values.bufsize, values.audio.bitrate, values.level
+        )
 
         rc_mode = values.rc.lower()
         if mode == "gpu" and rc_mode == "cbr":

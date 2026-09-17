@@ -223,6 +223,17 @@ async def record_library_entry(
         entry_status_for_path, resolved_path
     )
 
+    # A convert job still in flight means the worker is writing this file right
+    # now. `is_converted` only checks that the output exists, so without this a
+    # scan can mistake a partial encode for a finished one and queue a spurious
+    # verification (and briefly show the entry as converted).
+    if status == LibraryStatus.CONVERTED:
+        active_job = await get_app_dependencies().job_manager.active_job_for_path(
+            str(resolved_path)
+        )
+        if active_job is not None:
+            status = LibraryStatus.CONVERTING
+
     entry = get_app_dependencies().library_entry_store.upsert(
         EntryUpdate(
             path=str(resolved_path),
