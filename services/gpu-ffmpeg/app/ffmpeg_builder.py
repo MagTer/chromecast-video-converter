@@ -105,12 +105,32 @@ class VideoStreamInfo:
             return None
         return value if value > 0 else None
 
+    # Explicit colour-transfer tags. HDR10 uses PQ (smpte2084), HLG uses
+    # arib-std-b67; everything here is unambiguously SDR.
+    _HDR_TRANSFERS = {"smpte2084", "arib-std-b67"}
+    _SDR_TRANSFERS = {
+        "bt709",
+        "bt601",
+        "smpte170m",
+        "smpte240m",
+        "bt470bg",
+        "bt470m",
+        "linear",
+        "iec61966-2-1",
+        "iec61966-2-4",
+    }
+
     def is_hdr(self) -> bool:
-        if self.color_transfer and self.color_transfer.lower() in {
-            "smpte2084",
-            "arib-std-b67",
-        }:
+        transfer = (self.color_transfer or "").lower()
+        if transfer in self._HDR_TRANSFERS:
             return True
+        if transfer in self._SDR_TRANSFERS:
+            # Explicitly tagged SDR. Residual mastering/CLL side data (copied
+            # from an HDR source, or left behind by a tonemap) must not make the
+            # stream look like HDR.
+            return False
+        # Untagged/unknown transfer (e.g. Dolby Vision without VUI tags): fall
+        # back to the HDR side data the decoder reported.
         if self.side_data_list:
             for item in self.side_data_list:
                 if item.get("side_data_type", "").lower() in {
@@ -538,16 +558,24 @@ class FFmpegBuilder:
                         "Interlaced content detected but no deinterlace filter is available"
                     )
             if use_cpu_tonemap:
+                # Tonemap at the final frame size. zscale aborts on odd
+                # dimensions for 4:2:0 ("image dimensions must be divisible by
+                # subsampling factor"), and force_divisible_by=2 here fixes that
+                # before the zscale/tonemap chain instead of after it. Doing the
+                # downscale first also makes tonemapping 4K HDR inputs far
+                # cheaper.
+                filters.append(f"scale={self._scale_dimension_args(target_width, target_height)}")
                 filters.extend(self._cpu_tonemap_filters(video_stream))
             # Scale after hwupload only when the pipeline explicitly asks for GPU
             # scaling and the encode also happens on the GPU.
             scale_after_upload = (
-                needs_scaling
+                not use_cpu_tonemap
+                and needs_scaling
                 and scale_type == "gpu"
                 and encode_type == "gpu"
                 and gpu_scale_filter is not None
             )
-            if needs_scaling and not scale_after_upload:
+            if needs_scaling and not scale_after_upload and not use_cpu_tonemap:
                 filters.append(f"scale={self._scale_dimension_args(target_width, target_height)}")
             if fps_fragment:
                 filters.append(fps_fragment)
@@ -638,6 +666,13 @@ class FFmpegBuilder:
             "zscale=t=linear:npl=100",
             "tonemap=hable:desat=0",
             "zscale=p=bt709:t=bt709:m=bt709:r=tv",
+            # Drop the HDR static metadata the decoder exposed as frame side
+            # data. The encoder would otherwise re-emit it (as SEI) and the MP4
+            # muxer would write mdcv/clli boxes, making an SDR output still
+            # carry HDR metadata.
+            "sidedata=delete:type=MASTERING_DISPLAY_METADATA",
+            "sidedata=delete:type=CONTENT_LIGHT_LEVEL",
+            "sidedata=delete:type=DYNAMIC_HDR_PLUS",
         ]
 
     def _cpu_deinterlace_filter(self) -> str | None:
@@ -919,7 +954,9 @@ class FFmpegBuilder:
 
         if tonemapped:
             # The zscale/tonemap chain converts to BT.709; tag the output so
-            # players do not misinterpret the stream as BT.2020/PQ.
+            # players do not misinterpret the stream as BT.2020/PQ. HDR static
+            # metadata is stripped inside the filter chain (sidedata=delete) so
+            # the encoder/muxer cannot re-emit it.
             main_options.extend(
                 [
                     "-colorspace:v",
