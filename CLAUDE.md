@@ -140,6 +140,15 @@ Refer to `docs/02_ai_agent_process.md` for the broader collaboration workflow.
   now trusts an explicit SDR transfer (bt709 etc.) over residual side data;
   untagged transfers still fall back to side data. Existing affected outputs
   (HDR/DV movies) must be reprocessed (force) to gain the clean SDR metadata.
+- **GPU decode robustness (2026-09-15)**: two independent bugs forced HDR
+  conversions onto the CPU retry ladder. (1) GPU decode now uses the explicit
+  `{codec}_cuvid` NVDEC decoder (e.g. `h264_cuvid`) when available — the generic
+  `-hwaccel cuda` path fails with `CUDA_ERROR_INVALID_VALUE` on some streams
+  (e.g. odd-width H.264) that CUVID handles fine. (2) `hwdownload` now maps to
+  the surface's native software format (`nv12` for 8-bit, `p010le` for 10-bit);
+  requesting `format=yuv420p` directly failed with "Invalid output format
+  yuv420p for hwframe download". Note HDR tonemapping itself still runs on the
+  CPU by design, so those files remain slower than plain SDR conversions.
 - **ffprobe over the Docker Desktop 9p/drvfs mount is slow** (minutes for
   multi-GB files under load). `GPU_FFPROBE_TIMEOUT` defaults to 120 s and a
   timeout yields a one-shot error verdict (never retried, since
