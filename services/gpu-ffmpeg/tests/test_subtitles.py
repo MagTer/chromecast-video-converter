@@ -103,6 +103,53 @@ def test_extract_text_subtitles_tolerates_failure(monkeypatch, tmp_path):
     assert len(commands) == 2  # both candidates attempted, neither raised
 
 
+def test_extract_text_subtitles_skips_embedded_stream(monkeypatch, tmp_path):
+    output = tmp_path / "movie-chromecast.mp4"
+    commands: list[list[str]] = []
+    _patch_ffmpeg(monkeypatch, commands)
+
+    analysis = {
+        "streams": [
+            {"codec_type": "subtitle", "codec_name": "subrip", "tags": {"language": "eng"}},
+            {
+                "codec_type": "subtitle",
+                "codec_name": "subrip",
+                "tags": {"language": "eng", "title": "SDH"},
+            },
+        ]
+    }
+    extracted = asyncio.run(
+        worker._extract_text_subtitles(
+            tmp_path / "movie.mkv", output, analysis, skip_stream_indices={1}
+        )
+    )
+
+    # The SDH stream is already muxed into the output, so only the plain
+    # English track becomes a sidecar.
+    maps = [cmd[cmd.index("-map") + 1] for cmd in commands]
+    assert maps == ["0:s:0"]
+    assert [p.name for p in extracted] == ["movie-chromecast.eng.sub0.srt"]
+
+
+class FakeSubtitleStream:
+    def __init__(self, input_index: int):
+        self.input_index = input_index
+
+
+def test_embedded_subtitle_input_indices_reads_selection():
+    class BuilderWithSelection:
+        selected_subtitle_streams = None
+
+        def select_subtitle_streams(self):
+            return [FakeSubtitleStream(0), FakeSubtitleStream(2)], 0
+
+    class BuilderWithoutSelection:
+        selected_subtitle_streams = None
+
+    assert worker._embedded_subtitle_input_indices(BuilderWithSelection()) == {0, 2}
+    assert worker._embedded_subtitle_input_indices(BuilderWithoutSelection()) == set()
+
+
 def test_subtitle_report_flags_lost_subtitles(monkeypatch, tmp_path):
     source = tmp_path / "movie.mkv"
     output = tmp_path / "movie-chromecast.mp4"

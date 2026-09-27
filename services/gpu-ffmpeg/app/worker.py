@@ -912,16 +912,58 @@ def _existing_sidecars(output_path: Path) -> list[Path]:
     )
 
 
-async def _extract_text_subtitles(source: Path, output_path: Path, analysis: dict) -> list[Path]:
+def _make_builder(analysis: dict, source: Path, output_path: Path) -> FFmpegBuilder:
+    return FFmpegBuilder(
+        analysis,
+        source,
+        output_path,
+        PROFILES,
+        FFMPEG_CAPABILITIES,
+        HOST_ENVIRONMENT,
+        language_preferences=LANGUAGE_PREFERENCES,
+    )
+
+
+def _embedded_subtitle_input_indices(builder: FFmpegBuilder) -> set[int]:
+    """Source subtitle indices the builder embeds in the output.
+
+    Falls back to an empty set when the builder cannot report a selection, so
+    the failure mode is the old behaviour (extract all sidecars) rather than
+    dropping a subtitle.
+    """
+    selected = getattr(builder, "selected_subtitle_streams", None)
+    if selected is None:
+        selector = getattr(builder, "select_subtitle_streams", None)
+        if selector is None:
+            return set()
+        selected, _ = selector()
+    return {stream.input_index for stream in selected}
+
+
+async def _extract_text_subtitles(
+    source: Path,
+    output_path: Path,
+    analysis: dict,
+    skip_stream_indices: set[int] | None = None,
+) -> list[Path]:
     """Export text subtitles in preferred languages as .srt sidecars.
 
     Bitmap subtitles (PGS/VobSub) cannot become text without OCR; they are
     covered by the delete gate instead. Extraction failures never fail the
-    conversion job.
+    conversion job. ``skip_stream_indices`` holds subtitle streams already
+    embedded in the output, whose sidecars would only duplicate the muxed track.
     """
     extracted: list[Path] = []
+    skip = skip_stream_indices or set()
     for position, stream in enumerate(_subtitle_streams(analysis)):
         if not _is_text_subtitle(stream):
+            continue
+        if position in skip:
+            LOGGER.info(
+                "Subtitle stream 0:s:%s of %s is embedded in the output; skipping sidecar",
+                position,
+                source,
+            )
             continue
         language = (stream.get("tags") or {}).get("language")
         if language and language.lower() not in EXPORT_SUBTITLE_LANGUAGES:
@@ -1185,7 +1227,13 @@ async def process_job(client: httpx.AsyncClient, job: dict) -> None:  # noqa: C9
 
         if not job.get("force", False) and await _validate_output(output_path, duration):
             message = f"Output already present at {output_path}; skipping encode"
-            sidecars = await _extract_text_subtitles(playback_target, output_path, analysis)
+            selection_builder = _make_builder(analysis, playback_target, output_path)
+            sidecars = await _extract_text_subtitles(
+                playback_target,
+                output_path,
+                analysis,
+                skip_stream_indices=_embedded_subtitle_input_indices(selection_builder),
+            )
             compliance = await _probe_output_compliance(output_path)
             subtitle_report = await _subtitle_report(
                 playback_target, output_path, source_analysis=analysis, sidecars=sidecars
@@ -1216,15 +1264,7 @@ async def process_job(client: httpx.AsyncClient, job: dict) -> None:  # noqa: C9
         # Clean up any partial file left behind by a crashed/aborted attempt so
         # ffmpeg never appends to stale data.
         writing_path.unlink(missing_ok=True)
-        builder = FFmpegBuilder(
-            analysis,
-            playback_target,
-            writing_path,
-            PROFILES,
-            FFMPEG_CAPABILITIES,
-            HOST_ENVIRONMENT,
-            language_preferences=LANGUAGE_PREFERENCES,
-        )
+        builder = _make_builder(analysis, playback_target, writing_path)
         try:
             command = builder.build()
         except RuntimeError as exc:
@@ -1273,7 +1313,12 @@ async def process_job(client: httpx.AsyncClient, job: dict) -> None:  # noqa: C9
             # Publish only fully-validated output so a scan can never mistake a
             # partial encode for a finished one (which queued spurious verifies).
             _finalize_output(writing_path, output_path)
-            sidecars = await _extract_text_subtitles(playback_target, output_path, analysis)
+            sidecars = await _extract_text_subtitles(
+                playback_target,
+                output_path,
+                analysis,
+                skip_stream_indices=_embedded_subtitle_input_indices(builder),
+            )
             compliance = await _probe_output_compliance(output_path)
             subtitle_report = await _subtitle_report(
                 playback_target, output_path, source_analysis=analysis, sidecars=sidecars

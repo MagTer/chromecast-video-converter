@@ -371,6 +371,53 @@ def test_embedded_subtitles(tmp_path):
     assert "srt" not in command
 
 
+def test_build_records_embedded_subtitle_indices(tmp_path):
+    analysis = {
+        "profile": "chromecast",
+        "streams": [
+            {"codec_type": "video"},
+            {"codec_type": "audio", "tags": {"language": "eng"}},
+            {"codec_type": "subtitle", "codec_name": "subrip", "tags": {"language": "eng"}},
+            {
+                "codec_type": "subtitle",
+                "codec_name": "subrip",
+                "tags": {"language": "eng", "title": "SDH"},
+            },
+        ],
+    }
+    builder = FFmpegBuilder(
+        analysis,
+        tmp_path / "in.mkv",
+        tmp_path / "out.mp4",
+        PROFILES,
+        make_capabilities(),
+        {"is_wsl2": False},
+    )
+    builder.build()
+
+    assert [s.input_index for s in builder.selected_subtitle_streams] == [0]
+
+
+def test_select_subtitle_streams_empty_when_embedding_disabled(tmp_path):
+    analysis = {
+        "profile": "chromecast",
+        "skip_embedded_subtitles": True,
+        "streams": [
+            {"codec_type": "video"},
+            {"codec_type": "subtitle", "codec_name": "subrip", "tags": {"language": "eng"}},
+        ],
+    }
+    builder = FFmpegBuilder(
+        analysis,
+        tmp_path / "in.mkv",
+        tmp_path / "out.mp4",
+        PROFILES,
+        make_capabilities(),
+        {"is_wsl2": False},
+    )
+    assert builder.select_subtitle_streams() == ([], None)
+
+
 def _build_command(analysis, tmp_path, profiles=None, capabilities=None):
     builder = FFmpegBuilder(
         analysis,

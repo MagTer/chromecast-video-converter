@@ -3,7 +3,7 @@ import re
 from dataclasses import dataclass
 from fractions import Fraction
 from pathlib import Path
-from typing import Iterable, Sequence
+from typing import Iterable, Sequence, cast
 
 from .capabilities import EncoderCapabilities, FfmpegCapabilities
 
@@ -272,6 +272,9 @@ class FFmpegBuilder:
         self.host_environment = host_environment
         self.language_preferences = tuple(language_preferences or DEFAULT_LANGUAGE_PREFERENCES)
         self.embed_subtitles = not bool(analysis.get("skip_embedded_subtitles"))
+        # Populated by build(); lets the worker skip sidecars for tracks that
+        # are already muxed into the output (see select_subtitle_streams).
+        self.selected_subtitle_streams: list[SubtitleStreamInfo] | None = None
 
     # --------------- Language helpers --------------- #
     def _normalize_language(self, language: str | None) -> str | None:
@@ -472,7 +475,7 @@ class FFmpegBuilder:
 
     def _build_disposition_flags(
         self,
-        mapped_streams: list[AudioStreamInfo | SubtitleStreamInfo],
+        mapped_streams: Sequence[AudioStreamInfo | SubtitleStreamInfo],
         default_idx: int | None,
         stream_type: str,
     ) -> list[str]:
@@ -765,6 +768,33 @@ class FFmpegBuilder:
         command.extend(["-i", str(self.input_path)])
         return command
 
+    def select_subtitle_streams(self) -> tuple[list[SubtitleStreamInfo], int | None]:
+        """Subtitle streams that will be embedded in the output.
+
+        Bitmap codecs are dropped (no text without OCR) and nothing is selected
+        when embedding is disabled for the analysis. The returned input indices
+        let the worker skip sidecar exports for tracks already muxed into the
+        MP4 — otherwise the same subtitle shows up twice (muxed track plus an
+        equivalent .srt).
+        """
+        _, _, subtitle_streams = self._parse_streams(self.analysis.get("streams", []) or [])
+        valid_subs: list[SubtitleStreamInfo] = []
+        for sub in subtitle_streams:
+            codec = (sub.codec_name or "").lower()
+            if codec in SUPPORTED_SUBTITLE_CODECS:
+                valid_subs.append(sub)
+            else:
+                LOGGER.warning(
+                    "Skipping unsupported bitmap subtitle stream %s (codec %s)",
+                    sub.input_index,
+                    codec,
+                )
+        if not self.embed_subtitles:
+            LOGGER.info("Skipping embedded subtitles (extraction flagged) for %s", self.input_path)
+            return [], None
+        selected, default_idx = self._select_priority_streams(valid_subs)
+        return cast("list[SubtitleStreamInfo]", selected), default_idx
+
     # --------------- Build --------------- #
     def build(self) -> list[str]:  # noqa: C901
         profile, pipeline = self._resolve_profile()
@@ -772,7 +802,7 @@ class FFmpegBuilder:
         encode_type = (pipeline.get("encode_type") or "gpu").lower()
 
         streams = self.analysis.get("streams", []) or []
-        video_streams, audio_streams, subtitle_streams = self._parse_streams(streams)
+        video_streams, audio_streams, _ = self._parse_streams(streams)
         video_stream = video_streams[0] if video_streams else None
 
         # Smart Bitrate Clamping. Prefer the video stream's own bitrate; the
@@ -824,25 +854,9 @@ class FFmpegBuilder:
                     profile.bitrate = str(max_br)
 
         # Robust Subtitle Handling
-        valid_subs = []
-        for sub in subtitle_streams:
-            codec = (sub.codec_name or "").lower()
-            if codec in SUPPORTED_SUBTITLE_CODECS:
-                valid_subs.append(sub)
-            else:
-                LOGGER.warning(
-                    "Skipping unsupported bitmap subtitle stream %s (codec %s)",
-                    sub.input_index,
-                    codec,
-                )
-        subtitle_streams = valid_subs
-
         selected_audio, default_audio_idx = self._select_priority_streams(audio_streams)
-        selected_subtitles, default_sub_idx = self._select_priority_streams(subtitle_streams)
-        if not self.embed_subtitles:
-            LOGGER.info("Skipping embedded subtitles (extraction flagged) for %s", self.input_path)
-            selected_subtitles = []
-            default_sub_idx = None
+        selected_subtitles, default_sub_idx = self.select_subtitle_streams()
+        self.selected_subtitle_streams = selected_subtitles
 
         # 1. Base Command (Input)
         command: list[str] = self._ffmpeg_base_command(decode_type)
