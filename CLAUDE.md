@@ -121,9 +121,11 @@ Refer to `docs/02_ai_agent_process.md` for the broader collaboration workflow.
   None` and queued a verify (roughly one per conversion). The verdict itself
   *is* persisted on completion (`sync_entry_from_job`) — the verify was
   redundant and accumulated because the single worker only served converts.
-  Fixes: (1) the worker encodes to `X-chromecast.part.mp4` and atomically
+  Fixes: (1) the worker encodes to `X-chromecast.mp4.part` and atomically
   `os.replace`s it after `_validate_output` (the scanner ignores the `.part`
-  name), and (2) `record_library_entry` keeps `converting` and skips the verify
+  name, and the trailing `.part` also keeps Jellyfin from treating the
+  in-progress file as a video), and (2) `record_library_entry` keeps
+  `converting` and skips the verify
   while `JobManager.active_job_for_path` reports an in-flight convert job.
   Legacy queued verify jobs are harmless — do not bulk-XDEL in-flight work.
 - **HDR tonemap fixes (2026-09-15)**: (1) `_build_filter_chain` now scales to

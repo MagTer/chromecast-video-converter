@@ -84,12 +84,12 @@ def _patch_process_job(monkeypatch, recorder, *, return_code: int):
     monkeypatch.setattr(worker, "_maybe_remove_original", fake_remove_original)
 
 
-def test_temporary_output_path_keeps_mp4_suffix_and_part_marker():
+def test_temporary_output_path_appends_trailing_part_suffix():
     output = Path("/media/series/episode-chromecast.mp4")
     temp = worker._temporary_output_path(output)
     assert temp != output
-    assert temp.suffix == ".mp4"
-    assert temp.name == "episode-chromecast.part.mp4"
+    assert temp.suffix == ".part"
+    assert temp.name == "episode-chromecast.mp4.part"
 
 
 def test_successful_encode_publishes_validated_output_atomically(monkeypatch, tmp_path):
@@ -103,7 +103,7 @@ def test_successful_encode_publishes_validated_output_atomically(monkeypatch, tm
     asyncio.run(worker.process_job(client=NO_CLIENT, job=job))
 
     final = tmp_path / "episode-chromecast.mp4"
-    temp = tmp_path / "episode-chromecast.part.mp4"
+    temp = tmp_path / "episode-chromecast.mp4.part"
     assert final.exists(), "validated output must be published at the final path"
     assert final.read_bytes() == b"encoded content"
     assert not temp.exists(), "temporary output must not survive a successful encode"
@@ -121,5 +121,5 @@ def test_failed_encode_leaves_no_output_or_partial_file(monkeypatch, tmp_path):
     asyncio.run(worker.process_job(client=NO_CLIENT, job=job))
 
     assert not (tmp_path / "episode-chromecast.mp4").exists()
-    assert not (tmp_path / "episode-chromecast.part.mp4").exists()
+    assert not (tmp_path / "episode-chromecast.mp4.part").exists()
     assert recorder.calls[-1]["status"] == "failed"

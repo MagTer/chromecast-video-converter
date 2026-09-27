@@ -1034,6 +1034,9 @@ class FFmpegBuilder:
         # 4. Assemble Command
         # Add main output options + main output path
         command.extend(main_options)
+        # The output may be written to a trailing-".part" scratch file whose
+        # extension does not imply a muxer, so name the container explicitly.
+        command.extend(["-f", "mp4"])
         command.append(str(self.output_path))
 
         return command

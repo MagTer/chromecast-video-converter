@@ -877,12 +877,14 @@ def _build_output_path(source: Path) -> Path:
 def _temporary_output_path(output_path: Path) -> Path:
     """Path ffmpeg writes to before the validated output is atomically renamed.
 
-    The ``.mp4`` suffix lets ffmpeg infer the muxer, and the inherited
-    ``-chromecast`` prefix keeps the orchestrator's scanner from treating an
-    in-progress file as a finished output (see ``should_track_file`` and
-    ``is_converted``).
+    The ``.part`` suffix (trailing, so the final extension is no longer a video
+    one) keeps media servers such as Jellyfin from picking up the in-progress
+    file, while the inherited ``-chromecast`` stem keeps the orchestrator's
+    scanner from treating it as a finished output (see ``should_track_file``
+    and ``is_converted``). ffmpeg can no longer infer the muxer from the name,
+    so the builder passes ``-f mp4`` explicitly.
     """
-    return output_path.with_name(f"{output_path.stem}.part{output_path.suffix}")
+    return output_path.with_name(f"{output_path.name}.part")
 
 
 def _finalize_output(writing_path: Path, output_path: Path) -> None:
