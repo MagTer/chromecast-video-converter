@@ -128,3 +128,26 @@ def test_run_conversion_handles_missing_binary(monkeypatch):
 
     assert code == 127
     assert logs == ["ffmpeg not found"]
+
+
+def test_telemetry_loop_self_heals_sustained_gpu_loss(monkeypatch):
+    calls = {"count": 0}
+
+    def fake_snapshot():
+        calls["count"] += 1
+        return {"available": False, "message": "nvidia-smi not installed"}
+
+    async def fake_publish(*args, **kwargs):  # noqa: ARG001
+        return None
+
+    monkeypatch.setattr(worker, "snapshot_gpu_state", fake_snapshot)
+    monkeypatch.setattr(worker, "publish_worker_telemetry", fake_publish)
+    monkeypatch.setattr(worker, "GPU_UNAVAILABLE_RESTART_THRESHOLD", 2)
+
+    async def run_loop():
+        shutdown = asyncio.Event()
+        await worker.telemetry_loop(None, "worker-1", shutdown, interval=0)
+        return shutdown.is_set()
+
+    assert asyncio.run(run_loop()) is True
+    assert calls["count"] == 2

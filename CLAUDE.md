@@ -163,3 +163,20 @@ Refer to `docs/02_ai_agent_process.md` for the broader collaboration workflow.
 - **Queue hygiene**: the Redis stream retains orphaned entries from earlier
   eras (worker reads newest first, so they never run). Harmless but visible
   in the dashboard job list; can be trimmed with a one-off XDEL/XTRIM pass.
+- **GPU device loss in a long-running worker container (2026-10-12)**: convert
+  jobs failed instantly with `GPU unavailable: nvidia-smi not installed` while
+  the host saw the card fine (`nvidia-smi` on Windows: RTX 3060, driver
+  617.42). The `gpu-ffmpeg` container had been up ~2 weeks and its
+  `/dev/nvidia*` nodes were gone; a fresh `--gpus all` container saw the GPU
+  immediately, so the toolkit itself was healthy. Likely trigger: a host
+  driver/Docker Desktop update invalidating the device mapping of a
+  *running* container (inferred, not directly proven — the container predated
+  the change). `docker restart` and `--force-recreate` both re-run the NVIDIA
+  runtime hooks and restore the mapping (verified `nvidia-smi -L` before/after
+  a restart). Recovery is now automatic: the worker's telemetry loop exits
+  after `GPU_UNAVAILABLE_RESTART_THRESHOLD` (default 3, ~90 s at the 30 s
+  telemetry interval) consecutive failed probes and `restart: unless-stopped`
+  brings the container back with a fresh GPU mapping. Manual recovery:
+  `docker compose up -d --force-recreate gpu-ffmpeg`. A `nvidia-smi`
+  healthcheck surfaces the state in `docker ps`. Note a lost GPU kills any
+  in-flight encode anyway, so exiting mid-job loses nothing.

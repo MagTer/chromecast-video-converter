@@ -187,6 +187,11 @@ PROFILES: dict = {}
 OPERATIONAL_CONFIG: dict = {}
 REMOVE_ORIGINAL = False
 GPU_TELEMETRY_INTERVAL = int(os.environ.get("GPU_TELEMETRY_INTERVAL", "30"))
+# A host driver/Docker update can invalidate the /dev/nvidia* mapping of an
+# already-running container; only a restart re-runs the NVIDIA runtime hooks
+# and restores it. After this many consecutive failed GPU probes the worker
+# exits so `restart: unless-stopped` brings it back with a fresh mapping.
+GPU_UNAVAILABLE_RESTART_THRESHOLD = int(os.environ.get("GPU_UNAVAILABLE_RESTART_THRESHOLD", "3"))
 LANGUAGE_PREFERENCES: tuple[str, ...] = DEFAULT_LANGUAGE_PREFERENCES
 # Keep in sync with the "chromecast" profile in the orchestrator's
 # DEFAULT_CONFIG (services/orchestrator/app/config.py).
@@ -809,14 +814,41 @@ async def publish_worker_telemetry(
         LOGGER.debug("Failed to publish GPU telemetry: %s", exc)
 
 
-async def telemetry_loop(client: httpx.AsyncClient, worker_id: str) -> None:
+async def telemetry_loop(
+    client: httpx.AsyncClient,
+    worker_id: str,
+    shutdown: asyncio.Event,
+    interval: float | None = None,
+) -> None:
+    """Publish GPU telemetry and self-heal a lost GPU device mapping.
+
+    When the GPU is unavailable for `GPU_UNAVAILABLE_RESTART_THRESHOLD`
+    consecutive probes the worker can never recover on its own (the running
+    container's device nodes are stale), so it signals shutdown; the container
+    restart policy then re-runs the NVIDIA runtime hooks and re-injects them.
+    """
+    sleep_for = interval if interval is not None else max(GPU_TELEMETRY_INTERVAL, 5)
+    unavailable_streak = 0
     while True:
         try:
             gpu_state = snapshot_gpu_state()
             await publish_worker_telemetry(client, worker_id, gpu_state)
-        except Exception as exc:
+            if gpu_state.get("available"):
+                unavailable_streak = 0
+            else:
+                unavailable_streak += 1
+                if unavailable_streak >= GPU_UNAVAILABLE_RESTART_THRESHOLD:
+                    LOGGER.error(
+                        "GPU unavailable for %d consecutive checks (%s); exiting so the "
+                        "container restarts and the NVIDIA runtime re-injects the devices",
+                        unavailable_streak,
+                        gpu_state.get("message") or "unknown",
+                    )
+                    shutdown.set()
+                    return
+        except Exception as exc:  # noqa: BLE001
             LOGGER.warning("Telemetry loop error: %s", exc)
-        await asyncio.sleep(max(GPU_TELEMETRY_INTERVAL, 5))
+        await asyncio.sleep(sleep_for)
 
 
 async def _ensure_gpu_ready(client: httpx.AsyncClient, job_id: str) -> bool:
@@ -1390,9 +1422,10 @@ async def main() -> None:
     )
     last_pause_reason: Optional[str] = None
     async with httpx.AsyncClient(base_url=ORCHESTRATOR_URL, timeout=30.0) as client:
-        telemetry_task = asyncio.create_task(telemetry_loop(client, WORKER_ID))
+        shutdown = asyncio.Event()
+        telemetry_task = asyncio.create_task(telemetry_loop(client, WORKER_ID, shutdown))
         try:
-            while True:
+            while not shutdown.is_set():
                 paused, reason = await queue_paused(client)
                 if paused:
                     if reason != last_pause_reason:
@@ -1416,6 +1449,9 @@ async def main() -> None:
                 finally:
                     await acknowledge_job(client, job["id"], delivery_id)
                 await asyncio.sleep(1)
+            LOGGER.error(
+                "GPU worker shutting down so the container restarts with a fresh GPU mapping"
+            )
         finally:
             telemetry_task.cancel()
             with suppress(asyncio.CancelledError):
