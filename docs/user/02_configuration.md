@@ -85,12 +85,12 @@ Workers stream telemetry to `/api/workers/telemetry` (GPU names, NVENC capabilit
 `restart: unless-stopped` and the worker's own GPU-loss self-heal both depend on Docker successfully *starting* the container. If the NVIDIA runtime hook crashes at container-create time (observed 2026-10-22), the container stays down and nothing inside it can recover. `scripts/gpu_watchdog.ps1` is the external recovery: it checks the `gpu-ffmpeg` container once per run and, if it is missing, stopped, or unhealthy, runs `docker compose up -d --force-recreate gpu-ffmpeg`. It is idempotent, always exits 0, and only writes to `data/gpu_watchdog.log` when it acts. Register it from Task Scheduler to run every 5 minutes:
 
 ```powershell
-$action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument '-NoProfile -ExecutionPolicy Bypass -File "C:\Development\chromecast-video-converter\scripts\gpu_watchdog.ps1"'
-$trigger = New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Minutes 5) -RepetitionDuration ([TimeSpan]::MaxValue)
+$action = New-ScheduledTaskAction -Execute "wscript.exe" -Argument '//B "C:\Development\chromecast-video-converter\scripts\gpu_watchdog.vbs"'
+$trigger = New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Minutes 5) -RepetitionDuration (New-TimeSpan -Days 3650)
 Register-ScheduledTask -TaskName "chromecast-gpu-watchdog" -Action $action -Trigger $trigger
 ```
 
-Run it as the same user that can reach the Docker CLI (a normal Docker Desktop user is enough). It will also revive a container stopped by hand — disable the task if you want `gpu-ffmpeg` to stay stopped. The path is Windows-specific; on Linux/macOS use a systemd timer or cron entry calling the same `docker compose up -d --force-recreate gpu-ffmpeg`.
+The task launches `scripts/gpu_watchdog.vbs`, which runs the PowerShell script with a hidden window (`window style 0`) — running `powershell.exe` directly from a scheduled task flashes a console window every time it fires. (`-RepetitionDuration` uses 3650 days, not `[TimeSpan]::MaxValue`, which Task Scheduler rejects as out of range.) Run the task as the same user that can reach the Docker CLI (a normal Docker Desktop user is enough). It will also revive a container stopped by hand — disable the task if you want `gpu-ffmpeg` to stay stopped. The path is Windows-specific; on Linux/macOS use a systemd timer or cron entry calling the same `docker compose up -d --force-recreate gpu-ffmpeg`.
 
 ## Logging & retention
 

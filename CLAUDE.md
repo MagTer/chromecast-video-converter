@@ -194,7 +194,8 @@ Refer to `docs/02_ai_agent_process.md` for the broader collaboration workflow.
   self-heal covers a lost device mapping but **not** a crashing NVIDIA runtime
   hook, and a Docker healthcheck only surfaces an unhealthy container — it
   never restarts one. External recovery is the host watchdog
-  `scripts/gpu_watchdog.ps1`, which recreates the container whenever it is
+  `scripts/gpu_watchdog.ps1` (launched hidden via `scripts/gpu_watchdog.vbs`
+  from a 5-minute scheduled task), which recreates the container whenever it is
   missing, stopped, or unhealthy (see `docs/user/02_configuration.md`).
   Telemetry older than `WORKER_TELEMETRY_STALE_SECONDS` (90 s) is now reported
   stale so the dashboard shows `worker offline` instead of a stale "ready".
