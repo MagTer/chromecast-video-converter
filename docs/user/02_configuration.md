@@ -70,7 +70,7 @@ Refer to `services/gpu-ffmpeg/app/worker.py` for authoritative behavior:
 
 - `LOG_LEVEL` / `FFMPEG_LOG_LEVEL` adjust orchestrator-ingested logs and ffmpeg verbosity. The compose default is `INFO`; `DEBUG` is very chatty during encodes and should only be enabled temporarily. ffmpeg's per-tick progress lines (`frame=`, `fps=`, `speed=`, ...) are never shipped to the orchestrator regardless of level.
 - `GPU_POLL_INTERVAL` (default `5s`) controls how often the worker polls for new jobs.
-- `GPU_UNAVAILABLE_RESTART_THRESHOLD` (default `3`) is the number of consecutive failed GPU probes after which the worker exits so its `restart: unless-stopped` policy brings the container back with a fresh GPU device mapping. This self-heals the case where a host driver/Docker update invalidates the `/dev/nvidia*` nodes of an already-running container (jobs would otherwise fail instantly with `GPU unavailable: nvidia-smi not installed`). The `gpu-ffmpeg` healthcheck runs `nvidia-smi -L` so the state is visible in `docker ps`.
+- `GPU_UNAVAILABLE_RESTART_THRESHOLD` (default `3`) is the number of consecutive failed GPU probes after which the worker exits so its `restart: unless-stopped` policy brings the container back with a fresh GPU device mapping. This self-heals the case where a host driver/Docker update invalidates the `/dev/nvidia*` nodes of an already-running container (jobs would otherwise fail instantly with `GPU unavailable: nvidia-smi not installed`). The `gpu-ffmpeg` healthcheck runs `nvidia-smi -L` so the state is visible in `docker ps`. This relies on the restart actually succeeding: on 2026-10-22 the NVIDIA runtime hook segfaulted while Docker created the container, so `restart: unless-stopped` never brought it back and the worker stayed down ~18 h until a manual `docker compose up -d --force-recreate gpu-ffmpeg`. The healthcheck only surfaces that state — Docker does not restart an unhealthy container. The host-side watchdog below provides the external recovery.
 - `GPU_FFPROBE_TIMEOUT`, `GPU_FFMPEG_TIMEOUT`, `GPU_FFMPEG_IDLE_TIMEOUT`, and `GPU_SUBTITLE_TIMEOUT` cap ffprobe, full encoding, no-progress windows, and per-subtitle extraction respectively (`0` disables a limit).
 - After a successful encode the worker exports text subtitles (Swedish/English, plus untagged tracks) as `.srt` sidecar files next to the output. The subtitle stream(s) already embedded in the MP4 are skipped, so one track is not offered both muxed and as a sidecar (e.g. an embedded SDH track plus an identical `.srt`); distinct tracks such as a plain and an SDH variant each remain once. Bitmap subtitles (PGS/VobSub) cannot be converted to text; when none of the source's subtitles survive (neither embedded nor as sidecars), the job message carries a warning and **originals are never deleted** — neither by `remove_original_after_success` nor by delete jobs.
 - `JOB_VISIBILITY_TIMEOUT` must be at least as long as the longest expected encode so Redis does not redeliver an active job.
@@ -78,7 +78,19 @@ Refer to `services/gpu-ffmpeg/app/worker.py` for authoritative behavior:
 - `remove_original_after_success` is read from the `operational` block inside `/api/config`. When `true`, the worker deletes the source only after validating the output duration/size. Library-level removal via the API remains independent of this flag.
 - Language selection currently favors Swedish audio/subtitles, then English. The preference list lives in `FFmpegBuilder.DEFAULT_LANGUAGE_PREFERENCES`.
 
-Workers stream telemetry to `/api/workers/telemetry` (GPU names, NVENC capability flags, ffmpeg filter availability). The queue view consumes this payload to render the `GPU: X/Y ready` pill.
+Workers stream telemetry to `/api/workers/telemetry` (GPU names, NVENC capability flags, ffmpeg filter availability). The queue view consumes this payload to render the `GPU: X/Y ready` pill. Telemetry older than `WORKER_TELEMETRY_STALE_SECONDS` (90 s — three missed beats at the 30 s interval) is reported as stale: the summary gains `online`, `stale`, and per-entry `stale`/`age_seconds`, `available` counts only fresh workers, and the pill shows `GPU: 🔴 worker offline` instead of a stale "ready". The same 90 s threshold drives the dead-worker job reaper (`JobManager.check_dead_workers`), so "worker is gone" has one definition.
+
+### GPU worker watchdog
+
+`restart: unless-stopped` and the worker's own GPU-loss self-heal both depend on Docker successfully *starting* the container. If the NVIDIA runtime hook crashes at container-create time (observed 2026-10-22), the container stays down and nothing inside it can recover. `scripts/gpu_watchdog.ps1` is the external recovery: it checks the `gpu-ffmpeg` container once per run and, if it is missing, stopped, or unhealthy, runs `docker compose up -d --force-recreate gpu-ffmpeg`. It is idempotent, always exits 0, and only writes to `data/gpu_watchdog.log` when it acts. Register it from Task Scheduler to run every 5 minutes:
+
+```powershell
+$action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument '-NoProfile -ExecutionPolicy Bypass -File "C:\Development\chromecast-video-converter\scripts\gpu_watchdog.ps1"'
+$trigger = New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Minutes 5) -RepetitionDuration ([TimeSpan]::MaxValue)
+Register-ScheduledTask -TaskName "chromecast-gpu-watchdog" -Action $action -Trigger $trigger
+```
+
+Run it as the same user that can reach the Docker CLI (a normal Docker Desktop user is enough). It will also revive a container stopped by hand — disable the task if you want `gpu-ffmpeg` to stay stopped. The path is Windows-specific; on Linux/macOS use a systemd timer or cron entry calling the same `docker compose up -d --force-recreate gpu-ffmpeg`.
 
 ## Logging & retention
 

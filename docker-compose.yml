@@ -50,6 +50,9 @@ services:
     # leave a running container without /dev/nvidia* (see CLAUDE.md "GPU device
     # loss"). The worker exits after sustained failed GPU probes and this policy
     # brings it back; the healthcheck surfaces the state in `docker ps`.
+    # Caveat: the policy restarts on process exit only. If the NVIDIA runtime
+    # hook crashes at container-create time the container stays down and the
+    # healthcheck only reports it (2026-10-22) — recovery is external.
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "nvidia-smi -L >/dev/null 2>&1 || exit 1"]

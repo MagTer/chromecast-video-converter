@@ -77,7 +77,7 @@ You can simulate a worker over the API alone: claim with `GET /api/jobs/next?wor
 - Watcher defaults (`WATCH_POLLING`, `EVENT_BUFFER_SECONDS`, `EVENT_SPOOL_FILE`, `EVENT_SPOOL_MAX_BYTES`) and spool replay-on-start behavior are canonical; keep code/docs in sync.
 - Log ingestion keeps `severity`, `source`, `category`, and `request_id` fields end-to-end (worker/watcher handler → `/api/logs/ingest` → `LogIngestEvent` schema → SQLite → `/api/logs` filters). Preserve these when touching logging or telemetry.
 - Logging conventions: worker/watcher handlers attach to the **service-root logger** (`gpu-ffmpeg`, `folder-watcher`) so new module loggers must live under that namespace or their logs never ship to the orchestrator; orchestrator loggers are named `orchestrator.<area>` (not module `__name__`, which would split the source into "app"); store-bound handlers use a plain `%(message)s` formatter — metadata travels as columns, not baked into the text; log messages reference jobs by the short 8-char id (`job_id[:8]`), which the GUI's "View logs" buttons rely on.
-- GPU worker telemetry (`/api/workers/telemetry`) feeds the queue header and the GPU pill tooltip; keep payload shape stable.
+- GPU worker telemetry (`/api/workers/telemetry`) feeds the queue header and the GPU pill tooltip; keep payload shape stable. Telemetry older than `WORKER_TELEMETRY_STALE_SECONDS` (90 s, shared with the dead-worker reaper) is reported stale (`online`/`stale`/`age_seconds`) so a stopped worker is not shown as ready.
 - SQLite schema changes need lightweight ALTER TABLE migrations in the store's `_ensure_schema()` (see `LibraryEntryStore` and `JobHistoryStore`) — `create_all` only creates missing tables.
 
 ## Documentation Expectations
@@ -163,20 +163,38 @@ Refer to `docs/02_ai_agent_process.md` for the broader collaboration workflow.
 - **Queue hygiene**: the Redis stream retains orphaned entries from earlier
   eras (worker reads newest first, so they never run). Harmless but visible
   in the dashboard job list; can be trimmed with a one-off XDEL/XTRIM pass.
-- **GPU device loss in a long-running worker container (2026-10-12)**: convert
-  jobs failed instantly with `GPU unavailable: nvidia-smi not installed` while
-  the host saw the card fine (`nvidia-smi` on Windows: RTX 3060, driver
-  617.42). The `gpu-ffmpeg` container had been up ~2 weeks and its
-  `/dev/nvidia*` nodes were gone; a fresh `--gpus all` container saw the GPU
-  immediately, so the toolkit itself was healthy. Likely trigger: a host
-  driver/Docker Desktop update invalidating the device mapping of a
-  *running* container (inferred, not directly proven — the container predated
-  the change). `docker restart` and `--force-recreate` both re-run the NVIDIA
-  runtime hooks and restore the mapping (verified `nvidia-smi -L` before/after
-  a restart). Recovery is now automatic: the worker's telemetry loop exits
-  after `GPU_UNAVAILABLE_RESTART_THRESHOLD` (default 3, ~90 s at the 30 s
-  telemetry interval) consecutive failed probes and `restart: unless-stopped`
-  brings the container back with a fresh GPU mapping. Manual recovery:
-  `docker compose up -d --force-recreate gpu-ffmpeg`. A `nvidia-smi`
-  healthcheck surfaces the state in `docker ps`. Note a lost GPU kills any
-  in-flight encode anyway, so exiting mid-job loses nothing.
+- **GPU device loss in a long-running worker container (2026-10-12; self-heal
+  found incomplete 2026-10-22)**: convert jobs failed instantly with `GPU
+  unavailable: nvidia-smi not installed` while the host saw the card fine
+  (`nvidia-smi` on Windows: RTX 3060, driver 617.42 at the time). The
+  `gpu-ffmpeg` container had been up ~2 weeks and its `/dev/nvidia*` nodes were
+  gone; a fresh `--gpus all` container saw the GPU immediately, so the toolkit
+  itself was healthy. Likely trigger: a host driver/Docker Desktop update
+  invalidating the device mapping of a *running* container (inferred, not
+  directly proven — the container predated the change). `docker restart` and
+  `--force-recreate` both re-run the NVIDIA runtime hooks and restore the
+  mapping (verified `nvidia-smi -L` before/after a restart). The worker's
+  telemetry loop exits after `GPU_UNAVAILABLE_RESTART_THRESHOLD` (default 3,
+  ~90 s at the 30 s telemetry interval) consecutive failed probes so
+  `restart: unless-stopped` re-runs the hooks with a fresh mapping. Manual
+  recovery: `docker compose up -d --force-recreate gpu-ffmpeg`. A `nvidia-smi`
+  healthcheck surfaces the state in `docker ps`. A lost GPU kills any in-flight
+  encode anyway, so exiting mid-job loses nothing.
+- **The GPU self-heal can itself fail (2026-10-22)**: the exit above worked as
+  designed — the worker logged 3 consecutive failed `nvidia-smi` probes and
+  shut down — but the *restart* never completed. Docker's prestart hook
+  (`nvidia-container-runtime-hook`) segfaulted (`SIGSEGV` in
+  `assertModeIsLegacy`, surfacing as `OCI runtime create failed`), so
+  `restart: unless-stopped` did not bring the container back and `gpu-ffmpeg`
+  stayed down ~18 h until a manual `docker compose up -d --force-recreate
+  gpu-ffmpeg`. The host driver had meanwhile moved 617.42 → 621.01 (consistent
+  with the update-trigger hypothesis, not proof). `RestartCount` was 1 — Docker
+  attempted a single restart and stopped; why it did not keep retrying is not
+  established (`docker events` did not retain the window). So the automatic
+  self-heal covers a lost device mapping but **not** a crashing NVIDIA runtime
+  hook, and a Docker healthcheck only surfaces an unhealthy container — it
+  never restarts one. External recovery is the host watchdog
+  `scripts/gpu_watchdog.ps1`, which recreates the container whenever it is
+  missing, stopped, or unhealthy (see `docs/user/02_configuration.md`).
+  Telemetry older than `WORKER_TELEMETRY_STALE_SECONDS` (90 s) is now reported
+  stale so the dashboard shows `worker offline` instead of a stale "ready".

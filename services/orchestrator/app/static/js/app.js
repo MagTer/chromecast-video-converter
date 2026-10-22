@@ -1091,12 +1091,19 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
       const workerMetrics = state.workers || {};
       if (gpuMetrics) {
         const workerCount = workerMetrics.workers ?? 0;
+        const online = workerMetrics.online ?? workerCount;
         const available = workerMetrics.available ?? 0;
-        const online = workerCount > 0;
-        const statusColor = online ? (available > 0 ? "🟢" : "🟡") : "🔴";
-        gpuMetrics.textContent = `GPU: ${statusColor} ${available}/${workerCount} ready`;
+        let statusColor = "🔴";
+        let label = "no worker";
+        if (online > 0) {
+          statusColor = available > 0 ? "🟢" : "🟡";
+          label = `${available}/${online} ready`;
+        } else if (workerCount > 0) {
+          label = "worker offline";
+        }
+        gpuMetrics.textContent = `GPU: ${statusColor} ${label}`;
         gpuMetrics.className = "status-pill status-idle";
-        if (!online) {
+        if (online === 0) {
           gpuMetrics.className = "status-pill status-paused";
         }
         const telemetry = Array.isArray(workerMetrics.telemetry) ? workerMetrics.telemetry : [];
@@ -1106,7 +1113,8 @@ const navLinks = Array.from(document.querySelectorAll("nav a[data-page]"));
                 const devices = (worker.devices || []).join(", ") || "no devices";
                 const caps = `cuda:${worker.cuda_available ? "yes" : "no"} nvenc:${worker.nvenc_available ? "yes" : "no"}`;
                 const note = worker.message ? ` — ${worker.message}` : "";
-                return `${worker.worker_id}: ${devices} (${caps})${note}`;
+                const staleMark = worker.stale ? ` [stale ${Math.round(worker.age_seconds)}s]` : "";
+                return `${worker.worker_id}: ${devices} (${caps})${note}${staleMark}`;
               })
               .join("\n")
           : "No worker telemetry received yet";

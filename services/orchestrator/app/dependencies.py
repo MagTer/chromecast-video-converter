@@ -1,5 +1,6 @@
 import asyncio
 import os
+from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, Set, Tuple
@@ -133,6 +134,11 @@ def get_app_dependencies() -> AppDependencies:
 
 WORKER_TELEMETRY: Dict[str, WorkerTelemetryPayload] = {}
 
+# A worker publishes telemetry every GPU_TELEMETRY_INTERVAL (30 s). Telemetry
+# older than this is treated as a dead worker (3 missed beats) so a stopped
+# gpu-ffmpeg container is not reported as "ready" from its last payload.
+WORKER_TELEMETRY_STALE_SECONDS = jobs.WORKER_TELEMETRY_STALE_SECONDS
+
 
 # Websocket
 class WebsocketNotifier:
@@ -169,10 +175,34 @@ NOTIFIER = WebsocketNotifier()
 
 
 def worker_metrics_summary() -> Dict[str, Any]:
-    payloads = list(WORKER_TELEMETRY.values())
-    telemetry = [jsonable_encoder(item) for item in payloads]
-    available = sum(1 for item in payloads if item.gpu_available)
-    return {"workers": len(payloads), "available": available, "telemetry": telemetry}
+    now = datetime.now(timezone.utc)
+    telemetry = []
+    online = 0
+    available = 0
+    stale = 0
+    for item in WORKER_TELEMETRY.values():
+        checked_at = item.checked_at
+        if checked_at.tzinfo is None:
+            checked_at = checked_at.replace(tzinfo=timezone.utc)
+        age_seconds = max(0.0, (now - checked_at).total_seconds())
+        is_stale = age_seconds > WORKER_TELEMETRY_STALE_SECONDS
+        encoded = jsonable_encoder(item)
+        encoded["stale"] = is_stale
+        encoded["age_seconds"] = round(age_seconds, 1)
+        telemetry.append(encoded)
+        if is_stale:
+            stale += 1
+            continue
+        online += 1
+        if item.gpu_available:
+            available += 1
+    return {
+        "workers": len(telemetry),
+        "online": online,
+        "available": available,
+        "stale": stale,
+        "telemetry": telemetry,
+    }
 
 
 BASE_DIR = Path(__file__).parent

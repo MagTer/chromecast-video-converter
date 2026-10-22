@@ -15,6 +15,11 @@ from pydantic import BaseModel, Field
 from .context import get_request_id
 from .utils import resolve_media_path
 
+# A worker publishes telemetry every GPU_TELEMETRY_INTERVAL (30 s). Telemetry
+# older than this (3 missed beats) means the worker is gone. One definition:
+# reused by the dead-worker job reaper and by the dashboard's worker metrics.
+WORKER_TELEMETRY_STALE_SECONDS = 90
+
 
 class JobStatus(str):
     PENDING = "pending"
@@ -721,7 +726,7 @@ class JobManager:
         pending_map = await self._pending_message_map()
         failed_count = 0
         now = datetime.now(timezone.utc)
-        threshold_seconds = 90
+        threshold_seconds = WORKER_TELEMETRY_STALE_SECONDS
 
         for job in jobs:
             if job.status != JobStatus.RUNNING or not job.worker_id:

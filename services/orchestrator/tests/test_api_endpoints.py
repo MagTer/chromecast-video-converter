@@ -833,3 +833,41 @@ def test_log_ingest_preserves_request_id_and_filters(test_app):
     # limit is honored and clamped.
     limited = client.get("/api/logs", params={"limit": 1, "min_severity": "ALL"}).json()
     assert len(limited) == 1
+
+
+def test_worker_metrics_report_stale_telemetry(test_app):
+    from datetime import datetime, timedelta, timezone
+
+    from app.dependencies import WORKER_TELEMETRY, worker_metrics_summary
+
+    client, _main = test_app
+    WORKER_TELEMETRY.clear()
+    try:
+        now = datetime.now(timezone.utc)
+        payload = {
+            "worker_id": "worker-1",
+            "gpu_available": True,
+            "devices": ["GPU 0"],
+            "cuda_available": True,
+            "nvenc_available": True,
+            "checked_at": now.isoformat(),
+        }
+        assert client.post("/api/workers/telemetry", json=payload).status_code == 200
+        fresh = worker_metrics_summary()
+        assert fresh["workers"] == 1
+        assert fresh["online"] == 1
+        assert fresh["available"] == 1
+        assert fresh["stale"] == 0
+
+        # A worker that stopped reporting must not keep counting as ready.
+        payload["checked_at"] = (now - timedelta(minutes=10)).isoformat()
+        assert client.post("/api/workers/telemetry", json=payload).status_code == 200
+        stale = worker_metrics_summary()
+        assert stale["workers"] == 1
+        assert stale["online"] == 0
+        assert stale["available"] == 0
+        assert stale["stale"] == 1
+        assert stale["telemetry"][0]["stale"] is True
+        assert stale["telemetry"][0]["age_seconds"] >= 600
+    finally:
+        WORKER_TELEMETRY.clear()
