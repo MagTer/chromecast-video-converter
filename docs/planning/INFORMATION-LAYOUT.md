@@ -19,7 +19,7 @@ unsigned). **Runs only after that U1 is signed.**
 | Today | Goes to |
 |---|---|
 | `CLAUDE.md` content | **`AGENTS.md`** (`git mv`); `CLAUDE.md` = `@AGENTS.md` |
-| `GEMINI.md` | removed: agy's global file is `~/.gemini/config/AGENTS.md` (agent-config `shared/product.list`); whether agy reads a project `AGENTS.md` is **not measured**, so U1 measures it first and keeps `GEMINI.md` as a one-line pointer to `AGENTS.md` if it does not |
+| `GEMINI.md` | removed: agy reads a workspace `AGENTS.md` and a `GEMINI.md` alike — MEASURED 2026-09-07 with canary tokens (agent-config `clients/agy.md`, "The project's own instruction file …") — so `AGENTS.md` alone reaches it. It attaches the file lazily, when a file in this directory is opened, not at turn 0; that section of its profile tells it to open the project file itself. (Corrected 2026-10-31: this row said whether agy reads a project `AGENTS.md` was not measured, and had U1 measure it.) |
 | `docs/02_ai_agent_process.md` | its project-specific rule (GPU-only transcoding, NVENC checks) into AGENTS.md; the rest is `core.md` and leaves the tree, sha named in the commit |
 
 ## 3. Units
