@@ -1,6 +1,6 @@
 # Information layout: aligning chromecast-video-converter with the shared rule
 
-**Status 2026-10-29: PLAN, unsigned. Nothing below is built.** Origin: operator, 2026-10-29
+**Status: PLAN, SIGNED by the operator 2026-11-01. Nothing below is built yet.** Origin: operator, 2026-10-29
 — *"README i rooten är främst för människor, agents.md är projektspecifika tillägg."* The
 rule is agent-config `docs/planning/2026-10-29-project-information-layout.md` (U1 there,
 unsigned). **Runs only after that U1 is signed.**
