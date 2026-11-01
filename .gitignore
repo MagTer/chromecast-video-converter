@@ -36,3 +36,6 @@ logs/
 
 .gemini/
 gha-creds-*.json
+
+# Agent session position file (local to this checkout)
+.agent-state.md

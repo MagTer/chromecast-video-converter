@@ -8,7 +8,7 @@ This directory holds everything needed to run, operate, and extend the Chromecas
 - `user/02_configuration.md` — how runtime configuration is stored, how the dashboard and APIs edit libraries/profiles, and which environment variables tune watcher buffering, GPU worker limits, and log retention.
 - `user/03_api_reference.md` — concise HTTP/WebSocket reference that mirrors the FastAPI routers in `services/orchestrator/app/routers`.
 - `architecture/README.md` — container topology, storage layout, event flow, and the GPU worker pipeline (ffprobe, NVENC, job retries, log fan-out).
-- `02_ai_agent_process.md` — collaboration workflow (planning, quality gates, review-ready handoffs). `AGENTS.md` summarizes the same rules in machine-readable form.
+- `../AGENTS.md` — instructions for coding agents: verification commands, architecture invariants, boundaries.
 - `ROADMAP.md` — future work items and dependency tracking.
 
 See the repository root `README.md` for high-level positioning; all implementation details live here.

@@ -2,7 +2,7 @@
   "exported_at": "2026-09-14",
   "source": "data/config.db key 'quality' (runtime, gitignored)",
   "updated_at": "2026-09-13T17:12:30.969695+00:00",
-  "note": "Working production profile for the chromecast library. Changed 2026-09-13 from High@4.1 to Constrained Baseline@3.1 because legacy Chromecast receivers reject High profile (forces real transcoding on every playback). Baseline outputs are accepted -> Jellyfin only remuxes (stream copy). See CLAUDE.md 'Operational Notes (September 2026)'.",
+  "note": "Working production profile for the chromecast library. Changed 2026-09-13 from High@4.1 to Constrained Baseline@3.1 because legacy Chromecast receivers reject High profile (forces real transcoding on every playback). Baseline outputs are accepted -> Jellyfin only remuxes (stream copy). See AGENTS.md 'Operational Notes (September 2026)'.",
   "value": {
     "libraries": {
       "movies": {
