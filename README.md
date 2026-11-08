@@ -1,3 +1,9 @@
+---
+purpose: A GPU-only transcoding stack that keeps bound media libraries Chromecast Gen 2/3 compatible.
+owns: [the transcoding queue, the GPU ffmpeg workers, the file watchdog]
+does_not_own: []
+depends_on: []
+---
 # Chromecast Video Converter
 
 GPU-only transcoding stack that keeps bound media libraries Chromecast Gen 2/3
